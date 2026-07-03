@@ -1,0 +1,70 @@
+# Root config (seed for a Hydra group tree; §11.2). Sonnet 5 should split this into
+# composable groups (model=, task=, data=, train=, analysis=) but the keys below are
+# the contract the scaffold expects.
+
+paths:
+  data_root: /media/amin/EXTERNAL_USB/SMAF/Research/Representation/Working Memory/data
+  stimuli: ./stimuli                      # ImageTokenBank (broad training pool)
+  results: ./results
+  feature_cache: ./results/feat_cache
+
+# ---- the 2x2x2 factorial (§4.1). S=structure, M=modulation, L=learning ----
+cells: [M000, M001, M010, M011, M100, M101, M110, M111]
+
+model:
+  encoder: resnet18                        # frozen, ImageNet (§0.1, §5.1)
+  feature_dim: 512
+  task_vec_dim: 10
+  bottleneck: 128
+  input_noise_sigma: 0.05
+  flat_units: 256                          # S=0
+  worker_units: 196                        # S=1, LM-RNN on 14x14 grid
+  worker_grid: [14, 14]
+  worker_density: 0.04                     # spatial locality mask target (§5.2)
+  manager_units: 128
+  manager_period: 5                        # T_m (or event-gated when M=1)
+  param_budget_tol: 0.05                   # match flat vs HRL within +-5%
+  readout_scale: 1.0                       # neutral in Core; swept in the oblique sub-exp (§4.3)
+
+mechanisms:
+  reflection_lambda: 0.9                   # R_t leak (§6.1)
+  reflection_beta: 1.0                     # gate bias gain
+  local_rule: node_perturbation            # L=1 default (§6.2); fallback ladder -> e_prop
+  perturb_sigma: 0.05
+  elig_decay: 0.9
+  lr_local: 1.0e-3
+
+task:                                      # image Sternberg (§7.1)
+  loads: [1, 2, 3]
+  encode_steps: 10
+  maintain_steps: 25
+  probe_steps: 10
+  lure_fraction: 0.3
+  n_categories: 4
+
+train:
+  bptt_unroll: 200
+  optimizer: adam
+  lr: 3.0e-4
+  curriculum: [warmup, ramp, target]       # §7.2
+
+# behavioral gates (§14 M7)
+gates:
+  load1_acc: 0.95
+  load3_acc: 0.80
+
+# neural alignment (§8): Tier A pooled = 000469 + 000673
+neural:
+  datasets_tierA: ["000469", "000673"]     # picture Sternberg, MTL+MFC, poolable
+  datasets_tierB: ["001187"]               # MTL replication
+  datasets_tierC: ["000574"]               # verbal, coarse conditions only
+  regions_MTL: [hippocampus, amygdala]
+  regions_MFC: [dACC, preSMA, vmPFC]
+  min_firing_hz: 0.2
+  bin_ms: 50
+
+# compute tiers (§11.3). run_grid reads tiers.<tier> and merges over defaults.
+tiers:
+  smoke: {steps: 100, scaffold_sleep_s: 0.02}
+  dev:   {steps: 20000, scaffold_sleep_s: 0.05}
+  full:  {steps: 150000, scaffold_sleep_s: 0.10}

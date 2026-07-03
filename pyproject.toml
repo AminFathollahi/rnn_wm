@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brainalign_wm"
+version = "0.0.1"
+description = "Bio-plausible inductive biases and human single-neuron working-memory geometry (see protocol_v4_master_prompt.md)"
+requires-python = ">=3.11"
+readme = "README.md"
+# NOTE: torch/torchvision are intentionally NOT listed here. They must be installed
+# from the CUDA-12.8 (sm_120) index for the RTX 5070 Ti via `make setup`
+# (pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision).
+# Listing them here would let pip pull the CPU/PyPI build and shadow the GPU one.
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "scikit-learn",
+    "matplotlib",
+    "h5py",          # reads the DANDI NWB files directly (no pynwb needed)
+    "pyarrow",       # Parquet activity logs
+    "pyyaml",
+    "hydra-core",
+    "omegaconf",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+analysis = [
+    "rsatoolbox",    # crossnobis RDMs + noise ceiling
+    "statsmodels",   # linear mixed-effects
+    "pingouin",      # effect sizes / CIs
+    # "dPCA",        # demixed PCA (optional; add if the PyPI build installs cleanly)
+]
+nwb = ["pynwb", "dandi"]   # optional convenience; h5py path is the default
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["brainalign_wm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

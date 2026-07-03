@@ -84,6 +84,10 @@ train:
   optimizer: adam
   lr: 3.0e-4
   curriculum: [warmup, ramp, target]       # §7.2
+  checkpoint_every: 200                    # trials between checkpoints (M7)
+  eval_trials_per_load: 40                 # trials/load for the final behavioral-gate eval
+  value_loss_weight: 0.5
+  rung_check_frac: 0.5                     # fraction of budget before checking rung-1 gate (L=1 fallback)
 
 # behavioral gates (§14 M7)
 gates:

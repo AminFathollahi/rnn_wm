@@ -34,11 +34,21 @@ class ImageTokenBank:
             )
         self._index = self._build_index()
         rng = np.random.RandomState(self.seed)
-        n = len(self._index)
-        perm = rng.permutation(n)
-        n_test = max(1, int(round(n * self.test_fraction)))
-        self._test_ids = set(perm[:n_test].tolist())
-        self._train_ids = set(perm[n_test:].tolist())
+        # Stratify the train/test split PER CATEGORY (not one global shuffle):
+        # a global split can leave a category with zero test images by chance
+        # (real failure mode with a small pool -- category `sample(..., split="test",
+        # category=c)` then raises "not enough images" for that category).
+        self._test_ids: set[int] = set()
+        self._train_ids: set[int] = set()
+        by_category: dict[str, list[int]] = {}
+        for d in self._index:
+            by_category.setdefault(d["category"], []).append(d["image_id"])
+        for cat, ids in by_category.items():
+            ids = np.array(ids)
+            perm = rng.permutation(len(ids))
+            n_test = max(1, int(round(len(ids) * self.test_fraction))) if len(ids) > 1 else 0
+            self._test_ids.update(ids[perm[:n_test]].tolist())
+            self._train_ids.update(ids[perm[n_test:]].tolist())
 
     def _build_index(self) -> list[dict]:
         index = []

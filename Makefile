@@ -28,8 +28,8 @@ features: ## precompute + cache frozen ResNet features (ImageTokenBank + dataset
 test: ## run unit tests (scaffold + package)
 	$(PY) -m pytest -q
 
-smoke: ## fast end-to-end orchestration check (scaffold stub, 8 cells x 1 seed)
-	$(PY) run_grid.py --scaffold --seeds 1 --budget 120s --tier smoke
+smoke: ## fast end-to-end check with the REAL train_one (8 cells x 1 seed, tiny step budget)
+	$(PY) run_grid.py --seeds 1 --budget 20m --tier smoke
 
 recovery: ## sim-spike geometry-recovery gate (§8.3) -- must pass before real alignment
 	$(PY) -m brainalign_wm.neural.sim_brain.recovery_gate --config configs/config.yaml

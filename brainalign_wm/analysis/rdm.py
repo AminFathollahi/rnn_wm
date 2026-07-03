@@ -1,13 +1,14 @@
-"""Cross-validated Mahalanobis (crossnobis) RDMs (protocol §9.4).
+"""Cross-validated Mahalanobis (crossnobis) representational dissimilarity
+matrices.
 
 Unlike plain squared-Euclidean or correlation distance, crossnobis has
 expectation ~0 under the null (no true condition difference): each distance
 is a dot product of *independent* cross-validation folds' mean differences,
 whitened by an estimated (shrinkage-regularized) noise covariance, so
 positive-bias-inducing self-products never appear. This unbiasedness is
-exactly what makes it safe to compare raw model/brain RDM magnitudes without
-a systematic inflation confound (verified by `test_analysis.py`'s null-data
-test, protocol §11.5).
+exactly what makes it safe to compare raw model/brain RDM magnitudes
+without a systematic inflation confound (verified in `test_analysis.py` by
+a null-data test).
 
 Works agnostically over real per-trial neural data (`NeuralDataset.rates`)
 or model-side per-trial unit activations -- the function only needs
@@ -22,12 +23,12 @@ import numpy as np
 
 def _group_indices(labels: Sequence[Hashable]) -> dict:
     """Pure-Python grouping (label -> list of positions). Deliberately avoids
-    numpy `==`/`unique` on object arrays of tuples: `arr == a_tuple` tries to
-    broadcast the tuple as if it were itself an array axis (silently wrong
-    shape errors), rather than doing the elementwise Python `==` you'd want
-    for opaque object-dtype elements. Condition labels are tuples/strings
-    here (protocol §8.2 `ConditionLabel.coarse_key()`/`.key()`), so this
-    matters -- not just a style choice."""
+    numpy `==`/`unique` on object arrays of tuples: `arr == a_tuple` attempts
+    to broadcast the tuple as if it were itself an array axis, producing a
+    silent shape error rather than the elementwise Python `==` intended for
+    opaque object-dtype elements. Condition labels are tuples or strings
+    here (see `ConditionLabel.coarse_key()`/`.key()`), so this distinction
+    is load-bearing, not a style choice."""
     groups: dict = {}
     for i, lbl in enumerate(labels):
         groups.setdefault(lbl, []).append(i)

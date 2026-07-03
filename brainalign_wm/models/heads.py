@@ -1,10 +1,11 @@
-"""Output heads: policy (fixation/yes/no) and value (protocol §5.3).
+"""Output heads: a policy head (fixation/yes/no) and a value head.
 
-Readout scale gamma parameterizes the aligned/oblique regime (Schuessler et al.
-2024, §4.3/H5): small gamma -> oblique-favoring init, large gamma -> aligned-
-favoring init. Neutral (gamma=1.0) in Core; swept in the Extended aligned/
-oblique sub-experiment (§4.3, M9), optionally regularized toward a target norm
-via `readout_norm()` during that sweep's training.
+The readout scale gamma parameterizes the aligned-versus-oblique dynamical
+regime (Schuessler et al. 2024): a small gamma favors an oblique
+initialization and a large gamma favors an aligned one. It is held at a
+neutral default (gamma=1.0) in the core experimental design and swept in a
+planned aligned/oblique sub-experiment, in which training can optionally be
+regularized toward a target readout norm via `readout_norm()`.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ class Heads(nn.Module):
         return policy, value, logits
 
     def readout_norm(self) -> torch.Tensor:
-        """||W_pi||_F^2 + ||w_v||_F^2 -- for an optional readout-scale regularizer
-        during the Extended aligned/oblique sweep (§4.3), keeping gamma near its
-        target through training rather than only at init."""
+        """||W_pi||_F^2 + ||w_v||_F^2 -- for an optional readout-scale
+        regularizer in the aligned/oblique sweep, keeping gamma near its
+        target throughout training rather than only at initialization."""
         return self.pi.weight.pow(2).sum() + self.value.weight.pow(2).sum()

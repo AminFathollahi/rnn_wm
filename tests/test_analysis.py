@@ -1,6 +1,7 @@
-"""M5 gates (protocol §11.5): crossnobis unbiased on null data; dPCA recovers
-a planted component; noise-ceiling bounds sane; FDR correctness; cross-
-temporal decoding shape/sanity on synthetic stable vs. dynamic structure."""
+"""Analysis-toolkit tests: crossnobis is unbiased on null data; demixed PCA
+recovers a planted component; noise-ceiling bounds are sane; false-discovery-
+rate correction is correct; cross-temporal decoding shape and behavior are
+sane on synthetic stable versus dynamic structure."""
 import numpy as np
 
 from brainalign_wm.analysis.rdm import crossnobis_rdm

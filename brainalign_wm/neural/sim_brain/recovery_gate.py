@@ -1,20 +1,23 @@
-"""Simulated-spike geometry-recovery gate (protocol §8.3, §11.5) -- must pass
-before any real neural data is touched (§0.2 Step 1). Runs the *actual*
-analysis pipeline (rates -> crossnobis RDM -> RSA/noise-ceiling -> dPCA ->
-cross-temporal decoding) against `SimulatedBrain` and checks that planted
-structure is recovered with the right sign, while a scrambled control is
-NOT recovered (sensitivity AND specificity).
+"""Simulated-spike geometry-recovery gate. Must pass before any real neural
+data is analyzed. Runs the analysis pipeline in full (rates, crossnobis RDM,
+representational similarity analysis with a noise ceiling, demixed PCA, and
+cross-temporal decoding) against `SimulatedBrain` and checks that the
+planted representational structure is recovered with the correct sign,
+while a scrambled control is not (establishing both sensitivity and
+specificity).
 
-"A model with the matching planted geometry" is operationalized as a second
-independent `SimulatedBrain` draw (different seed => different units/spike
-noise, identical generative parameters/planted geometry) -- the sim-world
-analogue of "two subjects performing the same underlying computation."  Its
-RSA alignment to the first draw should sit near that draw's own noise
-ceiling; alignment to the scrambled control should not.
+A model with matching planted geometry is operationalized as a second,
+independent `SimulatedBrain` draw: a different seed produces different
+units and spike noise but identical generative parameters and planted
+geometry, the simulated analogue of two subjects performing the same
+underlying computation. Its representational-similarity alignment to the
+first draw should sit near that draw's own noise ceiling; alignment to the
+scrambled control should not.
 
-Per protocol §0 rule 6 ("honesty over optimism"): every check prints its
-observed number against its threshold, and a failure exits non-zero with a
-clear diagnostic -- this script never catches-and-passes.
+Every check below prints its observed value against its threshold, and a
+failure causes the script to exit non-zero with a specific diagnostic --
+this is a validation gate, not a status report, and it does not catch and
+suppress its own failures.
 """
 from __future__ import annotations
 
@@ -171,8 +174,8 @@ def main(argv=None) -> int:
         return 0
     else:
         _log("RECOVERY GATE: FAIL -- see CHECK lines above for which comparison(s) failed and by how much. "
-             "Per protocol §0 rule 6, this is a result to report, not to paper over: do NOT proceed to real "
-             "neural data (M6) until this passes.")
+             "This is a result to report, not to work around: do not proceed to alignment analysis on "
+             "real neural data until this gate passes.")
         return 1
 
 

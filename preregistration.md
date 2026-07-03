@@ -1,9 +1,10 @@
 # Pre-registration (freeze before the full training grid)
 
-Copy the directional predictions + decision table from protocol §2 here, commit, and
-record the commit hash. Do not edit after the full grid starts.
+Copy the directional predictions and decision table from the master
+specification's hypotheses section here, commit, and record the commit
+hash. Do not edit after the full grid starts.
 
-## Primary hypotheses (fill in / confirm from §2)
+## Primary hypotheses (fill in / confirm from the specification)
 - H1 (Structure -> anatomy): S=1 raises alignment; worker↔MTL, manager↔MFC dissociation.
 - H2 (Modulation -> frontal control): M=1 raises MFC-epoch alignment; reflection-shuffle causal.
 - H3 (Learning): L=1 ≥ BPTT alignment at matched behavior, *conditional on the gate*.

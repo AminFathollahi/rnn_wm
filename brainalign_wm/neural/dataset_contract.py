@@ -1,7 +1,7 @@
-"""The `NeuralDataset` contract (protocol §8.2) — frozen interface implemented by
-every neural data source: simulated spikes (`sim_brain/`) and real NWB adapters
-(`adapters/dandi_nwb.py`, tier B/C, stretch). Analysis code (§9) depends only on
-this interface, never on a specific dataset's file format.
+"""The `NeuralDataset` contract: a frozen interface implemented by every
+neural data source, simulated (`sim_brain/`) and real (`adapters/`).
+Analysis code depends only on this interface, never on a specific
+dataset's file format.
 
 Because single units are recorded across sessions/patients (never simultaneously
 for the whole population), `response_patterns` builds a *pseudopopulation*: units
@@ -23,11 +23,12 @@ PatientID = str
 
 @dataclass(frozen=True)
 class ConditionLabel:
-    """Harmonized condition schema (protocol §8.4) shared by model and brain.
+    """Harmonized condition schema shared by model and brain data.
 
-    `item_id`/`category` are present for image datasets (Tier A/B) and absent
-    (None) for the verbal dataset (Tier C) — see §7.4 for why verbal has no
-    image-identity alignment.
+    `item_id`/`category` are present for the image datasets (Tier A/B) and
+    absent (None) for the verbal dataset (Tier C), which is aligned only on
+    coarse conditions -- it has no image-identity match to the model's
+    encoder.
     """
 
     load: int
@@ -50,7 +51,7 @@ class ConditionLabel:
 
 @runtime_checkable
 class NeuralDataset(Protocol):
-    """Frozen interface. See protocol §8.2 for the full spec."""
+    """Frozen interface implemented by every neural data source."""
 
     conditions: list[ConditionLabel]
 
@@ -75,8 +76,8 @@ class NeuralDataset(Protocol):
         ...
 
     def regions(self) -> list[str]:
-        """Canonical region names present, e.g. 'hippocampus','amygdala',
-        'dACC','preSMA','vmPFC' (see §8.4 region normalization)."""
+        """Canonical region names present, e.g. 'hippocampus', 'amygdala',
+        'dACC', 'preSMA', 'vmPFC' (see `normalize_region` below)."""
         ...
 
     def noise_ceiling(self, region: Optional[str], epoch: str) -> tuple[float, float]:
@@ -90,7 +91,7 @@ class NeuralDataset(Protocol):
         ...
 
 
-# ---- region normalization (protocol §8.4), shared by every real-data adapter ----
+# ---- region normalization, shared by every real-data adapter ----
 
 _RAW_TO_CANONICAL = {
     "hippocampus": "hippocampus",
@@ -106,7 +107,7 @@ MFC_REGIONS = {"dACC", "preSMA", "vmPFC"}
 
 
 def normalize_region(raw: str) -> str:
-    """Strip hemisphere suffix, map to canonical region name (§8.4)."""
+    """Strip the hemisphere suffix and map to a canonical region name."""
     s = raw.strip().lower()
     for suffix in ("_left", "_right", "-left", "-right", " left", " right"):
         if s.endswith(suffix):
@@ -129,9 +130,9 @@ def region_family(canonical_region: str) -> Optional[str]:
 
 
 def validate_dataset(ds: NeuralDataset, region: Optional[str] = None) -> None:
-    """Boundary check: shapes/regions/conditions are internally consistent.
-    Used by every adapter's test (protocol §8.4, last line) and by the
-    recovery-gate / real-data smoke tests.
+    """Boundary check: shapes, regions, and conditions are internally
+    consistent. Used by every adapter's test suite and by the
+    geometry-recovery gate and real-data smoke tests.
     """
     regs = ds.regions()
     if region is not None and region not in regs:

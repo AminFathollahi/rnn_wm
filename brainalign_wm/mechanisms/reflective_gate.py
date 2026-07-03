@@ -1,11 +1,12 @@
-"""Reflective gating (knob M=1), protocol §6.1.
+"""Reflective gating (modulation factor M=1).
 
 Computes the reflection variable R_t (a leaky accumulator of rectified
 surprise) and the additive bias it contributes to the manager's GRU
 update-gate pre-activation. The manager cell itself (models/hrl.py,
 `MaskedGRUCell`) is what actually consumes `gate_bias(R_t)` -- this module
 owns only the surprise -> R_t -> bias computation, so it can be swapped out
-(e.g. reflection-shuffle causal control, §6.1/F4) without touching the model.
+(e.g. for the reflection-shuffle causal control below) without touching the
+model.
 
     delta_t = surprise at step t:
         feedback steps: r_t - V_{t-1}            (reward-prediction error)
@@ -36,7 +37,7 @@ class ReflectiveGate(nn.Module):
         value_prev: torch.Tensor,
         action_logp_chosen: torch.Tensor,
     ) -> torch.Tensor:
-        """delta_t, protocol §6.1. All args are [batch] or [batch,1] tensors.
+        """delta_t (surprise signal). All args are [batch] or [batch,1] tensors.
         `is_feedback`: 1.0 on feedback steps, else 0.0 (float mask, not bool,
         so this is differentiable-shape-compatible and branch-free)."""
         rpe = reward - value_prev
@@ -53,7 +54,7 @@ class ReflectiveGate(nn.Module):
 
 
 def shuffle_reflection(R_sequence: torch.Tensor, generator: torch.Generator | None = None) -> torch.Tensor:
-    """Causal control (§6.1/F4): time-shuffle R_t within a trial to destroy its
+    """Causal control: time-shuffle R_t within a trial to destroy its
     temporal alignment with epochs/load/lures, while preserving its marginal
     distribution. `R_sequence`: [T, batch, 1] (time-major)."""
     T = R_sequence.shape[0]

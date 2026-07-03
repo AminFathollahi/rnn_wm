@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Download the ResNet-18 ImageNet weights into the torch hub cache (stdlib only).
+"""Downloads the ResNet-18 ImageNet weights into the PyTorch hub cache,
+using only the standard library so it can run before torch is installed.
 
-Works before torch is installed/upgraded. torchvision names weight files as
-`<arch>-<first8_of_sha256>.pth`, so we verify integrity by checking the file's
-sha256 starts with the prefix embedded in the filename. See protocol §0.1.
+torchvision names weight files as `<arch>-<first8_of_sha256>.pth`, so
+integrity is verified by checking that the file's SHA-256 hash starts with
+the prefix embedded in its filename.
 """
 from __future__ import annotations
 

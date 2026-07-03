@@ -1,6 +1,5 @@
-"""TaskGenerator (protocol §7.3): the frozen interface glue owning an
-ImageTokenBank + SternbergGenerator + CurriculumSchedule. "A self-contained
-generator is fine -- the frozen interface is what matters."
+"""TaskGenerator: the top-level interface composing an `ImageTokenBank`, a
+`SternbergGenerator`, and a `CurriculumSchedule` into a single trial source.
 
     gen = TaskGenerator(config, image_bank, seed=0)
     steps = gen.sample_trial(step_idx, total_steps)  # -> list[TrialStep]

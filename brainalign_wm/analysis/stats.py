@@ -1,12 +1,14 @@
-"""Statistics and inference (protocol §10): mixed-effects model of alignment
-on the 2x2x2 factorial + accuracy covariate, FDR correction, and
-distribution-comparison effect sizes for persistence/load-tuning (H6).
+"""Statistics and inference: a mixed-effects model of alignment score on
+the 2x2x2 factorial plus an accuracy covariate, false-discovery-rate
+correction, and distribution-comparison effect sizes for persistence and
+load-tuning measures.
 
-`statsmodels` MixedLM is used if importable (lazy import); otherwise falls
-back to OLS with a cluster-bootstrap CI (clustered by seed/session) -- a
-documented, less-powerful but not-silently-wrong substitute (protocol §0
-rule 6: never fabricate a result). The fallback is logged via the returned
-dict's `"method"` field so callers/report-writers can state which was used.
+`statsmodels` MixedLM is used if importable (a lazy import); otherwise the
+code falls back to OLS with a cluster-bootstrap confidence interval
+(clustered by seed/session) -- a documented, less statistically powerful
+but not silently misleading substitute. The fallback is recorded in the
+returned dict's `"method"` field, so callers and report generation can
+state explicitly which method produced a given result.
 """
 from __future__ import annotations
 

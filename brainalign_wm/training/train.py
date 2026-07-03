@@ -1,48 +1,51 @@
-"""Single-run training entrypoint called by ../../run_grid.py (protocol
-§5-§7, §0.2/§14).
+"""Single-run training entrypoint, called by `run_grid.py`.
 
 Contract:
     train_one(run: dict, cfg: dict) -> dict
-      run = {"run_id","model_id","S","M","L","seed"}
-      cfg  = the tier-merged dict run_grid.py builds ({"steps",...}); the
-             FULL project config (model/mechanisms/task/train sections) is
-             loaded here directly from configs/config.yaml, since run_grid
-             only threads the tier subset through.
+      run = {"run_id", "model_id", "S", "M", "L", "seed"}
+      cfg  = the tier-merged dict `run_grid.py` builds (containing "steps",
+             among other tier parameters); the full project configuration
+             (model/mechanisms/task/train sections) is loaded here directly
+             from configs/config.yaml, since `run_grid.py` only threads the
+             tier subset through.
       returns {"status": "completed"|"failed",
                "gates": {"load1>0.95": bool, "load3>0.80": bool},
                "accuracy": {"load1": float, "load2": float, "load3": float},
                "rung": int}
 
-Design choices made to close real ambiguities in the protocol (logged in
-DECISIONS.md, not just here):
-  - **Training signal.** Rather than a full RL loop, the network is trained
-    to emit the *ideal task policy* at every tick (fixation during
-    fixation/encode/maintain/feedback/iti; in_set-dependent yes/no during
-    probe) via cross-entropy -- for this deterministic-labeling task,
-    matching the ideal policy *is* the reward-maximizing policy, so this is
-    a faithful, tractable stand-in for a full policy-gradient loop. A value
-    head is trained (MSE) against the trial's correct/incorrect outcome so
-    it's usable as the reflective gate's reward baseline (§6.1).
-  - **Reflective-gate causal ordering.** `u^m_t = sigmoid(...+ beta*R_t)`
-    needs R_t, which needs this tick's own policy output -- circular if R_t
-    were computed from the *same* tick. Resolved with a one-tick lag: R_t
-    fed into tick t's manager gate is computed from tick t-1's
-    policy/value output. Neuroscientifically defensible (reflection is
-    inherently retrospective) and breaks the cycle cleanly.
-  - **Local learning (L=1).** Runs under `torch.no_grad()`; node
-    perturbation is injected into each traced module's output activity
-    (h_t for flat, h_worker_t/h_manager_t separately for HRL) every tick;
-    eligibility traces accumulate per weight matrix; the three-factor
-    update fires at trial end using real trial-correctness as reward.
-    Starts at fallback-ladder rung 1; if the load-1 gate isn't cleared by
-    `train.rung_check_frac` of the budget, escalates to rung 2
-    (`local_learning.py`'s trace-normalized/adaptive-baseline variant) for
-    the remainder. Rung 3 (e-prop) is not implemented this session (see
-    `mechanisms/local_learning.py`) -- if rung 2 also fails, this is
-    recorded honestly as rung=2, gates=False (protocol §6.2's own
-    "record it" outcome), never silently substituting BPTT.
-  - **Batch size 1.** One trial per step; simplest correct thing given the
-    time budget, not a scope requirement.
+Design decisions made to resolve underspecified aspects of the training
+procedure (also recorded in DECISIONS.md):
+  - **Training signal.** Rather than a full reinforcement-learning loop,
+    the network is trained to emit the ideal task policy at every tick
+    (fixation during fixation/encode/maintain/feedback/iti; the
+    in_set-dependent response during probe) via cross-entropy. For this
+    deterministic-labeling task, matching the ideal policy is the
+    reward-maximizing policy, so this is a faithful and tractable stand-in
+    for a full policy-gradient loop. A value head is trained by
+    mean-squared error against the trial's correct/incorrect outcome, so it
+    can serve as the reflective gate's reward baseline.
+  - **Reflective-gate causal ordering.** The manager's update-gate equation
+    `u^m_t = sigmoid(...+ beta*R_t)` requires R_t, which in turn requires
+    the current tick's own policy output -- a circular dependency if R_t
+    were computed from that same tick. This is resolved with a one-tick
+    lag: the value of R_t fed into tick t's manager gate is computed from
+    tick t-1's policy and value output, which both breaks the cycle and is
+    defensible on the grounds that reflection is inherently retrospective.
+  - **Local learning (L=1).** Runs under `torch.no_grad()`. Node
+    perturbation is injected at the pre-activation of each GRU gate unit
+    (dimension 3*hidden) via `_perturbed_gru_step`, not at the post-gate
+    hidden state; eligibility traces accumulate per weight matrix, and the
+    three-factor update fires at trial end using the trial's actual
+    correctness as reward. Training starts at fallback-ladder rung 1; if
+    the load-1 gate is not cleared by `train.rung_check_frac` of the step
+    budget, it escalates to rung 2 (the trace-normalized, adaptive-baseline
+    variant in `local_learning.py`) for the remainder. Rung 3 (e-prop) is
+    not implemented (see `mechanisms/local_learning.py`); if rung 2 also
+    fails to clear the gate, this is recorded honestly as rung=2,
+    gates=False, rather than silently substituting backpropagation.
+  - **Batch size 1.** One trial per training step -- the simplest correct
+    choice given the available time, not a requirement of the experimental
+    design.
 """
 from __future__ import annotations
 
@@ -63,17 +66,17 @@ def _load_full_config() -> dict:
 
 
 class _GatedFlatCore(torch.nn.Module):
-    """S=0, M=1 (cells M010/M011): protocol §6.1's reflective gate is
-    written in terms of "the manager's" GRU update gate, which doesn't
-    exist for a flat model -- `FlatGRUCore` (S=0) uses plain `nn.GRUCell`,
-    which has no hook for an external gate bias. Resolution (logged in
-    DECISIONS.md): for S=0, the flat GRU acts as its own gated unit -- same
-    `MaskedGRUCell` machinery as the HRL manager, mask=None (dense, no
-    spatial constraint; only the S=1 worker is spatially masked), with the
-    reflective bias applied directly to its own update gate. This is the
-    only architecturally sensible way to give M=1 a real, non-degenerate
-    effect on a flat model; without it, M010/M011 would be silently
-    identical to M000/M001."""
+    """S=0, M=1 (cells M010/M011): the reflective gate is defined in terms
+    of the manager's GRU update gate, which does not exist for a flat
+    model. `FlatGRUCore` (S=0) uses a plain `nn.GRUCell`, which provides no
+    hook for an external gate bias. The resolution (recorded in
+    DECISIONS.md) is that for S=0, the flat GRU acts as its own gated unit,
+    using the same `MaskedGRUCell` machinery as the HRL manager (mask=None,
+    dense -- only the S=1 worker is spatially masked), with the reflective
+    bias applied directly to its own update gate. This is the only
+    architecturally sensible way to give M=1 a real, non-degenerate effect
+    on a flat model; without it, M010/M011 would be silently identical to
+    M000/M001."""
 
     def __init__(self, input_dim: int, hidden_dim: int):
         super().__init__()
@@ -242,15 +245,15 @@ def full_cfg_train_value_weight() -> float:
 
 def _perturbed_gru_step(cell, x_t, h_prev, xi_pre, extra_update_bias=None):
     """Manually replicates the GRU math (identical for `nn.GRUCell` and
-    `gru_cell.MaskedGRUCell` -- both expose `weight_ih/weight_hh/bias_ih/
-    bias_hh` with the same [3*hidden, in] layout) so a **pre-activation**
-    perturbation `xi_pre` (shape [batch, 3*hidden]) can be injected before
-    gating, matching protocol §6.2's node-perturbation formulation (perturb
-    each unit's total input drive, one perturbation per gate-pre-activation
-    unit). This is NOT equivalent to perturbing the post-gate output h_t
-    (dim=hidden): an earlier version did that and crashed, because the
-    traced weight matrices have `3*hidden` output rows (one per r/u/n gate
-    unit), not `hidden` -- see DECISIONS.md.
+    `gru_cell.MaskedGRUCell` -- both expose `weight_ih`/`weight_hh`/
+    `bias_ih`/`bias_hh` with the same [3*hidden, in] layout) so that a
+    pre-activation perturbation `xi_pre` (shape [batch, 3*hidden]) can be
+    injected before gating: one perturbation term per gate-pre-activation
+    unit, representing a perturbation of each unit's total input drive.
+    This is not equivalent to perturbing the post-gate output h_t (dimension
+    `hidden`): an earlier version did that and failed, because the traced
+    weight matrices have `3*hidden` output rows (one per reset/update/
+    candidate gate unit), not `hidden` -- see DECISIONS.md.
     """
     w_hh_eff = cell.weight_hh if getattr(cell, "mask", None) is None else cell.weight_hh * cell.mask
     gi = x_t @ cell.weight_ih.t() + cell.bias_ih + xi_pre

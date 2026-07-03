@@ -1,9 +1,9 @@
-"""Simulated spiking generator with known, configurable ground-truth WM
-geometry (protocol §8.3) -- validates the whole analysis pipeline (rates ->
-RDM -> noise ceiling -> dPCA -> persistence -> cross-temporal decoding)
-before any real recording is touched. Implements the `NeuralDataset`
-Protocol (`brainalign_wm/neural/dataset_contract.py`) so the exact same
-analysis code runs on simulated and real (M6) data.
+"""Simulated spiking generator with known, configurable ground-truth
+working-memory geometry, used to validate the full analysis pipeline
+(rates, RDM, noise ceiling, demixed PCA, persistence, cross-temporal
+decoding) before any real recording is analyzed. Implements the
+`NeuralDataset` Protocol defined in `brainalign_wm/neural/dataset_contract.py`,
+so the same analysis code runs unchanged on simulated and real data.
 
 Ground-truth latent geometry per trial, planted independently and additively
 into each unit's firing rate (so downstream analyses can be checked against

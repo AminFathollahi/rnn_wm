@@ -1,13 +1,15 @@
-"""SternbergGenerator: one trial of the image-Sternberg WM task (protocol §7.1).
+"""SternbergGenerator: generates one trial of the image-Sternberg
+working-memory task.
 
-Epoch labels match `brainalign_wm.training.logging_schema.VALID_EPOCHS` exactly:
-fixation -> encode -> maintain -> probe -> feedback -> iti. All encoding items
-share the single 'encode' epoch label (this is the model-side §9.1 schema; a
-finer encode1/2/3 split exists only in the *neural* harmonized condition
-schema, §8.4, built separately by the NWB adapter).
+Epoch labels match `brainalign_wm.training.logging_schema.VALID_EPOCHS`
+exactly: fixation, encode, maintain, probe, feedback, iti. All encoding
+items share the single 'encode' epoch label in this model-side schema; a
+finer encode1/encode2/encode3 split exists only in the harmonized neural
+condition schema built separately by the NWB adapter.
 
-Determinism (§11.4): every trial takes an explicit `numpy.random.RandomState`;
-no bare `np.random.*` module-level calls anywhere in this file.
+Every trial takes an explicit `numpy.random.RandomState`; there are no bare
+`np.random.*` module-level calls anywhere in this file, so trial content is
+fully determined by the seed passed in.
 """
 from __future__ import annotations
 
@@ -90,8 +92,8 @@ class SternbergGenerator:
             held_categories.append(cat)
             exclude.add(img_id)
 
-        # in_set first (P=0.5), THEN lure_fraction conditions the not-in-set branch
-        # only -- matches §7.1 exactly: "a fraction of not-in-set probes are lures".
+        # in_set is drawn first (P=0.5); lure_fraction then conditions only the
+        # not-in-set branch, i.e. a fraction of not-in-set probes are lures.
         in_set = bool(rng.random_sample() < 0.5)
         is_lure = False
         if in_set:

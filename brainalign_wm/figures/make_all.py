@@ -1,6 +1,4 @@
-"""Render figures F1..F8 to vector PDFs.
-
-TODO(sonnet5): implement per protocol §12.
+"""Render the manuscript figures to vector-format PDFs. Not yet implemented.
 """
 from __future__ import annotations
 import argparse
@@ -11,8 +9,7 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default="configs/config.yaml")
     ap.parse_args(argv)
     raise SystemExit(
-        "[stub] not implemented yet — see protocol §12. "
-        "This target exists so the Makefile pipeline resolves."
+        "not yet implemented; this entrypoint exists so the Makefile pipeline resolves."
     )
 
 

@@ -1,15 +1,16 @@
-"""A from-scratch GRU cell exposing two hooks `nn.GRUCell` doesn't give us:
+"""A from-scratch GRU cell exposing two hooks that `nn.GRUCell` does not
+provide:
 
-1. an optional fixed elementwise mask on the recurrent weight matrix
-   (protocol §5.2, worker/LM-RNN spatial locality mask), and
-2. an optional external additive bias into the update-gate pre-activation
-   (protocol §6.1, the manager's reflection-gated update: `u_t = sigmoid(...
-   + beta*R_t)`).
+1. an optional fixed elementwise mask on the recurrent weight matrix, used
+   by the spatially-constrained worker population; and
+2. an optional external additive bias into the update-gate pre-activation,
+   used by the reflective gate's modulation of the manager's update:
+   `u_t = sigmoid(... + beta*R_t)`.
 
-Gate convention matches PyTorch/standard GRU: "update" gate z/u (here `u_t`)
-multiplies the *new* candidate; `(1-u_t)` retains the previous state. This is
-exactly the protocol's `u^m_t` notation, so no relabeling is needed anywhere
-downstream (logging, mechanisms, analysis).
+The gate convention matches the standard GRU: the update gate `u_t`
+multiplies the new candidate state, and `(1-u_t)` retains the previous
+state -- so no relabeling is needed between this implementation and the
+mechanism/logging/analysis code that reads `u_t` downstream.
 """
 from __future__ import annotations
 
@@ -48,8 +49,10 @@ class MaskedGRUCell(nn.Module):
         h_prev: torch.Tensor,
         extra_update_bias: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (h_t, u_t) -- u_t (the update gate) is returned for logging/
-        analysis (protocol §6.1: high R_t -> u_t->1 -> manager overwrites state)."""
+        """Returns (h_t, u_t). `u_t` (the update gate) is returned for logging
+        and analysis: a high reflection value drives u_t toward 1, causing the
+        manager to overwrite its state, while a low value keeps the gate
+        closed and the state persistent."""
         w_hh = self.weight_hh if self.mask is None else self.weight_hh * self.mask
         gi = x_t @ self.weight_ih.t() + self.bias_ih
         gh = h_prev @ w_hh.t() + self.bias_hh
@@ -68,11 +71,12 @@ class MaskedGRUCell(nn.Module):
 def make_locality_mask(
     grid: tuple[int, int], density: float, seed: int = 0, kernel: str = "exponential"
 ) -> torch.Tensor:
-    """Spatial locality mask (protocol §5.2): worker units live on a `grid`
-    (default 14x14); Mask[i,j] = 1 w.p. p(d_ij) decaying with grid distance,
-    calibrated so the achieved density ~= `density` (default 4%, Khona &
-    Chandra 2023). Fixed at init -- a spatial "lottery ticket", never
-    re-sampled during training.
+    """Spatial locality mask: worker units are arranged on a `grid` (default
+    14x14); Mask[i,j] = 1 with probability p(d_ij) decaying with grid
+    distance, calibrated so the achieved density matches the target
+    `density` (default 4%, following the spatially-constrained sparse RNN
+    construction of Khona & Chandra 2023). The mask is fixed at
+    initialization and never re-sampled during training.
     """
     import numpy as np
 

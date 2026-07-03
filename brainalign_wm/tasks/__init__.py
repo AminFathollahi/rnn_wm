@@ -1,4 +1,3 @@
-"""brainalign_wm.tasks
-
-TODO(sonnet5): implement — §7 — image Sternberg generator, curriculum, ImageTokenBank.
+"""Task environment: the image-Sternberg working-memory trial generator,
+the annealed training curriculum, and the image stimulus bank.
 """

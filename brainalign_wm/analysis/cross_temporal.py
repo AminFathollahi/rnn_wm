@@ -1,8 +1,9 @@
 """Cross-temporal (temporal generalization) decoding (King & Dehaene 2014;
-Stokes 2015; Spaak et al. 2017) -- protocol §9.5. Train a decoder at each
-timebin, test at every other timebin -> an [n_train_bins, n_test_bins]
-generalization matrix. Stable coding: high off-diagonal generalization.
-Dynamic coding: high diagonal, low off-diagonal.
+Stokes 2015; Spaak et al. 2017). A decoder is trained at each timebin and
+tested at every other timebin, producing an [n_train_bins, n_test_bins]
+generalization matrix. Stable coding is indicated by high off-diagonal
+generalization; dynamic coding by a high diagonal with low off-diagonal
+values.
 
 Also implements the Libby & Buschman memory/sensation cross-decode: same
 machinery, decoding "previously-held item" vs. "currently-probed item"
@@ -63,9 +64,9 @@ def stability_index(gen_matrix: np.ndarray) -> float:
 def memory_sensation_cross_decode(
     X: np.ndarray, y_prev_item: np.ndarray, y_curr_item: np.ndarray, n_folds: int = 4, seed: int = 0
 ) -> dict:
-    """Libby & Buschman-style: decode previously-held vs. currently-probed
-    item identity across the same delay activity, quantifying subspace
-    separation (protocol §9.5)."""
+    """Libby & Buschman-style analysis: decode previously-held versus
+    currently-probed item identity across the same delay activity,
+    quantifying subspace separation between memory and sensation."""
     mat_prev = cross_temporal_decoding(X, y_prev_item, n_folds=n_folds, seed=seed)
     mat_curr = cross_temporal_decoding(X, y_curr_item, n_folds=n_folds, seed=seed)
     return {

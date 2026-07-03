@@ -1,5 +1,6 @@
-"""M2 gates (protocol §11.5, §14): mask density ~= target, param-budget match
-within tolerance, all 8 cells pass forward, HRL manager-tick semantics."""
+"""Model tests: mask density matches its target, parameter budget is
+matched within tolerance, all eight cells pass a forward pass, and the
+hierarchical core's manager-tick semantics are correct."""
 import yaml
 import pytest
 

@@ -1,11 +1,10 @@
-# Makefile for the brain-aligned WM project.
-# See protocol_v4_master_prompt.md §0.2 (bootstrap & overnight run).
+# Build and execution targets for the working-memory RNN brain-alignment project.
 # Override the interpreter if needed:  make PY=/path/to/python <target>
 PY ?= /home/amin/miniconda3/envs/wm_dynamics/bin/python
 CU_INDEX := https://download.pytorch.org/whl/cu128
 
 .DEFAULT_GOAL := help
-.PHONY: help setup verify-gpu fetch-encoder features test smoke recovery overnight overnight-demo reproduce clean
+.PHONY: help setup verify-gpu fetch-encoder features test smoke recovery run-grid run-grid-demo reproduce clean
 
 help: ## show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -28,19 +27,19 @@ features: ## precompute + cache frozen ResNet features (ImageTokenBank + dataset
 test: ## run unit tests (scaffold + package)
 	$(PY) -m pytest -q
 
-smoke: ## fast end-to-end check with the REAL train_one (8 cells x 1 seed, tiny step budget)
+smoke: ## end-to-end check of the training entrypoint (8 cells x 1 seed, minimal step budget)
 	$(PY) run_grid.py --seeds 1 --budget 20m --tier smoke
 
-recovery: ## sim-spike geometry-recovery gate (§8.3) -- must pass before real alignment
+recovery: ## simulated-spike geometry-recovery gate -- must pass before real-data alignment
 	$(PY) -m brainalign_wm.neural.sim_brain.recovery_gate --config configs/config.yaml
 
-overnight: ## launch the real training grid, resumable, breadth-before-depth (§0.2)
-	$(PY) run_grid.py --seeds 8 --budget 10h --tier full
+run-grid: ## execute the full training grid (resumable, breadth-before-depth over cells x seeds)
+	$(PY) run_grid.py --seeds 8 --budget 48h --tier full
 
-overnight-demo: ## demo the orchestration with the synthetic stub (no torch needed)
+run-grid-demo: ## demonstrate the orchestrator with the synthetic stub (no torch required)
 	$(PY) run_grid.py --scaffold --seeds 3 --budget 30m --tier dev
 
-reproduce: fetch-encoder features test recovery overnight ## full pipeline from scratch
+reproduce: fetch-encoder features test recovery run-grid ## full pipeline from scratch
 	$(PY) -m brainalign_wm.analysis.run_all --config configs/config.yaml
 	$(PY) -m brainalign_wm.figures.make_all --config configs/config.yaml
 

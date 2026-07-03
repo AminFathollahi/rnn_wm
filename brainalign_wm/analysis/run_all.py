@@ -1,6 +1,5 @@
-"""Run the full alignment + stats pipeline over completed runs.
-
-TODO(sonnet5): implement per protocol §9-§10.
+"""Run the full alignment and statistical-inference pipeline over completed
+training runs. Not yet implemented.
 """
 from __future__ import annotations
 import argparse
@@ -11,8 +10,7 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default="configs/config.yaml")
     ap.parse_args(argv)
     raise SystemExit(
-        "[stub] not implemented yet — see protocol §9-§10. "
-        "This target exists so the Makefile pipeline resolves."
+        "not yet implemented; this entrypoint exists so the Makefile pipeline resolves."
     )
 
 

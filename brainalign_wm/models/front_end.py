@@ -1,13 +1,13 @@
-"""Shared front end (protocol §5.1): frozen encoder features -> task-context
-concat -> LayerNorm -> noisy bottleneck. Identical module for all 8 cells
-(§4.1 non-negotiable control) -- only the recurrent core downstream differs.
+"""Shared front end: frozen encoder features and task-context vector are
+concatenated, layer-normalized, and projected through a noisy bottleneck.
+This module is identical across all eight factorial cells -- a controlled
+element held fixed so that only the downstream recurrent core varies.
 
     a_t = LayerNorm( W_in . concat(v_t, c_t) ),  W_in in R^{d_h x (feature_dim+task_vec_dim)}
     z_t = W_bottleneck . a_t + eps_t,  eps_t ~ N(0, sigma_in^2 I),  z_t in R^{bottleneck_dim}
 
-`d_h` (pre-bottleneck width) isn't pinned to a specific value by the protocol
-beyond "W_in in R^{d_h x 522}"; defaults to the bottleneck width itself
-(two linear layers of matched width around one LayerNorm) unless overridden.
+The pre-bottleneck width `d_h` defaults to the bottleneck width itself (two
+linear layers of matched width around one LayerNorm) unless overridden.
 """
 from __future__ import annotations
 

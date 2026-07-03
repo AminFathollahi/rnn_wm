@@ -1,6 +1,7 @@
-"""Precompute + cache frozen ResNet features for the ImageTokenBank and (once
-`neural/adapters/dandi_nwb.py` exists, M6) the datasets' embedded stimulus
-images (protocol §0.1 Step 0.7, §7.4). Frozen encoder => compute once.
+"""Precompute and cache frozen ResNet features for the ImageTokenBank and
+for the neural datasets' embedded stimulus images (via
+`neural/adapters/dandi_nwb.py`). The encoder is frozen, so each feature is
+computed once and reused.
 """
 from __future__ import annotations
 
@@ -37,8 +38,8 @@ def main(argv=None) -> int:
         cache_stimulus_features(cfg)
         print("[cache_features] dataset embedded stimulus features cached.")
     except (ImportError, NotImplementedError, ModuleNotFoundError, AttributeError) as e:
-        print(f"[cache_features] skipping dataset stimulus-image caching (adapter not ready yet: {e!r}). "
-              f"Re-run after M6 (dandi_nwb adapter) is implemented.")
+        print(f"[cache_features] skipping dataset stimulus-image caching: {e!r}. "
+              f"Confirm the external data drive is mounted and retry.")
     return 0
 
 

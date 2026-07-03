@@ -1,4 +1,6 @@
-"""brainalign_wm.analysis
-
-TODO(sonnet5): implement — §9 — crossnobis RSA + noise ceiling, encoding, dPCA, persistence, dynamics, stats.
+"""Representational alignment and statistical analysis: crossnobis
+representational dissimilarity matrices, representational similarity
+analysis with noise-ceiling estimation, demixed principal component
+analysis, single-unit persistence and selectivity measures, cross-temporal
+decoding, ridge encoding models, and mixed-effects inference.
 """

@@ -1,42 +1,61 @@
 # brainalign_wm
 
-Bio-plausible inductive biases and human single-neuron working-memory geometry.
+A factorial study of biologically-motivated inductive biases (hierarchical
+structure with spatial sparsity, neuromodulatory gating, and local
+reward-modulated learning) and their effect on the alignment between a
+recurrent neural network's working-memory representations and human
+single-neuron electrophysiology recorded during a Sternberg working-memory
+task. The full experimental design, hypotheses, and specification are
+recorded in `../protocol_v4_master_prompt.md`; this document covers only
+setup and day-to-day usage.
 
-**Master spec:** [`../protocol_v4_master_prompt.md`](../protocol_v4_master_prompt.md) — read it fully, especially **§0.2** (bootstrap + overnight run) before building. This repo is a **scaffold**: the orchestration, entrypoints, config contract, and tests are real; the science modules are TODO stubs mapped to protocol sections.
-
-## Quickstart (single machine, RTX 5070 Ti)
+## Environment
 
 ```bash
 cd brainalign_wm
-make help                 # list targets
-make setup                # upgrade PyTorch (CUDA 12.8 / sm_120) + install deps  [needs internet]
-make verify-gpu           # assert the GPU is usable by torch
-make fetch-encoder        # download ResNet-18 weights (stdlib; works pre-torch)
-make test                 # scaffold tests pass today
-make overnight-demo       # prove the orchestration end-to-end (synthetic stub, no torch)
+make help                 # list available targets
+make setup                # install PyTorch (CUDA 12.8 / sm_120 build) and analysis dependencies
+make verify-gpu           # confirm the GPU is usable by PyTorch
+make fetch-encoder        # download the ResNet-18 ImageNet weights
+make test                 # run the test suite
 ```
 
-Then implement the science (protocol §5–§10) in milestone order (§14), and:
+## Execution
 
 ```bash
-make features             # cache frozen ResNet features
-make recovery             # sim-spike geometry-recovery gate (§8.3) — must pass first
-make overnight            # real training grid: 8 cells x seeds, resumable, breadth-first
+make features             # precompute and cache frozen visual-encoder features
+make recovery             # simulated-spike geometry-recovery gate (must pass before real-data alignment)
+make run-grid             # execute the training grid: 8 cells x N seeds, resumable
 ```
 
-## What works now vs. TODO
+`make run-grid` is safe to interrupt and resume: completed runs are recorded
+in `results/manifest.jsonl` and skipped on the next invocation, and each
+individual run resumes from its own last checkpoint under
+`results/checkpoints/<run_id>/`. Progress is summarized in `RUN_REPORT.md`
+after each invocation.
 
-| Component | State |
+## Repository layout
+
+| Component | Description |
 |---|---|
-| `run_grid.py` orchestrator (resume, breadth-first, budget, isolation, manifest, `MORNING_REPORT.md`) | **working** (stdlib) |
-| `Makefile`, `scripts/fetch_encoder.py`, `pyproject.toml`, `configs/config.yaml` | **working** |
-| `utils/device.py` (capability-aware CPU/GPU) | **working** |
-| `training/train.py::train_one` | **stub** — implement (§5–§7) |
-| models / mechanisms / tasks / neural adapters / analysis / figures | **stubs** — implement per protocol |
+| `run_grid.py` | Grid orchestrator: resumable, breadth-before-depth over cells x seeds, per-run isolation, wall-clock budget |
+| `brainalign_wm/models/` | Recurrent architectures: flat GRU, hierarchical manager-worker core with a spatially-masked worker |
+| `brainalign_wm/mechanisms/` | Reflective gating and node-perturbation local learning |
+| `brainalign_wm/tasks/` | Image-Sternberg trial generator, annealed training curriculum |
+| `brainalign_wm/neural/` | Neural-data interface, simulated-spike generator, NWB adapter for the human single-neuron datasets |
+| `brainalign_wm/analysis/` | Representational similarity analysis, demixed PCA, cross-temporal decoding, encoding models, statistics |
+| `brainalign_wm/training/` | Logging schema and the single-run training entrypoint (`train.py::train_one`) |
+| `configs/config.yaml` | The project's configuration contract |
+| `DECISIONS.md` | Log of design decisions and their rationale, including deviations from the original specification |
 
-## Key facts baked in
+## Notes
 
-- Env: conda `wm_dynamics`; PyTorch upgraded to CUDA-12.8 for sm_120 (`make setup`).
-- Data: human single-neuron Sternberg NWB on the external USB (`configs/config.yaml: paths.data_root`); read via `h5py` (no pynwb needed). Tier A = `000469` + `000673` pooled.
-- Visual WM only for Core; train on a broad image pool, **align on the datasets' exact images**.
-- Never fabricate a gate pass; a cell that can't train is a logged result.
+- Configuration: `configs/config.yaml`, in particular `paths.data_root` for
+  the external-drive location of the human single-neuron recordings, read
+  directly via `h5py` (no `pynwb` dependency required).
+- Scope: visual working memory only in the core experimental design; the
+  training image pool is broad and general-purpose, while alignment against
+  the neural recordings uses each session's exact stimulus images.
+- No behavioral gate is ever reported as passed without being met: a
+  training run that fails its accuracy threshold is a recorded result, not
+  a condition to be silently corrected.

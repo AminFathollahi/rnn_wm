@@ -1,4 +1,4 @@
-"""brainalign_wm.mechanisms
-
-TODO(sonnet5): implement — §6 — reflective gating (M=1) and reward-modulated local learning (L=1).
+"""Biologically-motivated mechanisms crossed in the experimental design:
+reflective neuromodulatory gating and reward-modulated local (node-
+perturbation) learning.
 """

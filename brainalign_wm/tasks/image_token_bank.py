@@ -1,9 +1,10 @@
-"""ImageTokenBank (protocol §7.3): the broad naturalistic training pool.
+"""ImageTokenBank: the broad naturalistic image pool used for training.
 
-Deterministic (seeded) sampling, a fixed train/test image split (for
-generalization tests -- a true WM system should maintain novel images it
-never trained on, §7.4), and on-disk-cached ResNet-18 features keyed by
-image id (frozen encoder => compute once).
+Provides deterministic (seeded) sampling, a fixed train/test image split
+for generalization testing (a working-memory system should be able to
+maintain novel images it was never trained on), and on-disk-cached
+ResNet-18 features keyed by image id (the encoder is frozen, so each
+image's feature is computed once and reused).
 
 Populate `stimuli/<category>/*.png` first via `scripts/build_stimuli_pool.py`.
 """

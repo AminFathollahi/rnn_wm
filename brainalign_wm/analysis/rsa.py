@@ -1,8 +1,9 @@
-"""Model<->brain RSA + the mandatory noise ceiling (protocol §9.4).
+"""Model-to-brain representational similarity analysis and the noise
+ceiling that every alignment score must be reported against, since no
+alignment magnitude is interpretable in isolation.
 
-Every model score is reported both raw and as a fraction of the noise
-ceiling -- "nothing is interpretable without it." Noise ceiling here follows
-the standard split-reliability logic (Nili/Diedrichsen/Kriegeskorte): each
+The noise ceiling follows the standard split-reliability logic
+(Nili/Diedrichsen/Kriegeskorte): each
 session contributes an independent RDM (built from only that session's
 units); upper bound = mean correlation of a session's RDM with the
 grand-mean RDM (includes itself); lower bound = mean correlation of a
@@ -38,7 +39,7 @@ def permutation_test_rdm(
     method: str = "spearman",
     seed: int = 0,
 ) -> tuple[float, float]:
-    """Condition-label permutation test (§9.4). Returns (observed_corr, p_value)."""
+    """Condition-label permutation test. Returns (observed_corr, p_value)."""
     rng = np.random.RandomState(seed)
     n = rdm_a.shape[0]
     observed = compare_rdms(rdm_a, rdm_b, method)
@@ -88,9 +89,10 @@ def _session_condition_rdm(ds, session: str, region, epoch: str, bin_ms: int, n_
 
 
 def noise_ceiling_from_dataset(ds, region, epoch: str, n_splits: int = 100) -> tuple[float, float]:
-    """(lower, upper) trial-split / LOSO reliability of the neural RDM,
-    computed directly from a `NeuralDataset` (works for `SimulatedBrain` and,
-    once implemented, real adapters -- shared implementation, §9.4)."""
+    """(lower, upper) trial-split / leave-one-session-out reliability of the
+    neural RDM, computed directly from a `NeuralDataset` -- a single shared
+    implementation used by both `SimulatedBrain` and the real-data
+    adapters."""
     bin_ms = getattr(ds, "bin_ms", 50)
     sessions = ds.sessions()
     session_rdms = {}

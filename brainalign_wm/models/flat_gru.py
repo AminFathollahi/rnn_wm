@@ -1,9 +1,10 @@
-"""Flat recurrent core (S=0), protocol §5.2: a single dense GRU.
+"""Flat recurrent core (structure factor S=0): a single dense GRU.
 
     h_t = GRU(z_t, h_{t-1}),  h_t in R^{H_flat} (default 256)
 
-No spatial mask, no manager -- this is the architecture-side null for
-knob S. Used directly by cells M000/M001/M010/M011.
+No spatial mask and no hierarchical control module -- this is the
+architectural null condition for the structure factor. Used directly by
+cells M000, M001, M010, and M011.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ class FlatGRUCore(nn.Module):
         return self.cell(z_t, h_prev)
 
     def readout_state(self, h_t: torch.Tensor) -> torch.Tensor:
-        """h*_t used by the shared output heads (protocol §5.3)."""
+        """h*_t used by the shared output heads."""
         return h_t
 
     def param_count(self) -> int:

@@ -21,10 +21,13 @@ model:
   worker_units: 196                        # S=1, LM-RNN on 14x14 grid
   worker_grid: [14, 14]
   worker_density: 0.04                     # spatial locality mask target (§5.2)
-  manager_units: 128
+  manager_units: 64                        # tuned for param-budget match, see DECISIONS.md
   manager_period: 5                        # T_m (or event-gated when M=1)
   param_budget_tol: 0.05                   # match flat vs HRL within +-5%
   readout_scale: 1.0                       # neutral in Core; swept in the oblique sub-exp (§4.3)
+  action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no} (§5.3, §7.1)
+  g_dim: 128                               # top-down context g_t = W_g . h^m_t dim (§5.2)
+  worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t (§5.2)
 
 mechanisms:
   reflection_lambda: 0.9                   # R_t leak (§6.1)
@@ -41,6 +44,40 @@ task:                                      # image Sternberg (§7.1)
   probe_steps: 10
   lure_fraction: 0.3
   n_categories: 4
+  categories: [faces, animals, objects, places]
+  fixation_steps: 3
+  iti_steps: 2
+  feedback_steps: 1
+  # annealed curriculum (§7.2): fraction-of-total-steps boundaries, phases sample
+  # progressively broader (load, delay, lure) distributions.
+  curriculum:
+    warmup_frac: 0.2      # loads=[1] only, short delay, no lures
+    ramp_frac: 0.6         # loads=[1,2,3], full delay, lure_fraction ramped 0 -> config value
+    # target phase = remaining fraction: full distribution (all loads/delay/lures)
+
+# simulated spiking generator (§8.3) -- ground-truth geometry for the pipeline
+# recovery gate; independent of the real NWB adapters.
+sim_brain:
+  n_sessions: 12
+  n_units_per_session: 40
+  n_patients: 6
+  trials_per_condition: 8
+  bin_ms: 50
+  base_rate_hz: 5.0
+  max_rate_hz: 40.0
+  refractory_ms: 2.0
+  category_dim: 4
+  item_dim: 5
+  load_levels: [1, 2, 3]
+  persistent_frac: 0.6     # fraction of latent variance in the persistent (vs dynamic) component
+  seed: 0
+
+analysis:
+  crossnobis_folds: 4
+  n_permutations: 1000
+  bootstrap_iters: 1000
+  noise_ceiling_splits: 100
+  fdr_alpha: 0.05
 
 train:
   bptt_unroll: 200

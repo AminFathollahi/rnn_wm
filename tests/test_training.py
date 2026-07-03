@@ -1,6 +1,6 @@
-"""M7 gate (protocol §11.5, §14): all 8 cells complete forward + update and
-emit a well-formed result at a tiny step budget (smoke tier). Skips if the
-stimuli pool isn't built yet."""
+"""Training entrypoint test: all eight cells complete a forward pass and
+weight update and emit a well-formed result at a minimal step budget (the
+smoke tier). Skips if the stimuli pool has not been built yet."""
 from pathlib import Path
 
 import pytest

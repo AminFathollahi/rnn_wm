@@ -1,6 +1,6 @@
-"""M6 gate (protocol §8.4, §14): dandi_nwb adapter returns schema-valid
-rates/regions/conditions and a real noise ceiling, against the actual
-mounted USB data. Skips gracefully if the USB isn't mounted (CI-safe)."""
+"""dandi_nwb adapter tests: returns schema-valid rates, regions, and
+conditions, and a real noise ceiling, against the actual mounted external
+drive data. Skips gracefully if the drive is not mounted."""
 from pathlib import Path
 
 import pytest

@@ -1,6 +1,7 @@
-"""M4 gates (protocol §11.5, §14): trial epoch sequence/step-counts correct,
-load matches held-set size, c_t one-hot consistent, lure rate matches
-config, curriculum phase behavior, determinism."""
+"""Task-generator tests: trial epoch sequence and step counts are correct,
+load matches the held-set size, the context vector's one-hot fields are
+consistent, the lure rate matches configuration, curriculum phase behavior
+is correct, and trial generation is deterministic."""
 from pathlib import Path
 
 import numpy as np

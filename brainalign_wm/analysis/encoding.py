@@ -1,6 +1,8 @@
-"""Ridge-regression encoding models (protocol §9.5): model units -> each
-neuron's rate, and the reverse direction, with nested CV and noise-ceiling-
-normalized R^2. Complements RSA (predictive mapping vs. geometry)."""
+"""Ridge-regression encoding models: model units predicting each neuron's
+rate, and the reverse direction, with nested cross-validation and
+noise-ceiling-normalized R^2. Complements representational similarity
+analysis by providing a predictive-mapping view alongside the geometric
+one."""
 from __future__ import annotations
 
 import numpy as np

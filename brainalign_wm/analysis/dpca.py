@@ -1,5 +1,5 @@
-"""Demixed PCA (Kobak & Machens 2016), implemented from scratch (protocol
-§9.5) -- decomposes condition-mean, time-resolved activity into
+"""Demixed principal component analysis (Kobak & Machens 2016), implemented
+from scratch. Decomposes condition-mean, time-resolved activity into
 condition-independent, per-factor (e.g. item/category, load), and
 interaction marginalizations, each then reduced by ordinary PCA.
 

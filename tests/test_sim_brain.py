@@ -1,5 +1,5 @@
-"""M5 gates: SimulatedBrain satisfies the NeuralDataset contract; scrambled
-control is distinguishable from real (protocol §8.3, §11.5)."""
+"""SimulatedBrain tests: satisfies the NeuralDataset contract, and the
+scrambled control is distinguishable from the real data."""
 import numpy as np
 import pytest
 import yaml

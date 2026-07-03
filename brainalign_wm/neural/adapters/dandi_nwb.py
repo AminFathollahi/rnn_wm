@@ -1,10 +1,10 @@
-"""`dandi_nwb` adapter (protocol §8.4, M6): pooled Tier A loader for the
-human single-neuron picture-Sternberg datasets **000469** (Kyzar/Kaminski)
-and **000673** (Daume et al., near-identical schema). Reads NWB files
-directly via h5py (no pynwb needed, §0.1). Implements the `NeuralDataset`
-Protocol (`brainalign_wm/neural/dataset_contract.py`) so the exact same
-analysis code (`analysis/rdm.py`, `analysis/rsa.py`, ...) that runs on
-`SimulatedBrain` (M5) runs unchanged on real data.
+"""Pooled Tier A loader for the human single-neuron picture-Sternberg
+datasets 000469 (Kyzar/Kaminski et al.) and 000673 (Daume et al., of
+near-identical schema). Reads NWB files directly via `h5py`, without a
+`pynwb` dependency. Implements the `NeuralDataset` Protocol defined in
+`brainalign_wm/neural/dataset_contract.py`, so the same analysis code
+(`analysis/rdm.py`, `analysis/rsa.py`, and related modules) that runs on
+`SimulatedBrain` runs unchanged on real data.
 
 Schema verified directly against the on-disk files (2026-07, see
 DECISIONS.md): WM sessions are identified by presence of a `loads` trials
@@ -37,8 +37,9 @@ COLUMN_MAPS = {
     },
 }
 
-# Fixed post-onset window used to bin spikes per epoch (protocol §9.3: align
-# to epoch onsets, no HRF). Real trial durations vary; a fixed window keeps
+# Fixed post-onset window used to bin spikes per epoch, aligned to epoch
+# onset with no hemodynamic-response convolution (electrophysiology, unlike
+# fMRI, requires none). Real trial durations vary; a fixed window keeps
 # the [n_units, n_trials, n_bins] tensor rectangular. `maintain` (1.5s) is
 # shorter than the dataset's actual maintenance period (~2.5s typical) --
 # deliberately conservative so the window doesn't run into the next trial's
@@ -53,7 +54,8 @@ def _decode(x) -> str:
 
 
 def find_wm_sessions(dataset_root: Path) -> list[Path]:
-    """WM sessions = trials table has a `loads` column (protocol §8.4)."""
+    """Working-memory sessions are identified by the presence of a `loads`
+    column on the trials table."""
     wm = []
     for f in sorted(Path(dataset_root).glob("**/*.nwb")):
         try:
@@ -131,7 +133,7 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
 
 
 class DandiSternbergTierA:
-    """Pooled 000469 + 000673 picture-Sternberg adapter (Tier A, protocol §8.4/M6)."""
+    """Pooled 000469 + 000673 picture-Sternberg adapter (Tier A)."""
 
     bin_ms: int
 
@@ -263,10 +265,10 @@ class DandiSternbergTierA:
 
 
 def cache_stimulus_features(cfg: dict) -> None:
-    """Precompute + cache ResNet features for each dataset's embedded
-    `StimulusTemplates` images (protocol §0.1 Step 0.7, §7.4's exact-image
-    alignment), keyed by (dataset, session, PicID). Called from
-    `encoders/cache_features.py` once this adapter is ready."""
+    """Precompute and cache ResNet features for each dataset's embedded
+    `StimulusTemplates` images, keyed by (dataset, session, PicID), enabling
+    exact-image alignment between the model and the recorded sessions.
+    Called from `encoders/cache_features.py`."""
     import numpy as np
 
     from brainalign_wm.encoders.resnet18_encoder import encode_images

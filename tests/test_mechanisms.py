@@ -1,7 +1,7 @@
-"""M3 gates (protocol §11.5, §14): reflective gate opens under sustained
-surprise; node-perturbation update sign matches reward. ("M111 learns
-load-1 Sternberg" is an end-to-end training gate -- exercised in M7's
-integration test, once `training/train.py::train_one` exists.)"""
+"""Mechanism tests: the reflective gate opens under sustained surprise, and
+the node-perturbation update sign matches the sign of the reward prediction
+error. (Whether cell M111 learns load-1 Sternberg is an end-to-end training
+gate, exercised separately by the training integration test.)"""
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -33,9 +33,10 @@ def test_reflection_accumulates_and_decays():
 
 
 def test_gate_bias_opens_update_gate_under_sustained_surprise():
-    """The core §6.1 causal claim: high R_t -> u_t -> 1 (manager overwrites);
-    low R_t -> gate closed (state held). Verified directly on a MaskedGRUCell
-    fed a constant gate_bias, isolating the mechanism from the rest of HRLCore."""
+    """The central causal claim of the reflective gate: a high R_t drives
+    u_t toward 1 (the manager overwrites its state), while a low R_t keeps
+    the gate closed (state held). Verified directly on a MaskedGRUCell fed a
+    constant gate_bias, isolating the mechanism from the rest of HRLCore."""
     torch.manual_seed(0)
     cell = MaskedGRUCell(input_dim=16, hidden_dim=32)
     h = torch.zeros(BATCH, 32)  # gru_cell.MaskedGRUCell has no init_state helper; zeros directly
@@ -57,10 +58,11 @@ def test_reflection_shuffle_preserves_marginal_destroys_order():
 
 
 def test_node_perturbation_update_sign_matches_reward():
-    """§11.5: 'node-perturbation update sign matches reward.' A trace that's
-    positive on average should move the weight in the reward-consistent
-    direction: reward > baseline -> weight increases along the traced
-    (perturbation x presynaptic) direction; reward < baseline -> decreases."""
+    """The node-perturbation update sign must match the sign of the reward
+    prediction error: a trace that is positive on average should move the
+    weight in the reward-consistent direction (reward above baseline
+    increases the weight along the traced perturbation-by-presynaptic
+    direction; reward below baseline decreases it)."""
     torch.manual_seed(0)
     cell = MaskedGRUCell(input_dim=8, hidden_dim=16)
     learner = NodePerturbationLearner(

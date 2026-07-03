@@ -1,43 +1,42 @@
-# Root config (seed for a Hydra group tree; §11.2). Sonnet 5 should split this into
-# composable groups (model=, task=, data=, train=, analysis=) but the keys below are
-# the contract the scaffold expects.
+# Root configuration. Keys are grouped by subsystem (model, mechanisms, task,
+# sim_brain, analysis, train, gates, neural, tiers).
 
 paths:
   data_root: /media/amin/EXTERNAL_USB/SMAF/Research/Representation/Working Memory/data
-  stimuli: ./stimuli                      # ImageTokenBank (broad training pool)
+  stimuli: ./stimuli                      # ImageTokenBank broad training pool
   results: ./results
   feature_cache: ./results/feat_cache
 
-# ---- the 2x2x2 factorial (§4.1). S=structure, M=modulation, L=learning ----
+# The 2x2x2 factorial: S = structure, M = modulation, L = learning.
 cells: [M000, M001, M010, M011, M100, M101, M110, M111]
 
 model:
-  encoder: resnet18                        # frozen, ImageNet (§0.1, §5.1)
+  encoder: resnet18                        # frozen, ImageNet-pretrained
   feature_dim: 512
   task_vec_dim: 10
   bottleneck: 128
   input_noise_sigma: 0.05
-  flat_units: 256                          # S=0
-  worker_units: 196                        # S=1, LM-RNN on 14x14 grid
+  flat_units: 256                          # S=0 (flat GRU) hidden width
+  worker_units: 196                        # S=1 worker population, 14x14 grid
   worker_grid: [14, 14]
-  worker_density: 0.04                     # spatial locality mask target (§5.2)
-  manager_units: 64                        # tuned for param-budget match, see DECISIONS.md
-  manager_period: 5                        # T_m (or event-gated when M=1)
-  param_budget_tol: 0.05                   # match flat vs HRL within +-5%
-  readout_scale: 1.0                       # neutral in Core; swept in the oblique sub-exp (§4.3)
-  action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no} (§5.3, §7.1)
-  g_dim: 128                               # top-down context g_t = W_g . h^m_t dim (§5.2)
-  worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t (§5.2)
+  worker_density: 0.04                     # spatial locality mask target density
+  manager_units: 64                        # tuned for parameter-budget match; see DECISIONS.md
+  manager_period: 5                        # manager clock period (or event-gated when M=1)
+  param_budget_tol: 0.05                   # flat vs. hierarchical core parameter match tolerance
+  readout_scale: 1.0                       # neutral in the core design; swept in the oblique sub-experiment
+  action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no}
+  g_dim: 128                               # top-down context g_t = W_g . h^m_t dimension
+  worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t
 
 mechanisms:
-  reflection_lambda: 0.9                   # R_t leak (§6.1)
+  reflection_lambda: 0.9                   # R_t leak rate
   reflection_beta: 1.0                     # gate bias gain
-  local_rule: node_perturbation            # L=1 default (§6.2); fallback ladder -> e_prop
+  local_rule: node_perturbation            # L=1 default rule; fallback ladder escalates to e-prop
   perturb_sigma: 0.05
   elig_decay: 0.9
   lr_local: 1.0e-3
 
-task:                                      # image Sternberg (§7.1)
+task:                                      # image-Sternberg working-memory task
   loads: [1, 2, 3]
   encode_steps: 10
   maintain_steps: 25
@@ -48,15 +47,15 @@ task:                                      # image Sternberg (§7.1)
   fixation_steps: 3
   iti_steps: 2
   feedback_steps: 1
-  # annealed curriculum (§7.2): fraction-of-total-steps boundaries, phases sample
-  # progressively broader (load, delay, lure) distributions.
+  # annealed curriculum: fraction-of-total-steps boundaries; each phase
+  # samples a progressively broader (load, delay, lure) distribution.
   curriculum:
     warmup_frac: 0.2      # loads=[1] only, short delay, no lures
-    ramp_frac: 0.6         # loads=[1,2,3], full delay, lure_fraction ramped 0 -> config value
+    ramp_frac: 0.6        # loads=[1,2,3], full delay, lure_fraction ramped 0 -> configured value
     # target phase = remaining fraction: full distribution (all loads/delay/lures)
 
-# simulated spiking generator (§8.3) -- ground-truth geometry for the pipeline
-# recovery gate; independent of the real NWB adapters.
+# Simulated spiking generator: plants ground-truth representational geometry
+# for the pipeline recovery gate, independent of the real NWB adapters.
 sim_brain:
   n_sessions: 12
   n_units_per_session: 40
@@ -69,7 +68,7 @@ sim_brain:
   category_dim: 4
   item_dim: 5
   load_levels: [1, 2, 3]
-  persistent_frac: 0.6     # fraction of latent variance in the persistent (vs dynamic) component
+  persistent_frac: 0.6     # fraction of latent variance in the persistent (vs. dynamic) component
   seed: 0
 
 analysis:
@@ -83,18 +82,18 @@ train:
   bptt_unroll: 200
   optimizer: adam
   lr: 3.0e-4
-  curriculum: [warmup, ramp, target]       # §7.2
-  checkpoint_every: 200                    # trials between checkpoints (M7)
-  eval_trials_per_load: 40                 # trials/load for the final behavioral-gate eval
+  curriculum: [warmup, ramp, target]
+  checkpoint_every: 200                    # trials between checkpoints
+  eval_trials_per_load: 40                 # trials per load for the final behavioral-gate evaluation
   value_loss_weight: 0.5
-  rung_check_frac: 0.5                     # fraction of budget before checking rung-1 gate (L=1 fallback)
+  rung_check_frac: 0.5                     # fraction of budget before checking the rung-1 gate (L=1 fallback)
 
-# behavioral gates (§14 M7)
+# Behavioral gates.
 gates:
   load1_acc: 0.95
   load3_acc: 0.80
 
-# neural alignment (§8): Tier A pooled = 000469 + 000673
+# Neural alignment: Tier A is the pooled 000469 + 000673 dataset.
 neural:
   datasets_tierA: ["000469", "000673"]     # picture Sternberg, MTL+MFC, poolable
   datasets_tierB: ["001187"]               # MTL replication
@@ -104,7 +103,7 @@ neural:
   min_firing_hz: 0.2
   bin_ms: 50
 
-# compute tiers (§11.3). run_grid reads tiers.<tier> and merges over defaults.
+# Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.
 tiers:
   smoke: {steps: 100, scaffold_sleep_s: 0.02}
   dev:   {steps: 20000, scaffold_sleep_s: 0.05}

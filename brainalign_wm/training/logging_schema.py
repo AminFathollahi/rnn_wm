@@ -1,8 +1,9 @@
-"""Frozen model-activity logging contract (protocol §9.1).
+"""Frozen model-activity logging contract.
 
-Every model tick during training/eval emits one `LogRecord`. Written to Parquet
-keyed by (run_id, t); schema is validated on write so a malformed record fails
-loudly instead of corrupting downstream RSA/dPCA/encoding analyses.
+Every model tick during training or evaluation emits one `LogRecord`,
+written to Parquet keyed by (run_id, t). The schema is validated on write,
+so a malformed record fails loudly rather than corrupting downstream
+representational-similarity, demixed-PCA, or encoding-model analyses.
 """
 from __future__ import annotations
 

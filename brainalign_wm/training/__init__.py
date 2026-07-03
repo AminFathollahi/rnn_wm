@@ -1,4 +1,5 @@
-"""brainalign_wm.training
-
-TODO(sonnet5): implement — §0.2/§14 — BPTT & local trainers, gates, train_one entrypoint, logging schema.
+"""Training: the model-activity logging schema and the single-run
+training entrypoint (`train.py::train_one`), covering both
+backpropagation-through-time and local-learning trainers with their
+respective behavioral gates.
 """

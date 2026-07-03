@@ -1,4 +1,4 @@
-"""brainalign_wm.neural.sim_brain
-
-TODO(sonnet5): implement — §8.3 — simulated spiking generator + geometry-recovery gate.
+"""Simulated spiking generator with known ground-truth representational
+geometry, and the geometry-recovery gate that validates the analysis
+pipeline against it.
 """

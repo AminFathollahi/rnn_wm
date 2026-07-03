@@ -1,4 +1,5 @@
-"""brainalign_wm.neural
-
-TODO(sonnet5): implement — §8 — NeuralDataset contract, NWB adapters, simulated-spike generator.
+"""Neural-data interface: the dataset contract shared by simulated and
+real recordings, a simulated-spiking generator with known ground-truth
+representational geometry, and adapters for the human single-neuron
+electrophysiology datasets.
 """

@@ -1,4 +1,3 @@
-"""brainalign_wm.utils
-
-TODO(sonnet5): implement — shared helpers (device selection, seeding, io).
+"""Shared utilities: capability-aware device selection and deterministic
+seeding.
 """

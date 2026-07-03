@@ -1,10 +1,11 @@
-"""Frozen ResNet-18 (ImageNet) visual encoder (protocol §0.1, §5.1).
+"""Frozen ResNet-18 (ImageNet-pretrained) visual encoder.
 
-v_t = f_enc(I_t) in R^512: penultimate global-average-pool output. Frozen and
-eval()-only -- no learning rule (BPTT or local) ever touches it, so the
-recurrent-learning question stays isolated from the visual front end.
-Features are meant to be cached to disk by callers (ImageTokenBank,
-NWB-stimulus caching); this module holds only the encoder itself.
+v_t = f_enc(I_t) in R^512: the penultimate global-average-pool output. The
+encoder is frozen and kept in evaluation mode -- no learning rule
+(backpropagation-through-time or local) ever touches it, keeping the
+recurrent-learning question isolated from the visual front end. Callers
+(the image token bank, NWB stimulus caching) are responsible for caching
+features to disk; this module holds only the encoder itself.
 """
 from __future__ import annotations
 

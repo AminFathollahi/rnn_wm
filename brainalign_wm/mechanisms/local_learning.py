@@ -1,39 +1,39 @@
-"""Local reward-modulated learning (knob L=1), protocol §6.2.
+"""Local reward-modulated learning (learning factor L=1): reward-modulated
+node perturbation with eligibility traces (Miconi 2017). No
+backpropagation-through-time occurs anywhere in this module -- weight
+updates are a *global* scalar (R - R_bar) times a *local*, per-synapse
+eligibility trace, computed entirely under `torch.no_grad()`.
 
-Default rule: reward-modulated node perturbation with eligibility traces
-(Miconi 2017). No BPTT anywhere in this module -- weight updates are a
-*global* scalar (R - R_bar) times a *local*, per-synapse eligibility trace,
-computed entirely under `torch.no_grad()`.
+This module owns the eligibility-trace bookkeeping and the three-factor
+update; the perturbation itself is injected at the pre-activation of each
+GRU gate unit (dimension `3*hidden`, one term per reset/update/candidate
+unit) by the training loop (`training/train.py::_perturbed_gru_step`), not
+here. An earlier version of this design perturbed the cell's post-gate
+output state directly; that is dimensionally incompatible with the traced
+weight matrices (which have `3*hidden` output rows) and was corrected --
+see DECISIONS.md. Eligibility traces are formed between each perturbed gate
+unit and its two presynaptic inputs (the previous hidden state, for
+`weight_hh`; the step input, for `weight_ih`):
 
-**Simplification, logged (protocol §0 rule 7 -- ambiguity resolved by
-precedent/tractability):** Miconi's original rule perturbs a simple
-continuous-time RNN's single pre-activation per unit. Our recurrent cores are
-GRUs (3 internal gates per unit), for which "the" pre-activation to perturb
-is not literally specified by the protocol. We perturb the cell's **output
-activity** h_t directly (`h_t_perturbed = h_t + xi_t`, "activity/node
-perturbation" -- a standard, simpler variant of node perturbation that sidesteps
-picking one of the 3 GRU gate pre-activations, is agnostic to cell internals,
-and composes cleanly with the masked worker / gated manager). Eligibility
-traces are then formed between each perturbed unit and its two presynaptic
-inputs (previous hidden state, for `weight_hh`; step input, for `weight_ih`).
-
-    xi_t ~ N(0, sigma_p^2 I_H)                              -- exploratory node perturbation
+    xi_t ~ N(0, sigma_p^2 I_{3H})                             -- exploratory perturbation on gate pre-activations
     e_hh[i,j] = gamma_e * e_hh[i,j] + xi_t[i] * h_prev[j]     -- eligibility trace, weight_hh
     e_ih[i,j] = gamma_e * e_ih[i,j] + xi_t[i] * x_t[j]        -- eligibility trace, weight_ih
     R_bar <- EMA(r)                                          -- running reward baseline
     dW = eta * (r - R_bar) * E                                -- three-factor update, at trial end
 
-Fallback ladder (§6.2): rung 1 = this rule as-is. Rung 2 = this rule with
-`normalize_traces=True, adaptive_baseline=True` (trace normalization +
-per-condition adaptive baseline + optional reward shaping). Rung 3 (e-prop,
-Bellec et al.) is **not implemented this session** -- a real e-prop
-implementation requires propagating the GRU's actual local Jacobian
-(pseudo-derivative) through the masked/gated recurrence, which is a
-substantial separate effort; attempting a rushed version risked silently
-wrong gradients, which protocol §0 rule 6 explicitly forbids ("never
-fabricate a gate pass"). `walk_fallback_ladder` raises `RungExhausted` after
-rung 2 so the trainer (M7) can log rung=3-not-available honestly rather than
-crash uninformatively. This gap is logged in DECISIONS.md and README.
+A fallback ladder is defined for cells that do not clear their behavioral
+gate under the default rule: rung 1 is the rule above; rung 2 is the same
+rule with `normalize_traces=True, adaptive_baseline=True` (trace
+normalization, a per-condition adaptive baseline, and optional reward
+shaping). Rung 3 (e-prop, Bellec et al.) is not implemented: a correct
+e-prop implementation requires propagating the GRU's local Jacobian
+(pseudo-derivative) through the masked and gated recurrence, a substantial
+undertaking in its own right, and an incomplete implementation risks
+producing silently incorrect gradients rather than a usable result.
+`make_learner_for_cell` raises `RungExhausted` if rung 3 is requested, so
+the training loop records the gap explicitly (rung=3 unavailable) rather
+than failing uninformatively or substituting backpropagation. This gap is
+recorded in DECISIONS.md and the project README.
 """
 from __future__ import annotations
 
@@ -75,8 +75,9 @@ class TracedWeight:
     def accumulate(self, xi_t: torch.Tensor, presyn_t: torch.Tensor, gamma_e: float) -> None:
         """xi_t: [batch, H] perturbation on the post-synaptic units this
         weight projects TO (rows). presyn_t: [batch, D] presynaptic activity
-        this weight projects FROM (cols). Batch-mean outer product (batched
-        training; §11.4 determinism holds per-seed, not per-batch-element)."""
+        this weight projects FROM (cols). Batch-mean outer product; note that
+        determinism is guaranteed per-seed, not per-batch-element, when the
+        batch size varies."""
         outer = torch.einsum("bi,bj->ij", xi_t, presyn_t) / xi_t.shape[0]
         self.trace.mul_(gamma_e).add_(outer)
 
@@ -167,12 +168,13 @@ def make_learner_for_cell(
     seed: int,
 ) -> NodePerturbationLearner:
     """Build a `NodePerturbationLearner` over a `MaskedGRUCell`-like module's
-    `weight_hh`/`weight_ih` (protocol §6.2's "only recurrent + head weights
-    learn" -- call once per trainable cell, e.g. flat GRU cell, worker cell,
-    manager cell, and separately for `Heads.pi`/`Heads.value`)."""
+    `weight_hh`/`weight_ih`. The frozen visual encoder never learns under
+    L=1; only recurrent and head weights do, so this is called once per
+    trainable cell (the flat GRU cell, or the worker and manager cells
+    separately) and again for `Heads.pi`/`Heads.value`."""
     if rung not in (1, 2):
         raise RungExhausted(
-            f"rung {rung} ({RUNG_NAMES.get(rung, '?')}) is not implemented this session; "
+            f"rung {rung} ({RUNG_NAMES.get(rung, '?')}) is not implemented; "
             f"record rung=4 (H3 undefined for this cell/seed) rather than substituting BPTT."
         )
     return NodePerturbationLearner(

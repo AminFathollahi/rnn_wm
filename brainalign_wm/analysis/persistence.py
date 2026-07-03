@@ -1,8 +1,8 @@
-"""Single-neuron persistence, selectivity, and load-tuning (protocol §9.5,
-H6). Operates on `[n_units, n_conditions, n_timebins]` condition-mean rate
-tensors plus a matching list of condition metadata (dicts/namedtuples with
-at least `.load`, `.item_id`/`.category`), so the same code runs on model
-units and real/simulated neurons alike.
+"""Single-neuron persistence, selectivity, and load-tuning measures.
+Operates on `[n_units, n_conditions, n_timebins]` condition-mean rate
+tensors plus a matching list of condition metadata (dicts or namedtuples
+with at least `.load`, `.item_id`/`.category`), so the same code runs on
+model units and on real or simulated neurons alike.
 """
 from __future__ import annotations
 

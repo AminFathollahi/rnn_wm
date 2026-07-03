@@ -1,4 +1,4 @@
-"""Capability-aware device selection (§0.1).
+"""Capability-aware device selection.
 
 `torch.cuda.is_available()` is not enough on this machine: torch 2.5.1 reports a CUDA
 device but cannot run on the RTX 5070 Ti (sm_120). Check the compiled arch list.
@@ -17,7 +17,7 @@ def get_device(prefer_cuda: bool = True):
             if any(a.startswith(want) for a in archs):
                 return torch.device("cuda")
             print(f"[device] GPU is {want} but torch was built for {archs}; "
-                  f"using CPU. Run `make setup` to upgrade PyTorch (§0.2).")
+                  f"using CPU. Run `make setup` to upgrade PyTorch.")
         except Exception as e:  # noqa: BLE001
             print(f"[device] GPU capability check failed ({e}); using CPU.")
     return torch.device("cpu")

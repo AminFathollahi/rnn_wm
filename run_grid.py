@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Overnight training-grid orchestrator for the brain-aligned WM project.
+"""Orchestrator for the 2x2x2 factorial training grid.
 
-See the master protocol `protocol_v4_master_prompt.md` §0.2 (Bootstrap & overnight run)
-and §4.1 (the 2x2x2 factorial). This file is intentionally dependency-free (stdlib only)
-so it runs *before* the package/torch are fully installed and can drive a scaffold demo.
+Enumerates the eight factorial cells (M000-M111) crossed with a configurable
+number of random seeds and executes `brainalign_wm.training.train.train_one`
+for each (cell, seed) pair. Design properties:
 
-What it does:
-  * enumerates the 8 factorial cells (M000..M111) x seeds, seed-major so a *complete
-    factorial* appears early (breadth-before-depth, §0.2 Step 2);
-  * is fully resumable: completed runs (from results/manifest.jsonl) are skipped;
-  * isolates each run: a crash / failed gate is logged and the loop continues;
-  * respects a wall-clock budget and handles SIGINT/SIGTERM cleanly;
-  * writes results/manifest.jsonl and MORNING_REPORT.md.
+  * seed-major run ordering, so a complete pass over all eight cells is
+    produced before any seed's replicate count is incremented (breadth
+    before depth);
+  * resumable: completed runs recorded in `results/manifest.jsonl` are
+    skipped on subsequent invocations, and `train_one` itself resumes each
+    individual run from its last checkpoint (see `training/train.py`);
+  * isolated per-run execution: an exception or failed gate in one run is
+    recorded and does not halt the remaining runs;
+  * enforces a wall-clock budget and terminates cleanly on SIGINT/SIGTERM;
+  * writes `results/manifest.jsonl` and a summary report, `RUN_REPORT.md`.
 
-The actual training lives in `brainalign_wm.training.train.train_one` (TODO for the
-implementer). Until that exists, run with `--scaffold` to exercise the orchestration
-end-to-end using a synthetic stub.
+A `--scaffold` mode substitutes a synthetic stub for `train_one`, allowing
+the orchestration logic to be exercised without the model/training
+dependencies installed.
 
 Usage:
-  python run_grid.py --seeds 8 --budget 10h            # real training (needs train_one)
-  python run_grid.py --scaffold --seeds 3 --budget 30m # orchestration demo (no deps)
+  python run_grid.py --seeds 8 --budget 48h            # execute the training grid
+  python run_grid.py --scaffold --seeds 3 --budget 30m # orchestration-only demonstration
 """
 from __future__ import annotations
 
@@ -38,7 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 MANIFEST = RESULTS / "manifest.jsonl"
-REPORT = ROOT / "MORNING_REPORT.md"
+REPORT = ROOT / "RUN_REPORT.md"
 
 # The eight factorial cells, ordered by (S, M, L) bits -> M<S><M><L>.
 CELLS = [
@@ -126,7 +129,7 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
     for r in recs:
         by_status[r.get("status", "?")] = by_status.get(r.get("status", "?"), 0) + 1
     lines = [
-        "# MORNING REPORT",
+        "# Training Grid Report",
         "",
         f"_generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} | "
         f"git {git_commit()} | elapsed {elapsed_s/3600:.2f}h / budget {budget_s/3600:.2f}h_",
@@ -157,7 +160,7 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         "",
         "## Resume",
         "",
-        "Re-run `make overnight` (or `python run_grid.py ...`) to continue; completed runs are skipped.",
+        "Re-run `make run-grid` (or `python run_grid.py ...`) to continue; completed runs are skipped.",
         f"Non-completed on record: {len(remaining)}.",
         "",
     ]
@@ -168,10 +171,10 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
 # ----------------------------- training entrypoint resolution -----------------------------
 
 def _scaffold_train_one(run: dict, cfg: dict) -> dict:
-    """Synthetic stub so the orchestration is runnable before real training exists.
-
-    TODO(sonnet5): DELETE this once brainalign_wm.training.train.train_one is implemented.
-    It fakes gates/accuracy deterministically from the seed and writes a dummy checkpoint.
+    """Synthetic stand-in for `train_one`, used by `--scaffold` to exercise
+    the orchestration logic in isolation from the model and training
+    dependencies. Deterministically fakes gates and accuracy from the seed
+    and writes a placeholder checkpoint file.
     """
     rng = random.Random(hash((run["run_id"],)) & 0xFFFFFFFF)
     ckpt_dir = RESULTS / "checkpoints" / run["run_id"]

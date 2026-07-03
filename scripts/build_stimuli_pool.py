@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Materialize the ImageTokenBank's broad naturalistic pool (protocol §7.3)
-from CIFAR-100 superclasses, grouped into 4 categories comparable to the
-human Sternberg datasets' picture categories (protocol §7.1: "use
-superordinate categories comparable to the dataset's -- faces, animals,
-objects, places").
+"""Materializes the ImageTokenBank's broad naturalistic training pool from
+CIFAR-100 superclasses, grouped into four categories comparable to the
+human Sternberg datasets' picture categories: faces, animals, objects, and
+places.
 
-Why CIFAR-100: disk-light (~170MB), license-clean, auto-downloads via
-torchvision, and ships fine + superclass labels -- a tractable way to build a
-*broad* training pool without hand-curating thousands of images (protocol §0
-rule 7: falsifiable / precedented / tractable default; logged in
-DECISIONS.md). Images are low-res (32x32, upsampled to 224 by the encoder
-transform) but this pool is only used to train a *general* WM operation --
-the brain-alignment comparison uses the datasets' own embedded stimulus
-images (§7.4), not this pool, so photorealism here is not load-bearing.
+CIFAR-100 was chosen for being disk-light (~170MB), license-clean, and
+auto-downloadable via torchvision, with fine and superclass labels already
+provided -- a tractable way to build a broad training pool without
+hand-curating thousands of images (rationale recorded in DECISIONS.md).
+Images are low-resolution (32x32, upsampled to 224 by the encoder
+transform), but this pool is used only to train a general working-memory
+operation; the brain-alignment comparison uses the datasets' own embedded
+stimulus images, not this pool, so photorealism here is not load-bearing.
 
 Caveat logged: CIFAR-100 has no genuine face closeups; the 'people' fine
 classes (baby/boy/girl/man/woman) are the closest available proxy for

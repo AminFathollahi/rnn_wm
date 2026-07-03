@@ -1,4 +1,4 @@
-"""Global determinism (protocol §11.4): one seed drives python/numpy/torch/cudnn."""
+"""Global determinism: a single seed drives Python, NumPy, PyTorch, and cuDNN."""
 from __future__ import annotations
 
 import os

@@ -1,10 +1,11 @@
-"""Annealed curriculum (protocol §7.2): 3 phases by fraction of total training
-steps -- warmup (load=1, short delay, no lures) -> ramp (all loads, full delay,
-lure_fraction linearly ramped 0 -> target) -> target (full distribution).
+"""Annealed training curriculum: three phases defined by fraction of total
+training steps -- warmup (load 1, short delay, no lures), ramp (all loads,
+full delay, lure fraction linearly increased from 0 to its target value),
+and target (the full training distribution).
 
-`CurriculumSchedule.params_for` is a pure function of (step_idx, total_steps,
-config) so the sampling distribution over time is fully reconstructable from
-logged (step_idx, total_steps) pairs, per the protocol's logging requirement.
+`CurriculumSchedule.params_for` is a pure function of (step_idx,
+total_steps, config), so the sampling distribution at any point in training
+is fully reconstructable from the logged (step_idx, total_steps) pair.
 """
 from __future__ import annotations
 
@@ -29,9 +30,8 @@ class CurriculumSchedule:
     ramp_frac: float
     full_lure_fraction: float
     full_maintain_steps: int
-    # Warmup delay is shortened to keep early trials fast/easy (protocol §7.2,
-    # "short delay"); 20% of the target maintenance length, floor 1 step --
-    # an explicit design choice, not specified numerically by the protocol.
+    # The warmup-phase maintenance delay is shortened to 20% of the target
+    # length (floor of one step) to keep early trials fast and easy.
     warmup_delay_frac: float = 0.2
 
     @property

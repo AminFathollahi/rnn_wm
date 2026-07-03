@@ -1,5 +1,6 @@
-"""Hierarchical, spatially-sparse recurrent core (S=1), protocol §5.2: a
-manager-worker pair with a locality-masked worker (LM-RNN).
+"""Hierarchical, spatially-sparse recurrent core (structure factor S=1): a
+manager-worker pair in which the worker is a locality-masked recurrent
+network (an LM-RNN, following Khona & Chandra 2023).
 
     Worker (LM-RNN), h^w in R^Nw (default 196, 14x14 grid):
         W_rec_eff = W_rec (.) Mask   -- fixed spatial "lottery ticket" at init
@@ -10,19 +11,21 @@ manager-worker pair with a locality-masked worker (LM-RNN).
         h^m_t = GRU(s_t, h^m_{t-1})                     -- manager ticks only
         g_t = W_g . h^m_t                               -- top-down context
 
-Manager ticking (M knob, resolved design choice -- see DECISIONS.md):
-  M=0 (no reflective gate): hard periodic clock. The manager GRU only runs
-      every `manager_period` steps; on other steps h^m_t = h^m_{t-1} exactly
-      (state held, no gradient path through a no-op step).
-  M=1 (reflective gate, protocol §6.1): the manager runs its GRU cell every
-      step, but its update-gate pre-activation gets an additive
-      `beta*R_t` bias from `mechanisms.reflective_gate.ReflectiveGate`. This
-      makes ticking *continuous and reflection-driven* rather than a fixed
-      clock: low R_t -> u_t~0 -> state held (soft persistence); a run of
-      surprises (high load / lure / error) -> R_t rises -> u_t->1 -> the
-      manager overwrites its state and pushes a new g_t down to the worker.
-      This directly implements the "event-gated" language in §5.2/§6.1
-      without needing a separate discrete tick/no-tick decision.
+Manager update timing (modulation factor M; the resolution of this design
+choice is recorded in DECISIONS.md):
+  M=0 (no reflective gate): a hard periodic clock. The manager GRU runs
+      only every `manager_period` steps; on other steps h^m_t = h^m_{t-1}
+      exactly (state held, with no gradient path through a no-op step).
+  M=1 (reflective gate): the manager runs its GRU cell on every step, but
+      its update-gate pre-activation receives an additive `beta*R_t` bias
+      from `mechanisms.reflective_gate.ReflectiveGate`. This makes the
+      effective update rate continuous and reflection-driven rather than a
+      fixed clock: a low R_t keeps u_t near 0 (state held, soft
+      persistence), while a run of surprising events (high load, a lure, or
+      an error) raises R_t, driving u_t toward 1 so the manager overwrites
+      its state and propagates a new top-down signal g_t to the worker.
+      This gives the manager an event-gated update rule without requiring a
+      separate discrete tick/no-tick decision.
 """
 from __future__ import annotations
 
@@ -76,7 +79,7 @@ class HRLCore(nn.Module):
 
     def pool_worker(self, h_w: torch.Tensor) -> torch.Tensor:
         """s_t = pool(h^w_t): non-overlapping spatial mean-pool over the
-        worker's 14x14 grid (protocol §5.2). [batch, Nw] -> [batch, s_dim]."""
+        worker's 14x14 grid. [batch, Nw] -> [batch, s_dim]."""
         gh, gw = self.grid
         b = self.pool_block
         batch = h_w.shape[0]
@@ -98,10 +101,11 @@ class HRLCore(nn.Module):
         t: int,
         gate_bias: Optional[torch.Tensor] = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        """One step. `gate_bias` (protocol §6.1 beta*R_t) is required iff
-        `self.reflective` is True (M=1); ignored/must be None otherwise.
-        Returns (new_state, manager_update_gate_u_t) -- u_t is exposed for
-        logging/analysis (§6.1 causal-control diagnostics)."""
+        """One step. `gate_bias` (the reflection-derived term beta*R_t) is
+        required when `self.reflective` is True (M=1) and must be None
+        otherwise. Returns (new_state, manager_update_gate_u_t); u_t is
+        exposed for logging and for the causal diagnostics on the
+        reflective gate's effect."""
         h_w_prev, h_m_prev, g_prev = state["h_worker"], state["h_manager"], state["g"]
 
         worker_in = torch.cat([z_t, g_prev], dim=-1)
@@ -125,7 +129,7 @@ class HRLCore(nn.Module):
         return new_state, u_t
 
     def readout_state(self, state: dict[str, torch.Tensor]) -> torch.Tensor:
-        """h*_t = [h^w_t ; h^m_t] for the shared output heads (protocol §5.3)."""
+        """h*_t = [h^w_t ; h^m_t] for the shared output heads."""
         return torch.cat([state["h_worker"], state["h_manager"]], dim=-1)
 
     def param_count(self) -> int:

@@ -1,4 +1,3 @@
-"""brainalign_wm.reporting
-
-TODO(sonnet5): implement — §13 — manuscript assembly + auto-generated result tables.
+"""Manuscript assembly and automatically generated result tables. Not yet
+implemented.
 """

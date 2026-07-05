@@ -6,11 +6,13 @@ persistence}.py` but never invoked outside the sim-brain recovery gate).
 Both hinge on a per-session, per-tick/bin time series, decoded or indexed
 against a variable with enough repeated trials to be tractable. Item/
 category identity (as used for the maintenance-epoch RSA condition, see
-`run_all.py`/`stimulus_categories.py`) recurs too rarely per session to
-support a stratified decode with several folds; LOAD does (each session
-typically has dozens of trials per load level), and is still a genuine,
-epoch-appropriate (not post-hoc) delay-period variable, so it is used here
-as the shared decodable/indexed factor for both model and neural data.
+`run_all.py::_maintenance_condition_fn`) has enough repeats on only a
+subset of sessions (dataset 000469; see that module's docstring); LOAD
+recurs on every session (dozens of trials per load level), and is still a
+genuine, epoch-appropriate (not post-hoc) delay-period variable, so it is
+used here as the shared decodable/indexed factor for both model and
+neural data, giving full session coverage for H5/H6 regardless of which
+maintenance-condition schema a given session supports.
 """
 from __future__ import annotations
 

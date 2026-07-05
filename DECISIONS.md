@@ -229,6 +229,80 @@ reviewed the full diff independently. Full detail in `comments.txt`'s
   even 1500-3000 steps showed no learning in diagnostic tests); this gate
   should be re-checked once the real grid's `dev`/`full` tier runs
   complete.
+
+## Real-data validation surfaced a genuine DV confound; category-imputation replaced with real identity/category (2026-07-05, same session)
+
+Ran the real (non-smoke) grid at `dev` tier (20k steps) to check the H5
+chance-vs-trained gate on genuinely-trained checkpoints (M000 reached
+92.5% load1 accuracy -- real learning, not noise). Result: the untrained
+chance model scored ABOVE the well-trained M000 on maintenance-epoch
+alignment (chance=0.159, M000=0.105) -- the wrong direction, and M001
+(near-chance behaviorally, 55% accuracy) also scored above M000. Root-
+caused via direct data inspection (not assumed): the maintenance-epoch
+condition scheme imputed a category label per stimulus via nearest-
+neighbor in the SAME frozen ResNet encoder the model's own front end
+consumes. An untrained front end passes encoder structure through
+relatively unfiltered; a task-optimized network may compress away exactly
+the category-correlated variance that's incidental to the match/non-match
+decision. This let training *reduce* the proxy metric even while making
+the network behaviorally better -- a real confound in the metric, not
+sampling noise (though sampling noise at only 8 sessions/1 cell also
+contributes and was checked first via a synthetic RDM sanity test, which
+found no indexing/comparison bug).
+
+**Fix: replaced the encoder-derived category imputation with REAL,
+data-provided labels** (no model-encoder involvement at all), decided
+per session directly from that session's own real trial data:
+- Checked ALL 65 Tier-A sessions' held-item repeat structure (not just
+  one, as the original A2a compromise had): dataset 000469 (21 sessions)
+  uses a fixed, closed pool of 25 item-sets per session repeated ~8-10
+  times each -- real item IDENTITY is directly usable with no proxy.
+- Dataset 000673 (44 sessions) genuinely never repeats an item-set, but
+  its raw PicID values decode a REAL, experimenter-assigned category:
+  `pid // 100` gives exactly 5 groups of ~55-57 images. This is not an
+  inferred convention -- it is EXACTLY what the original authors' own
+  published analysis code computes (`NWB_calcSelective_SB.m` in
+  github.com/rutishauserlab/SBCAT-release-NWB, cited by 000673's own
+  `dandiset.yaml`): `CAT = str2double(num2str(picID)(1))`, the first
+  digit of the PicID, arithmetically identical to `pid // 100` for these
+  3-digit codes. Independently corroborated against the cached ResNet
+  features (mean within-category cosine similarity 0.64 vs. 0.52
+  across-category) before finding the authoritative source.
+- `run_all.py::_maintenance_condition_fn` now picks per-session (from
+  that session's own real trials, so model replay and neural data always
+  agree): real identity if the session has repeat structure, else real
+  category, else the session contributes nothing (honest
+  "insufficient_shared_conditions", A2f). `stimulus_categories.py`
+  (the encoder-imputation module) was deleted -- no longer needed.
+- **Re-validated against the same real dev-tier checkpoints**: chance
+  (untrained) = 0.079, trained M000 (92.5% accuracy) = 0.117 -- trained
+  now clearly beats chance, the H5 acceptance gate direction is fixed.
+  M000 (highest-accuracy S=0 cell) also now scores above the other,
+  less-trained S=0 cells (M001/M010/M011), a sensible pattern absent
+  before the fix.
+- This was found and fixed BEFORE committing to the real grid: the
+  dev-tier grid was stopped (SIGKILL, mid-cell) once the confound was
+  identified, so no further compute was wasted training under the
+  confounded DV; the 5 cells that had already completed (M000/M001/
+  M010/M011/M100_s0) remain valid (the confound was purely
+  analysis-side; training/checkpoints are unaffected) and were reused
+  directly for this re-validation, saving ~80 minutes of retraining.
+
+**Master-protocol cross-check.** Re-read `protocol_v4_master_prompt.md`
+(the original master prompt this project was built from, referenced but
+not available to earlier sessions) end-to-end to check for other
+compromises. Per the user's explicit instruction, `comments.txt` (the
+later audit) takes priority over the protocol wherever they conflict
+(none of this session's fixes actually conflict with the protocol's
+scientific intent -- e.g. A2a/A2b's ban on post-hoc probe-time labels for
+maintenance-epoch conditions corrects an ambiguity in the protocol's own
+§9.2 phrasing, not a deliberate contradiction of it). Found two additional
+Core-scope gaps NOT flagged by comments.txt: ridge encoding models and
+dPCA marginalization on real data (protocol §9.5, listed as Core, not
+Extended) and the B1 (encoder-only)/B2 (task-model RDM) baselines
+(protocol §4.2, explicitly "non-negotiable" for every alignment plot) had
+been scoped out for time (comments.txt RESPONSES R2). User confirmed:
+wire these in now, before launching the grid.
 - **Wall-clock benchmark (post-batching, A1c) and grid budget decision:**
   timed `train_one` directly for 2000 steps at batch_size=16: M000
   (S=0,M=0,L=0, cheapest) 43.45 ms/step; M111 (S=1,M=1,L=1, most
@@ -243,4 +317,52 @@ reviewed the full diff independently. Full detail in `comments.txt`'s
   8 cells x >=3 seeds under one frozen commit"). Launched via
   `python run_grid.py --seeds 3 --tier dev --budget 8h` (breadth-first
   ordering is already `run_grid.py`'s default, so all 8 cells complete at
-  each seed before starting the next).
+  each seed before starting the next). This first launch was stopped
+  (SIGKILL) mid-grid once the R17 confound (above) was found; see the next
+  entry for what happened before relaunch.
+
+## B1/B2 baselines, encoding models, dPCA wired in (master-protocol Core/§4.2 gaps, 2026-07-05)
+
+Per the master-protocol cross-check (R18), wired in the two "non-negotiable"
+baselines and the two Core-scope real-data analyses that had been scoped
+out earlier for time:
+
+- **B1 (encoder-only)**: per-session RDM built from the frozen ResNet
+  features of held items alone (no recurrent/WM processing at all) --
+  `run_all.py::_encoder_only_patterns_for_session`, compared against the
+  same neural RDM and shared-condition set the trained model's row uses.
+- **B2 (task-model)**: RDM implied purely by the ground-truth condition
+  variables (item/category identity, load) -- `run_all.py::
+  _task_model_rdm`, no real data needed to construct it, only to compare
+  against.
+- **Ridge encoding models** (model<->neuron, nested CV via `encoding.py`,
+  already implemented but unwired): uses PER-TRIAL (not condition-mean)
+  patterns paired by real trial identity (`run_all.py::
+  _paired_trial_patterns` -- valid because `generate_activity_logs.
+  replay_session` assigns `trial_id` as the position within that
+  session's own real trial table), so this works on every session with
+  model replay coverage regardless of whether it supports identity- or
+  category-based RSA conditions.
+- **dPCA marginalization on real data** (item/category, load, time;
+  `dpca.py`, already implemented but only used against simulated data):
+  `run_all.py::_dpca_for_run` builds the same condition-mean tensor the
+  recovery gate uses, per session, for both model and neural sides.
+- All four wired into `main()`'s per-run loop / a one-time baseline pass,
+  writing `results/baselines.csv`, `results/encoding_results.csv`,
+  `results/dpca_results.csv`.
+
+**Validated together** against the 5 real dev-tier checkpoints on disk
+(M000/M001/M010/M011/M100_s0, 10 sessions/dataset cap, 14m44s wall time):
+B1 (0.031 normalized alignment) < B2 (0.048) < untrained chance model
+(0.054-0.079 depending on control-cell choice) < trained M000 (0.079-0.117)
+-- a coherent, monotonically increasing "vision-only -> idealized-task-only
+-> untrained-recurrent -> trained-WM" ordering, exactly what the
+protocol's baseline framework is meant to demonstrate. Encoding R^2 is
+near-zero/slightly negative for all cells at this data scale (~130 trials,
+196-260-unit predictors) -- an expected characteristic of nested-CV ridge
+on small-N/high-dimensional/noisy single-neuron data, not a bug; revisit
+once the real grid's larger seed/session pool is available. dPCA
+item/load fraction-of-variance varies sensibly across cells (e.g. model
+item-variance 0.18 for M000 vs. 0.03 for M010) with no crashes. Full test
+suite (68 tests) and the sim-brain recovery gate re-confirmed passing
+after all of the above.

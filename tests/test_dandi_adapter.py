@@ -58,3 +58,38 @@ def test_rates_shape(adapter):
 def test_noise_ceiling_sane(adapter):
     lower, upper = adapter.noise_ceiling(None, "maintain")
     assert 0.0 <= lower <= upper <= 1.0 + 1e-6
+
+
+def test_stimulus_cache_covers_real_trial_picids(adapter):
+    """Regression guard: `cache_stimulus_features` must resolve each
+    session's OWN PicID convention (direct `image_<PicID>` key for 000673;
+    a 1-indexed position into `order_of_images` for 000469 -- these are
+    genuinely different across datasets, confirmed against the mounted NWB
+    files). Caching only the direct-key interpretation silently failed to
+    match nearly all of 000469's real trial PicIDs (0% for most sessions
+    checked), which meant `generate_activity_logs.py` skipped almost every
+    000469 trial (and, since 000469 is the only Tier A dataset with a
+    load=2 arm, nearly every load=2 condition system-wide) without any
+    error -- found via a real post-grid analysis run, not anticipated in
+    advance. This test would have caught it: real trial PicIDs must mostly
+    resolve to a cached feature, not mostly miss.
+
+    Checks whatever is currently on disk at `results/feat_cache/dataset_stimuli/`
+    (run `python -m brainalign_wm.encoders.cache_features` first) rather than
+    regenerating it -- that step encodes thousands of images through ResNet
+    and would make the suite noticeably slower on every run."""
+    from brainalign_wm.training.generate_activity_logs import _stimulus_features_for_session
+
+    trials = adapter.trials()
+    if not any((ROOT / "results" / "feat_cache" / "dataset_stimuli" / f"{s}.npz").exists() for s in trials.session.unique()):
+        pytest.skip("no cached stimulus features on disk; run `python -m brainalign_wm.encoders.cache_features` first")
+    total, kept = 0, 0
+    for sess in trials.session.unique():
+        cache = _stimulus_features_for_session(sess)
+        for row in trials[trials.session == sess].itertuples():
+            held = [int(x) for x in row.held_items if int(x) != 0]
+            probe = int(row.probe_item)
+            total += 1
+            kept += bool(cache) and all(str(p) in cache for p in held + [probe])
+    assert total > 0
+    assert kept / total > 0.9, f"only {kept}/{total} real trials matched a cached stimulus feature"

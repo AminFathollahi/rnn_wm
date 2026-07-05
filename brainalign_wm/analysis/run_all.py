@@ -999,8 +999,20 @@ def main(argv=None) -> int:
               "(need both region levels, >=2 levels of S, and >=6 rows).")
 
     if not args.skip_chance_control and len(headline_df):
-        control_model_id = "M111" if "M111" in headline_df.model_id.values else headline_df.model_id.iloc[0]
-        control_seed = int(headline_df[headline_df.model_id == control_model_id].seed.iloc[0])
+        # H5 needs a genuinely well-trained comparison model -- NOT "M111
+        # if present" (the previous default): M111 is the flagship
+        # SCIENTIFIC target cell, but it's also an L=1 cell, and L=1 has
+        # repeatedly failed to train above near-chance behavior (see
+        # RESPONSES.md). Comparing an untrained model against a cell that
+        # itself never behaviorally learned makes this gate compare chance
+        # to chance, not chance to trained -- found via a real post-grid
+        # run where this silently produced a FAIL (chance=trained=0.000)
+        # that had nothing to do with the chance-control machinery itself.
+        # Pick the row with the best accuracy_load1 (ties broken by
+        # accuracy_load3) among completed runs instead.
+        best_idx = (headline_df["accuracy_load1"] + headline_df["accuracy_load3"] * 1e-3).idxmax()
+        control_model_id = headline_df.loc[best_idx, "model_id"]
+        control_seed = int(headline_df.loc[best_idx, "seed"])
         print(f"\n[run_all] H5 chance-model negative control ({control_model_id}, untrained) ...")
         chance = chance_control_check(control_model_id, control_seed, dandi_data)
         trained_row = headline_df[(headline_df.model_id == control_model_id) & (headline_df.seed == control_seed)].iloc[0]

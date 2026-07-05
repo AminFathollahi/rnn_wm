@@ -229,3 +229,18 @@ reviewed the full diff independently. Full detail in `comments.txt`'s
   even 1500-3000 steps showed no learning in diagnostic tests); this gate
   should be re-checked once the real grid's `dev`/`full` tier runs
   complete.
+- **Wall-clock benchmark (post-batching, A1c) and grid budget decision:**
+  timed `train_one` directly for 2000 steps at batch_size=16: M000
+  (S=0,M=0,L=0, cheapest) 43.45 ms/step; M111 (S=1,M=1,L=1, most
+  expensive: HRL core + reflective gate + node perturbation) 52.83
+  ms/step. Extrapolated: `full` tier (150k steps) would take ~2-2.2h PER
+  CELL -- 8 cells x 1 seed alone is ~17-18h, far beyond any single-night
+  budget even after batching. `dev` tier (20k steps) takes ~14.5-17.6
+  min/cell -- 8 cells x 1 seed in ~2-2.4h, so 3 seeds fits in ~6-7h,
+  comfortably inside an 8h budget with margin for `run_grid.py` overhead.
+  Chose **dev tier, 3 seeds, 8h budget**, matching comments.txt E3's
+  explicit fallback ("reduce steps for a first clean pass ... to get all
+  8 cells x >=3 seeds under one frozen commit"). Launched via
+  `python run_grid.py --seeds 3 --tier dev --budget 8h` (breadth-first
+  ordering is already `run_grid.py`'s default, so all 8 cells complete at
+  each seed before starting the next).

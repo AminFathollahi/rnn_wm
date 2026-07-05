@@ -24,7 +24,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from brainalign_wm.neural.dataset_contract import ConditionLabel, normalize_region
+from brainalign_wm.neural.dataset_contract import ConditionLabel, normalize_region, region_family
 
 COLUMN_MAPS = {
     "000469": {
@@ -149,6 +149,8 @@ class DandiSternbergTierA:
         self.bin_ms = bin_ms
         self.min_firing_hz = min_firing_hz
         self._sessions: dict[str, _SessionData] = {}
+        self._trials_cache: Optional[pd.DataFrame] = None
+        self._rate_cache: dict[tuple, np.ndarray] = {}  # (uid, epoch) -> [n_all_trials, n_bins], at self.bin_ms only
         for ds in datasets:
             ds_root = self.data_root / ds
             if not ds_root.exists():
@@ -190,11 +192,21 @@ class DandiSternbergTierA:
 
     # ---------------- NeuralDataset Protocol ----------------
 
+    def _region_matches(self, canonical_region: str, region: Optional[str]) -> bool:
+        """`region` may be a canonical single region (e.g. 'hippocampus'), a
+        region FAMILY ('MTL'/'MFC', audit fix C2, resolved via
+        `dataset_contract.region_family`), or None (no filter)."""
+        if region is None:
+            return True
+        if region in ("MTL", "MFC"):
+            return region_family(canonical_region) == region
+        return canonical_region == region
+
     def units(self, region: Optional[str] = None) -> list[str]:
         out = []
         for sess in self._sessions.values():
             for uid in sess.unit_ids:
-                if region is None or sess.unit_region[uid] == region:
+                if self._region_matches(sess.unit_region[uid], region):
                     out.append(uid)
         return sorted(out)
 
@@ -203,47 +215,94 @@ class DandiSternbergTierA:
         return self._sessions[session_id].spikes[unit]
 
     def trials(self) -> pd.DataFrame:
-        return pd.concat([s.trials for s in self._sessions.values()], ignore_index=True)
+        if self._trials_cache is None:
+            self._trials_cache = pd.concat([s.trials for s in self._sessions.values()], ignore_index=True)
+        return self._trials_cache
+
+    def _epoch_rates_uncached(self, uid: str, epoch: str, all_trials: pd.DataFrame, bin_s: float, n_bins: int, session_id: str) -> np.ndarray:
+        spikes = self._sessions[session_id].spikes[uid]
+        result = np.zeros((len(all_trials), n_bins))
+        onset_col = all_trials[EPOCH_ONSET_COL[epoch]].values
+        session_mask = (all_trials["session"].values == session_id)
+        for ti in np.where(session_mask)[0]:
+            edges = onset_col[ti] + np.arange(n_bins + 1) * bin_s
+            counts, _ = np.histogram(spikes, bins=edges)
+            result[ti] = counts / bin_s
+        return result
 
     def rates(self, region: Optional[str], bin_ms: int, epochs: list[str]) -> np.ndarray:
         """[n_units, n_trials, n_bins]; per-trial epoch-onset-aligned binned
         rates, concatenated across the requested epochs (fixed windows,
-        `EPOCH_WINDOWS_S` -- see module docstring)."""
+        `EPOCH_WINDOWS_S` -- see module docstring). CAUTION: for a unit whose
+        own session != a given trial's session, that entry is left at 0.0 --
+        a valid "this unit wasn't recorded on this trial" placeholder ONLY
+        if the caller subsequently restricts to session-matched
+        (unit, trial) pairs (as `analysis.rsa._session_condition_rdm` does).
+        Averaging this tensor's columns directly across trials from
+        multiple sessions (as `response_patterns` used to, and as a naive
+        pooled analysis might) silently dilutes every condition mean with
+        injected zeros -- see `response_patterns` and
+        `analysis/pseudopopulation.py` for the valid cross-session
+        pooling path (audit fix A2d).
+
+        Per-(unit, epoch) results are cached at `self.bin_ms` (the
+        constructor's resolution -- the only one ever requested in
+        practice): the audit-fix alignment pipeline calls `rates()` far more
+        often than the original single-pass code did (once per session, per
+        region, per noise-ceiling resample), and recomputing every unit's
+        spike histogram from scratch each time (as this used to) was
+        "impractically slow" for anything beyond a small session subset --
+        see DECISIONS.md's M8 performance note, and `sim_brain`'s
+        `_rate_cache`, which this mirrors."""
         units = self.units(region)
         all_trials = self.trials()
         bin_s = bin_ms / 1000.0
         n_bins_per_epoch = {ep: max(1, int(round(EPOCH_WINDOWS_S[ep] / bin_s))) for ep in epochs}
         total_bins = sum(n_bins_per_epoch.values())
         out = np.zeros((len(units), len(all_trials), total_bins))
+        use_cache = bin_ms == self.bin_ms
         for ui, uid in enumerate(units):
             session_id = uid.split("#")[0]
-            spikes = self._sessions[session_id].spikes[uid]
-            for ti, row in enumerate(all_trials.itertuples()):
-                if row.session != session_id:
-                    continue
-                col = 0
-                for ep in epochs:
-                    onset = getattr(row, EPOCH_ONSET_COL[ep])
-                    n_bins = n_bins_per_epoch[ep]
-                    edges = onset + np.arange(n_bins + 1) * bin_s
-                    counts, _ = np.histogram(spikes, bins=edges)
-                    out[ui, ti, col : col + n_bins] = counts / bin_s
-                    col += n_bins
+            col = 0
+            for ep in epochs:
+                n_bins = n_bins_per_epoch[ep]
+                if use_cache:
+                    key = (uid, ep)
+                    if key not in self._rate_cache:
+                        self._rate_cache[key] = self._epoch_rates_uncached(uid, ep, all_trials, bin_s, n_bins, session_id)
+                    per_unit_epoch = self._rate_cache[key]
+                else:
+                    per_unit_epoch = self._epoch_rates_uncached(uid, ep, all_trials, bin_s, n_bins, session_id)
+                out[ui, :, col : col + n_bins] = per_unit_epoch
+                col += n_bins
         return out
 
     def response_patterns(self, region: Optional[str], epoch: str) -> np.ndarray:
+        """[n_conditions, n_units] condition-mean pseudopopulation. Audit fix
+        A2d: each unit's condition mean is computed using ONLY that unit's
+        own session's matching trials (never diluted by other sessions'
+        trials, which the pooled `rates(region, ...)` tensor otherwise
+        zero-fills for out-of-session entries)."""
         units = self.units(region)
         trials = self.trials()
         rates = self.rates(region, self.bin_ms, [epoch])
-        mean_rate = rates.mean(axis=2)
+        mean_rate = rates.mean(axis=2)  # [n_units, n_trials]; zero-filled outside each unit's own session
+        session_of_trial = trials.session.values
         out = np.zeros((len(self.conditions), len(units)))
         for ci, c in enumerate(self.conditions):
-            mask = (
+            cond_mask = (
                 (trials.load == c.load) & (trials.probe_in_set == c.probe_in_set)
                 & (trials.correct == c.correct)
             ).values
-            if mask.sum() > 0:
-                out[ci, :] = mean_rate[:, mask].mean(axis=1)
+            for ui, uid in enumerate(units):
+                own_session = uid.split("#")[0]
+                unit_mask = cond_mask & (session_of_trial == own_session)
+                if unit_mask.sum() > 0:
+                    out[ci, ui] = mean_rate[ui, unit_mask].mean()
+                # else: this unit's own session has no trials for this
+                # condition -- left at 0.0 (documented limitation; rare for
+                # the coarse load/in_set/correct schema used here), never
+                # averaged in from another unit's session (A2d).
         return out
 
     def regions(self) -> list[str]:

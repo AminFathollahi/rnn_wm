@@ -16,29 +16,44 @@ unit and its two presynaptic inputs (the previous hidden state, for
 `weight_hh`; the step input, for `weight_ih`):
 
     xi_t ~ N(0, sigma_p^2 I_{3H})                             -- exploratory perturbation on gate pre-activations
-    e_hh[i,j] = gamma_e * e_hh[i,j] + xi_t[i] * h_prev[j]     -- eligibility trace, weight_hh
-    e_ih[i,j] = gamma_e * e_ih[i,j] + xi_t[i] * x_t[j]        -- eligibility trace, weight_ih
-    R_bar <- EMA(r)                                          -- running reward baseline
-    dW = eta * (r - R_bar) * E                                -- three-factor update, at trial end
+    e_hh[b,i,j] = gamma_e * e_hh[b,i,j] + xi_t[b,i] * h_prev[b,j]   -- per-sample eligibility trace, weight_hh
+    e_ih[b,i,j] = gamma_e * e_ih[b,i,j] + xi_t[b,i] * x_t[b,j]      -- per-sample eligibility trace, weight_ih
+    R_bar <- EMA(mean_b(r_b))                                 -- running reward baseline (batch-mean reward)
+    dW = eta * mean_b[(r_b - R_bar) * E_b]                     -- three-factor update, at trial end
+
+Traces are kept **per batch element** (not averaged across the batch until
+the reward-weighted update at trial end): the whole point of node
+perturbation is that the update correlates each sample's own perturbation
+with its own reward. Averaging the trace across the batch before the reward
+is known would replace `mean_b[(r_b - Rbar) * xi_b]` with
+`mean_b[r_b - Rbar] * mean_b[xi_b]` -- the product of averages instead of
+the average of products -- which destroys exactly the correlation the
+algorithm exploits and would make the rule learn nothing for batch size > 1.
+This was caught while implementing batching (A1c) and is recorded in
+DECISIONS.md.
 
 A fallback ladder is defined for cells that do not clear their behavioral
 gate under the default rule: rung 1 is the rule above; rung 2 is the same
-rule with `normalize_traces=True, adaptive_baseline=True` (trace
-normalization, a per-condition adaptive baseline, and optional reward
-shaping). Rung 3 (e-prop, Bellec et al.) is not implemented: a correct
-e-prop implementation requires propagating the GRU's local Jacobian
-(pseudo-derivative) through the masked and gated recurrence, a substantial
-undertaking in its own right, and an incomplete implementation risks
-producing silently incorrect gradients rather than a usable result.
-`make_learner_for_cell` raises `RungExhausted` if rung 3 is requested, so
-the training loop records the gap explicitly (rung=3 unavailable) rather
-than failing uninformatively or substituting backpropagation. This gap is
-recorded in DECISIONS.md and the project README.
+rule with `normalize_traces=True, adaptive_baseline=True` -- trace
+normalization, AND a genuinely faster-adapting reward baseline (a smaller
+EMA decay constant, so the baseline tracks recent performance more closely
+and the resulting advantage estimate has different, and for a
+nonstationary/curriculum-shifting reward stream, typically lower variance
+than rung 1's slow baseline). Rung 3 (e-prop, Bellec et al.) is not
+implemented: a correct e-prop implementation requires propagating the GRU's
+local Jacobian (pseudo-derivative) through the masked and gated recurrence,
+a substantial undertaking in its own right, and an incomplete
+implementation risks producing silently incorrect gradients rather than a
+usable result. `make_learner_for_cell` raises `RungExhausted` if rung 3 is
+requested, so the training loop records the gap explicitly (rung=3
+unavailable) rather than failing uninformatively or substituting
+backpropagation. This gap is recorded in DECISIONS.md and the project
+README.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -60,25 +75,29 @@ class RungExhausted(RuntimeError):
 @dataclass
 class TracedWeight:
     """Eligibility-trace state for one weight matrix (weight_hh or weight_ih
-    of a `MaskedGRUCell`, or a `Heads` linear layer)."""
+    of a `MaskedGRUCell`, or a `Heads` linear layer). The trace is kept
+    per-batch-element (`[B, *param.shape]`), allocated lazily on the first
+    `accumulate()` call since the batch size isn't known at construction
+    time (see module docstring for why per-sample traces are load-bearing,
+    not just a memory/perf choice)."""
 
     param: nn.Parameter
     presyn_is_hidden: bool  # True: presynaptic = h_prev (weight_hh); False: presynaptic = x_t (weight_ih)
-    trace: torch.Tensor = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.trace = torch.zeros_like(self.param.data)
+    trace: Optional[torch.Tensor] = field(init=False, default=None)
 
     def reset(self) -> None:
-        self.trace.zero_()
+        if self.trace is not None:
+            self.trace.zero_()
 
     def accumulate(self, xi_t: torch.Tensor, presyn_t: torch.Tensor, gamma_e: float) -> None:
-        """xi_t: [batch, H] perturbation on the post-synaptic units this
-        weight projects TO (rows). presyn_t: [batch, D] presynaptic activity
-        this weight projects FROM (cols). Batch-mean outer product; note that
-        determinism is guaranteed per-seed, not per-batch-element, when the
-        batch size varies."""
-        outer = torch.einsum("bi,bj->ij", xi_t, presyn_t) / xi_t.shape[0]
+        """xi_t: [B, H] perturbation on the post-synaptic units this weight
+        projects TO (rows). presyn_t: [B, D] presynaptic activity this
+        weight projects FROM (cols). Per-sample outer product, decayed and
+        accumulated -- NOT averaged over the batch (see module docstring)."""
+        B = xi_t.shape[0]
+        outer = torch.einsum("bi,bj->bij", xi_t, presyn_t)  # [B, *param.shape]
+        if self.trace is None or self.trace.shape[0] != B:
+            self.trace = torch.zeros(B, *self.param.shape, device=self.param.device, dtype=self.param.dtype)
         self.trace.mul_(gamma_e).add_(outer)
 
 
@@ -92,18 +111,19 @@ class NodePerturbationLearner:
         xi_t = learner.sample_perturbation(h_t.shape)
         h_t_perturbed = h_t + xi_t
         learner.trace_step(xi_t, h_prev=h_prev, x_t=x_t)
-    At trial end (reward known):
-        learner.apply_update(reward)
+    At trial-batch end (rewards known, one per batch element):
+        learner.apply_update(rewards)  # rewards: float or Sequence[float], one per batch element
     """
 
     def __init__(
         self,
         weight_hh: nn.Parameter,
-        weight_ih: nn.Parameter,
+        weight_ih: Optional[nn.Parameter] = None,
         sigma_p: float = 0.05,
         gamma_e: float = 0.9,
         lr_local: float = 1.0e-3,
         baseline_decay: float = 0.99,
+        baseline_decay_adaptive: float = 0.9,
         normalize_traces: bool = False,
         adaptive_baseline: bool = False,
         seed: int = 0,
@@ -112,48 +132,75 @@ class NodePerturbationLearner:
         self.gamma_e = gamma_e
         self.lr_local = lr_local
         self.baseline_decay = baseline_decay
+        self.baseline_decay_adaptive = baseline_decay_adaptive
         self.normalize_traces = normalize_traces
         self.adaptive_baseline = adaptive_baseline
         self.rung = 2 if (normalize_traces or adaptive_baseline) else 1
 
-        self._traced = [
-            TracedWeight(weight_hh, presyn_is_hidden=True),
-            TracedWeight(weight_ih, presyn_is_hidden=False),
-        ]
+        # `weight_ih=None` (or `weight_ih is weight_hh`): single-weight mode,
+        # for a plain `Linear` head where there is only one weight matrix.
+        # Passing the SAME parameter twice as two "distinct" traced slots
+        # (an earlier version of this code did that for `Heads.pi`/`.value`)
+        # applies the three-factor update to that one parameter TWICE per
+        # trial -- an unintended 2x effective local learning rate for the
+        # heads relative to the recurrent core. Fixed by tracking a single
+        # `TracedWeight` for these modules instead (see DECISIONS.md).
+        self._traced = [TracedWeight(weight_hh, presyn_is_hidden=True)]
+        if weight_ih is not None and weight_ih is not weight_hh:
+            self._traced.append(TracedWeight(weight_ih, presyn_is_hidden=False))
+
         self._generator = torch.Generator(device=weight_hh.device if weight_hh.is_cuda else "cpu")
         self._generator.manual_seed(seed)
         self.reward_baseline = 0.0
         self._n_updates = 0
 
-    def sample_perturbation(self, shape: torch.Size, device=None, dtype=None) -> torch.Tensor:
-        return torch.randn(shape, generator=self._generator, device=device, dtype=dtype) * self.sigma_p
+    def sample_perturbation(self, shape, device=None, dtype=None) -> torch.Tensor:
+        return torch.randn(tuple(shape), generator=self._generator, device=device, dtype=dtype) * self.sigma_p
 
     def trace_step(self, xi_t: torch.Tensor, h_prev: torch.Tensor, x_t: torch.Tensor) -> None:
         with torch.no_grad():
             self._traced[0].accumulate(xi_t, h_prev, self.gamma_e)  # weight_hh <- (xi_t, h_prev)
-            self._traced[1].accumulate(xi_t, x_t, self.gamma_e)  # weight_ih <- (xi_t, x_t)
+            if len(self._traced) > 1:
+                self._traced[1].accumulate(xi_t, x_t, self.gamma_e)  # weight_ih <- (xi_t, x_t)
 
     def reset_traces(self) -> None:
         for tw in self._traced:
             tw.reset()
 
     @torch.no_grad()
-    def apply_update(self, reward: float) -> float:
-        """Three-factor update at trial end. Returns (reward - baseline) for logging."""
-        if self.adaptive_baseline:
-            self.reward_baseline = self.baseline_decay * self.reward_baseline + (1 - self.baseline_decay) * reward
-        else:
-            self.reward_baseline = self.baseline_decay * self.reward_baseline + (1 - self.baseline_decay) * reward
-        rpe = reward - self.reward_baseline
+    def apply_update(self, reward) -> float:
+        """Three-factor update at trial-batch end. `reward`: scalar or
+        per-batch-element sequence. Returns mean (reward - baseline) for
+        logging. The reward baseline is a scalar EMA of the *batch-mean*
+        reward; the per-sample advantage (reward_b - baseline) is then
+        multiplied by that sample's OWN trace before averaging over the
+        batch -- see module docstring for why this order matters."""
+        reward_t = torch.as_tensor(reward, dtype=torch.float32)
+        if reward_t.dim() == 0:
+            reward_t = reward_t.unsqueeze(0)
+        mean_reward = float(reward_t.mean().item())
+        decay = self.baseline_decay_adaptive if self.adaptive_baseline else self.baseline_decay
+        self.reward_baseline = decay * self.reward_baseline + (1 - decay) * mean_reward
+        advantage = reward_t - self.reward_baseline  # [B]
         for tw in self._traced:
             trace = tw.trace
+            if trace is None:
+                continue
+            adv = advantage.to(trace.device)
+            if adv.shape[0] != trace.shape[0]:
+                # scalar reward applied uniformly across a batch trace (rare;
+                # e.g. a caller passing one shared reward for the whole batch)
+                adv = adv.mean().expand(trace.shape[0])
             if self.normalize_traces:
-                norm = trace.norm() + 1e-8
-                trace = trace / norm
-            tw.param.data.add_(self.lr_local * rpe * trace)
+                flat = trace.reshape(trace.shape[0], -1)
+                norm = flat.norm(dim=1).clamp_min(1e-8)
+                trace = trace / norm.view(-1, *([1] * (trace.dim() - 1)))
+            weighted = adv.view(-1, *([1] * (trace.dim() - 1))) * trace  # [B, *param.shape]
+            update = weighted.mean(dim=0)  # average of per-sample (advantage * trace) products
+            tw.param.data.add_(self.lr_local * update)
         self.reset_traces()
         self._n_updates += 1
-        return rpe
+        return float(advantage.mean().item())
 
     def param_group(self) -> list[nn.Parameter]:
         return [tw.param for tw in self._traced]
@@ -171,7 +218,8 @@ def make_learner_for_cell(
     `weight_hh`/`weight_ih`. The frozen visual encoder never learns under
     L=1; only recurrent and head weights do, so this is called once per
     trainable cell (the flat GRU cell, or the worker and manager cells
-    separately) and again for `Heads.pi`/`Heads.value`."""
+    separately) and again for `Heads.pi`/`Heads.value` (single-weight mode,
+    see `NodePerturbationLearner.__init__`)."""
     if rung not in (1, 2):
         raise RungExhausted(
             f"rung {rung} ({RUNG_NAMES.get(rung, '?')}) is not implemented; "

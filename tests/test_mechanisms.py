@@ -107,3 +107,51 @@ def test_rung2_normalizes_traces():
     learner = make_learner_for_cell(cell, sigma_p=0.05, gamma_e=0.9, lr_local=1e-3, rung=2, seed=0)
     assert learner.normalize_traces and learner.adaptive_baseline
     assert learner.rung == 2
+
+
+def test_rung2_baseline_decay_distinct_from_rung1():
+    """Audit fix A1b: rung 2's `adaptive_baseline` must have a real, distinct
+    effect from rung 1 -- previously the `if adaptive_baseline` branch was
+    byte-identical to the `else` branch (a dead distinction)."""
+    cell = MaskedGRUCell(input_dim=8, hidden_dim=16)
+    rung1 = make_learner_for_cell(cell, sigma_p=0.05, gamma_e=0.9, lr_local=1e-3, rung=1, seed=0)
+    rung2 = make_learner_for_cell(cell, sigma_p=0.05, gamma_e=0.9, lr_local=1e-3, rung=2, seed=0)
+    assert rung1.baseline_decay_adaptive == rung2.baseline_decay_adaptive  # same constant available to both
+    assert rung1.baseline_decay != rung1.baseline_decay_adaptive  # but only rung 2 actually uses it
+    rung1.reward_baseline = rung2.reward_baseline = 0.0
+    rung1.apply_update(reward=1.0)
+    rung2.apply_update(reward=1.0)
+    assert rung1.reward_baseline != rung2.reward_baseline, "rung 1 and rung 2 must track the baseline differently"
+
+
+def test_batched_node_perturbation_preserves_per_sample_correlation():
+    """Audit fix A1c: batching must keep PER-SAMPLE eligibility traces until
+    the reward-weighted average at `apply_update` -- averaging the trace
+    across the batch BEFORE the reward is known would replace
+    mean_b[(r_b-baseline)*xi_b] with mean_b[r_b-baseline]*mean_b[xi_b],
+    destroying the reward-perturbation correlation the algorithm exploits.
+    Construct a batch where the (wrong) product-of-averages is exactly zero
+    but the (correct) average-of-products is not."""
+    cell = MaskedGRUCell(input_dim=4, hidden_dim=4)
+    learner = NodePerturbationLearner(
+        weight_hh=cell.weight_hh, weight_ih=cell.weight_ih, sigma_p=0.1, gamma_e=0.0, lr_local=1.0, seed=0,
+    )
+    learner.reward_baseline = 0.0
+    # batch of 2: perturbation +1 paired with reward 1; perturbation -1
+    # paired with reward 0. Batch-mean perturbation is 0 (so the wrong,
+    # trace-averaged-first computation would report zero update), but each
+    # sample's own (perturbation, reward) pair is genuinely correlated.
+    xi_t = torch.ones(2, 12)  # [B=2, 3*hidden=12]
+    xi_t[1] = -1.0
+    h_prev = torch.ones(2, 4)
+    x_t = torch.ones(2, 4)
+    learner.trace_step(xi_t, h_prev=h_prev, x_t=x_t)
+
+    w_before = cell.weight_hh.data.clone()
+    learner.apply_update(reward=[1.0, 0.0])
+    delta = cell.weight_hh.data - w_before
+    assert delta.abs().mean().item() > 1e-6, (
+        "batched update collapsed to ~0 -- traces were likely averaged across the "
+        "batch before the reward was applied (destroys the reward-perturbation correlation)"
+    )
+    assert delta.mean().item() > 0, "sample with positive perturbation and above-baseline reward should dominate positively"

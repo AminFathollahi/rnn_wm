@@ -32,3 +32,200 @@ Append-only. Record any non-obvious choice (protocol §0 rule 7), especially dev
 - **`analysis/run_all.py`** computes a crossnobis RDM from per-trial maintenance-epoch activity (model, via the replay above; neural, via `dandi_nwb.rates()`), pooled across all regions (not yet split by MTL/MFC family -- `NeuralDataset.rates`/`.noise_ceiling` filter by a single canonical region, not a family, so family-level aggregation needs a small adapter extension left for later), and reports alignment raw and as a fraction of the noise ceiling. **Real bug found and fixed:** `crossnobis_rdm` silently zero-fills RDM entries for condition pairs with too few trials to split across folds (see `rdm.py`'s `counts>0` fallback), rather than marking them undefined; with several coarse conditions (load x in-set x correct) occurring only once in a session, this injected enough spurious zero-distance entries to make every cell's alignment reduce to exactly 0.0 -- caught only because four different trained models producing bit-identical alignment scores was implausible on its face. Fixed by filtering both the model and neural sides to conditions with at least `MIN_TRIALS_PER_CONDITION=8` trials before computing crossnobis. After the fix, alignment scores are non-degenerate and vary sensibly across cells (0.31-0.94 raw over the first 4 completed cells).
 - **Performance limitation, not yet fixed:** `neural/adapters/dandi_nwb.py::rates()` recomputes spike-count histograms with no caching (unlike `sim_brain/spiking_generator.py`, which was optimized the same way earlier this session), making the *full* Tier A pool (~1800 units, thousands of trials) impractically slow for a single `run_all.py` invocation. Bounded today's runs via `--max-sessions-per-dataset`; the same per-(unit,trial) rate-caching fix used in `spiking_generator.py` should be ported here before running the final alignment analysis on the complete dataset.
 - **Figures:** `figures/make_all.py` implements F2 (behavior/gates, from `manifest.jsonl`) and F3 (main alignment, from `alignment_results.csv`); both degrade gracefully (skip with a message, not a crash) if their inputs aren't ready yet. F1, F4-F8 are not implemented (Extended-tier analyses: dynamical-systems mechanism, lesions, oblique sweep, cross-dataset replication).
+
+## Audit fix pass (2026-07-05, branch `fix/audit-2026-07-04`)
+
+Responds to `comments.txt`, a senior-review audit finding the first grid's
+12 completed runs scientifically invalid (L=1 confounded with supervision
+density and at chance; the alignment DV degenerate -- raw exceeding the
+noise ceiling for 5/6 cells; runs spanning 3 different git commits
+mid-grid). Full section-by-section responses to every judgment call are
+appended to `comments.txt` itself (a `RESPONSES` section, R1-R11) per the
+user's request that all such calls be explained inline; this entry is the
+durable project-history record of the same work, cross-referenced by Rn.
+
+- **A1a (training-signal confound, R3):** L=0 now trains via REINFORCE
+  (policy-gradient + value baseline, backprop through time) on the SAME
+  sparse trial-end reward L=1 uses, for the ramp+target curriculum phases
+  (~80% of steps); both arms share a matched-density warmup phase (~20%)
+  for tractability (L=0: unchanged dense CE; L=1: node-perturbation reward
+  becomes "fraction of ticks matching the ideal action" instead of bare
+  correct/incorrect, warmup-only). Policy-gradient terms collected only at
+  probe-epoch ticks (`training/train.py::_run_trial`, `signal="reinforce"`).
+- **A1a/A2a real-data finding (R4):** literal held-item-identity conditions
+  (A2a's original ask) have essentially zero repeated trials on real Tier-A
+  data -- verified empirically: every held item across 70 load-1 trials in
+  a representative `000673` session was distinct. Condition-averaged RSA
+  cannot work on raw item identity here. Resolution: impute a category
+  label per stimulus image via nearest-neighbor in the model's own frozen-
+  encoder feature space against its training-pool category centroids
+  (`analysis/stimulus_categories.py`), condition the maintenance-epoch RDM
+  on `(sorted held-category multiset, load)` instead of raw item identity.
+- **A2 architecture (R6):** maintenance/encode-epoch alignment is computed
+  PER SESSION (category conditions are session-specific -- imputed
+  per-session from that session's own cached stimulus features), each
+  against a new `rsa.within_session_noise_ceiling` (repeated resampled
+  fold-splits of ONE session -- a cross-session LOSO ceiling is undefined
+  when conditions don't recur across sessions). The probe epoch's coarse
+  `(load, in_set, correct)` conditions DO recur across sessions, so that
+  path stays pooled, built via a new `analysis/pseudopopulation.py` (each
+  unit's condition mean from only that unit's own session's trials --
+  never diluted by another session's zero-filled entries, which
+  `dandi_nwb.rates(None,...)`/`response_patterns` both did previously),
+  with the ceiling computed on that same pooled representation.
+  Per-session maintenance rows carry the session's patient
+  (`dandi_data.patient_of`), resolving B3's request for a real patient
+  factor in the mixed-effects model.
+- **A1b:** rung 2's `adaptive_baseline` now uses a genuinely faster EMA
+  decay constant (`baseline_decay_adaptive`) distinct from rung 1's --
+  previously byte-identical to the `else` branch (dead distinction).
+- **A1c (batching):** one training step now runs a batch of `B` trials
+  (`train.batch_size`, config), sharing one load drawn per batch (tick
+  count is fully determined by load, so no padding is needed -- see
+  `tasks/generator.py::TaskGenerator.sample_batch`). Two real bugs found
+  while implementing this (both would have silently corrupted any B>1 run,
+  not just been suboptimal):
+  1. **Reflective-gate broadcast bug (R9):** `surprise()`/`step()`/
+     `gate_bias()` mis-broadcast `[B,1]*[B]` to `[B,B]` for B>1 (harmless
+     at B=1 by coincidence). Fixed by keeping the `[B,1]` convention for
+     reward/value/action-logp consistently through that path.
+  2. **Node-perturbation batch-averaging bug (R10):** naively averaging the
+     eligibility trace across the batch BEFORE the reward is known replaces
+     `mean_b[(r_b-baseline)*xi_b]` with `mean_b[r_b-baseline]*mean_b[xi_b]`
+     -- the product of averages instead of the average of products --
+     destroying the reward-perturbation correlation node perturbation
+     exploits. Fixed by keeping PER-SAMPLE traces (`[B, *param.shape]`)
+     in `mechanisms/local_learning.py` until the reward-weighted average at
+     `apply_update`. Regression test:
+     `test_mechanisms.py::test_batched_node_perturbation_preserves_per_sample_correlation`.
+- **B5/B6 (R11):** fixed (not just documented) the heads' 2x-effective-
+  local-learning-rate quirk: `NodePerturbationLearner` now has a genuine
+  single-weight mode (`weight_ih=None`) for `Heads.pi`/`Heads.value` (plain
+  `Linear` layers), instead of pointing `weight_hh`/`weight_ih` at the same
+  parameter (which applied the three-factor update twice per trial).
+- **B1:** `run_grid.py`'s config fingerprint is now `hashlib.sha256` over
+  the full resolved config (model+mechanisms+task+train+gates+neural+tier),
+  computed once per grid invocation and dumped verbatim to
+  `results/resolved_config.yaml`; the old `abs(hash(json.dumps(tier_subset)))
+  % 1e8` was salted per-process (`PYTHONHASHSEED`) and only covered the
+  tier subset, both independently wrong.
+- **B2:** gate boundary is `>=` (not the original strict `>`) in `train.py`
+  and `preregistration.md`, applied consistently (`run_grid.py`'s scaffold
+  stub too, for key-naming consistency even though it doesn't share the
+  bug).
+- **B3:** `analysis/stats.py::mixed_effects_alignment` adds a `patient`
+  variance component (`vc_formula`) when the input has a `patient` column,
+  fed by the new per-session maintenance rows; added `accuracy_vif` for the
+  documented accuracy-vs-L collinearity check.
+- **C1 (reflection-shuffle causal control):** wired in
+  `training/generate_activity_logs.py::generate_activity_log_reflection_shuffled`
+  -- re-replays every M=1 trial using that trial's OWN natural R_t sequence
+  (read back from the normal log) but time-shuffled within the trial
+  (`shuffle_reflection`), and `analysis/run_all.py::
+  reflection_shuffle_lesion_for_run` compares normal-vs-shuffled maintenance
+  alignment. F4 figure added.
+- **C2 (region dissociation):** `dandi_nwb.py`'s `units`/`rates`/
+  `response_patterns` now accept `"MTL"`/`"MFC"` as `region`, resolved via
+  the existing `dataset_contract.region_family()` helper; `run_all.py`
+  computes both epoch paths at `region in (None, "MTL", "MFC")`.
+- **C3/C4 (H5/H6, wired per explicit user instruction, not scoped out):**
+  new `analysis/dynamics_and_persistence.py` wires `cross_temporal_decoding`
+  (H5: stability index, dynamic-vs-stable delay coding) and
+  `persistent_activity_index` (H6) against real per-session model+neural
+  data, using LOAD as the shared decodable/indexed factor (item/category
+  identity recurs too rarely per session for a stratified decode with
+  several folds -- see the A2a finding above). Compared model-vs-brain via
+  `stats.compare_distributions`. F5 (persistence) and F6 (dynamic/stable)
+  figures added. Encoding-model R^2 and full real-data dPCA marginalization
+  were considered but ultimately not wired in this pass (time; H5/H6's
+  existing machinery already exercises the core real-vs-model comparison) --
+  see `comments.txt` RESPONSES R2. F1 (design schematic) and F8 (Tier-B
+  cross-dataset replication) explicitly scoped out (R2).
+- **Performance (R7, real bug found while validating the rewrite against
+  real data, not separately requested):** `dandi_nwb.py`'s `rates()`/
+  `response_patterns()` previously recomputed every spike histogram from
+  scratch on every call -- already flagged above as a follow-up, but the
+  new pipeline calls `rates()` far more often (once per session, per
+  region, per noise-ceiling resample) than the original single-pass code,
+  making this non-optional. Added a per-`(unit, epoch)` cache at
+  `self.bin_ms`, mirroring `sim_brain`'s existing `_rate_cache`; also
+  cached `trials()` (previously rebuilt via `pd.concat` on every call).
+- **Fold-count bug found while validating the per-session path against
+  real data (R8):** `_session_condition_rdm` derived its crossnobis fold
+  count from the SINGLE RAREST condition across the whole session -- with
+  the fine-grained category-multiset schema, one or two 1-trial "singleton"
+  conditions used to zero out the fold count (hence the RDM) for the ENTIRE
+  session, even though most conditions were well-populated. Fixed by
+  dropping rare (`< min_trials_per_condition`) conditions before computing
+  fold count, mirroring the min-trials filter `run_all.py` already applied
+  model-side.
+- **`alignment_results.csv`'s schema changed:** no longer a single
+  `normalized_alignment` column -- now `maintenance_normalized_alignment`
+  (per-session category schema, mean across sessions) and
+  `probe_normalized_alignment` (pooled coarse schema), reflecting the two
+  epoch-appropriate paths above. Long-format per-session rows (with the
+  patient factor) are in the new `results/alignment_by_session.csv`.
+
+## Adversarial review findings (2026-07-05, same audit-fix pass)
+
+Two fresh subagents (no context from my own implementation reasoning)
+reviewed the full diff independently. Full detail in `comments.txt`'s
+`RESPONSES` section (R12-R16); durable summary here:
+
+- **Region-family fallback bug (R12):** `rsa.py::_session_condition_rdm`
+  and `dynamics_and_persistence.py::neural_session_epoch_timeseries` both
+  matched units to a session via `startswith`, then fell back to using
+  EVERY session's units when the target session had none in the requested
+  region. 31% of real Tier-A sessions have zero MFC units -- for those,
+  the fallback combined with `rates()`'s cross-session zero-fill produced
+  an all-zero RDM reported as a spuriously valid "ok" row, contaminating
+  the C2 region-dissociation analysis. Fixed: exact session match, return
+  `None` (no fallback) when a session has no units in that region.
+- **Incomplete NaN guard in `rdm.py::crossnobis_rdm` (R13):** checked only
+  one condition of each pair's fold-means, not both; fixed.
+- **Salted-hash reproducibility bug reintroduced (R14):** the reflection-
+  shuffle lesion's RNG seed used Python's built-in `hash()` on a string --
+  the exact defect B1 fixed for the grid's config hash. Fixed with
+  `hashlib.sha256`, same pattern as B1 (also found and fixed in
+  `run_grid.py`'s `--scaffold` stub).
+- **Nested-not-crossed random effects (R15):** `stats.py::
+  mixed_effects_alignment`'s patient variance component nested patient
+  within seed instead of crossing them (confirmed via log-likelihood
+  comparison), understating patient-driven structure. Fixed using the
+  standard statsmodels crossed-effects workaround (dummy constant group,
+  both factors as `vc_formula` terms); generalized to an `extra_vc_col`
+  parameter.
+- **Region pseudo-replication in the main LME (R16):** `run_all.py` was
+  feeding pooled+MTL+MFC rows for the same session into one flat model --
+  correlated subsets of the same data, not independent observations.
+  Split into two models: the main S*M*L*accuracy model on pooled rows
+  only, plus a separate H1/C2 region-dissociation model (MTL/MFC rows,
+  `session` as the R15-generalized crossed factor).
+- **`trial_id`-collision bug found via direct wall-clock profiling (not
+  raised by either reviewer):** `run_all.py::_model_epoch_patterns` grouped
+  activity-log rows by `trial_id` alone; `trial_id` resets to 0 per session
+  in the replay log, so the probe-epoch pooled path (multi-session) was
+  silently merging unrelated trials from different sessions sharing a
+  trial index -- this alone explained why probe-epoch alignment reported
+  "insufficient_shared_conditions" for every cell in the first post-fix
+  validation pass. Fixed by grouping on `(session, trial_id)`; regression
+  test added. Also standardized features in `cross_temporal.py`'s
+  per-timebin `LogisticRegression` fits (H5) -- unscaled raw firing
+  rates/activations were causing routine `lbfgs` non-convergence.
+- **Validated post-fix** on a smoke-tier (100-step) 8-cell run at 8
+  sessions/dataset: probe-epoch alignment now reports `status="ok"` with
+  8 shared conditions for all 8 cells (previously always
+  "insufficient_shared_conditions"); `normalized_alignment` is not
+  identically 1.0 and `raw_alignment` stays below `noise_ceiling_upper`
+  for every row (H2's DV-sanity acceptance gates); the region-dissociation
+  model correctly uses `statsmodels.MixedLM + session variance component`
+  (not the OLS fallback); the main S*M*L model falls back to
+  OLS+cluster-bootstrap at this stage only because a 1-seed smoke run
+  gives MixedLM's `groups=seed` a single level (expected, resolves once
+  the real grid runs >=8 seeds). The chance-vs-trained gate (H5) is a
+  near-tie at smoke tier (chance=0.150 vs trained=0.151) -- expected, not
+  a DV bug: 100 training steps do not train these models past chance
+  behavior (consistent with this project's own prior finding, above, that
+  even 1500-3000 steps showed no learning in diagnostic tests); this gate
+  should be re-checked once the real grid's `dev`/`full` tier runs
+  complete.

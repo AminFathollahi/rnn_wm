@@ -98,7 +98,15 @@ def crossnobis_rdm(
                 for j in range(i + 1, n_cond):
                     m1i, m1j = fold_means[f1, i], fold_means[f1, j]
                     m2i, m2j = fold_means[f2, i], fold_means[f2, j]
-                    if np.any(np.isnan(m1i)) or np.any(np.isnan(m2i)):
+                    # Audit-fix review finding: this guard used to check only
+                    # m1i/m2i, never m1j/m2j -- a NaN fold-mean for the SECOND
+                    # condition in a pair (undefined because that condition
+                    # had no trials in this fold) slipped through and
+                    # propagated NaN into `val`, silently NaN-ing this RDM
+                    # entry (and, via `compare_rdms`'s NaN-safe fallback,
+                    # silently zeroing the WHOLE comparison for that
+                    # session/run with no warning).
+                    if np.any(np.isnan(m1i)) or np.any(np.isnan(m2i)) or np.any(np.isnan(m1j)) or np.any(np.isnan(m2j)):
                         continue
                     d1 = m1i - m1j
                     d2 = m2i - m2j

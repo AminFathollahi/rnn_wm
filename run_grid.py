@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -42,6 +43,7 @@ ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 MANIFEST = RESULTS / "manifest.jsonl"
 REPORT = ROOT / "RUN_REPORT.md"
+RESOLVED_CONFIG_PATH = RESULTS / "resolved_config.yaml"
 
 # The eight factorial cells, ordered by (S, M, L) bits -> M<S><M><L>.
 CELLS = [
@@ -114,6 +116,31 @@ def load_all_records(manifest: Path) -> list[dict]:
     return list(latest.values())
 
 
+def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str) -> dict:
+    """The FULL merged, resolved config for this grid invocation: every
+    project subsystem (model/mechanisms/task/train/gates/neural), plus the
+    tier subset actually in effect -- not just the tier subset run_grid.py
+    threads through to `train_one` (audit fix B1: the old config_hash only
+    covered the tier subset, silently ignoring changes to everything else)."""
+    resolved = {k: v for k, v in full_cfg.items() if k != "tiers"}
+    resolved["tier"] = {"name": tier, **tier_cfg}
+    return resolved
+
+
+def config_hash(resolved_cfg: dict) -> str:
+    """Deterministic hex digest of the full resolved config (audit fix B1).
+    `hashlib.sha256` (not Python's built-in `hash()`) is used because
+    `hash()` on a str is salted per-process by `PYTHONHASHSEED` -- the same
+    config would otherwise produce a different "hash" on every process
+    launch, which is exactly why the old manifest showed three different
+    config_hash values for the identical "full" tier across a single grid.
+    `seeding.py` setting `os.environ["PYTHONHASHSEED"]` at runtime does not
+    affect the already-running interpreter, so relying on that would not
+    have fixed it either -- sha256 makes the whole issue moot."""
+    payload = json.dumps(resolved_cfg, sort_keys=True, default=str).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -176,7 +203,9 @@ def _scaffold_train_one(run: dict, cfg: dict) -> dict:
     dependencies. Deterministically fakes gates and accuracy from the seed
     and writes a placeholder checkpoint file.
     """
-    rng = random.Random(hash((run["run_id"],)) & 0xFFFFFFFF)
+    # hashlib, not Python's salted-per-process hash() (see config_hash's
+    # docstring above; found reused here on adversarial review).
+    rng = random.Random(int.from_bytes(hashlib.sha256(run["run_id"].encode()).digest()[:4], "big"))
     ckpt_dir = RESULTS / "checkpoints" / run["run_id"]
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     (ckpt_dir / "ckpt.json").write_text(json.dumps({"step": cfg.get("steps", 100), **run}))
@@ -184,7 +213,7 @@ def _scaffold_train_one(run: dict, cfg: dict) -> dict:
     # local-learning (L=1) is the risky arm; fake a lower pass-rate for it
     base = 0.98 - (0.15 if run["L"] == 1 else 0.0)
     acc = {f"load{i}": round(max(0.0, base - 0.06 * (i - 1) + rng.uniform(-0.03, 0.03)), 3) for i in (1, 2, 3)}
-    gates = {"load1>0.95": acc["load1"] > 0.95, "load3>0.80": acc["load3"] > 0.80}
+    gates = {"load1>=0.95": acc["load1"] >= 0.95, "load3>=0.80": acc["load3"] >= 0.80}
     rung = 1 if run["L"] == 1 else 0
     return {"status": "completed", "gates": gates, "accuracy": acc, "rung": rung}
 
@@ -226,17 +255,32 @@ def main(argv=None) -> int:
 
     # Minimal config load (YAML optional; scaffold defaults if unavailable).
     cfg = {"steps": 100, "scaffold_sleep_s": 0.05, "tier": args.tier}
+    full_cfg = {}
     try:
         import yaml  # type: ignore
-        loaded = yaml.safe_load(Path(args.config).read_text()) or {}
-        cfg.update(loaded.get("tiers", {}).get(args.tier, {}))
+        full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+        cfg.update(full_cfg.get("tiers", {}).get(args.tier, {}))
     except Exception:
         pass  # scaffold runs fine without a config
+
+    # Audit fix B1: hash the FULL resolved config (not just the tier
+    # subset), computed once per invocation -- every run in this grid
+    # invocation shares this one hash, and the resolved config is dumped
+    # verbatim so a run is fully reproducible from the manifest alone.
+    resolved_cfg = build_resolved_config(full_cfg, cfg, args.tier) if full_cfg else {"tier": {"name": args.tier, **cfg}}
+    cfg_hash = config_hash(resolved_cfg)
+    if full_cfg:
+        try:
+            import yaml  # type: ignore
+
+            RESOLVED_CONFIG_PATH.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
+        except Exception:
+            RESOLVED_CONFIG_PATH.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
     train_one = resolve_train_fn(args.scaffold)
 
     print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h "
-          f"runs={len(runs)} already_completed={len(completed)}", flush=True)
+          f"runs={len(runs)} already_completed={len(completed)} config_hash={cfg_hash[:12]}", flush=True)
 
     t0 = time.time()
     for run in runs:
@@ -252,8 +296,7 @@ def main(argv=None) -> int:
 
         started = datetime.now(timezone.utc).isoformat(timespec="seconds")
         r0 = time.time()
-        rec = {**run, "config_hash": abs(hash(json.dumps(cfg, sort_keys=True))) % (10**8),
-               "git": commit, "tier": args.tier, "started": started}
+        rec = {**run, "config_hash": cfg_hash, "git": commit, "tier": args.tier, "started": started}
         print(f"[run_grid] >>> {run['run_id']}", flush=True)
         try:
             result = train_one(run, cfg)  # isolated

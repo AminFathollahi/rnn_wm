@@ -33,7 +33,7 @@ def test_cell_smoke(cell):
             shutil.rmtree(ckpt_dir)
 
     assert result["status"] == "completed"
-    assert set(result["gates"].keys()) == {"load1>0.95", "load3>0.80"}
+    assert set(result["gates"].keys()) == {"load1>=0.95", "load3>=0.80"}
     assert set(result["accuracy"].keys()) == {"load1", "load2", "load3"}
     if L == 1:
         assert result["rung"] in (1, 2)

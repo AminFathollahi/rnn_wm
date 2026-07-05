@@ -290,21 +290,28 @@ class SimulatedBrain:
 
     def response_patterns(self, region: str | None, epoch: str) -> np.ndarray:
         """[n_conditions, n_units] condition-mean rate (pseudopopulation),
-        pooling units across sessions by matched (coarse) condition."""
+        pooling units across sessions by matched (coarse) condition. Audit
+        fix A2d: each unit's condition mean uses ONLY that unit's own
+        session's matching trials (never diluted by other sessions' trials,
+        which the pooled `rates(region, ...)` tensor otherwise zero-fills
+        for out-of-session entries -- see `dandi_nwb.py`'s identical fix)."""
         units = self.units(region)
         trials = self._trials_df
         rates = self.rates(region, self.bin_ms, [epoch])  # [n_units, n_trials, n_bins]
-        mean_rate = rates.mean(axis=2)  # [n_units, n_trials]
+        mean_rate = rates.mean(axis=2)  # [n_units, n_trials]; zero-filled outside each unit's own session
+        session_of_trial = trials.session.values
         cond_keys = [c.coarse_key() for c in self.conditions]
         out = np.zeros((len(cond_keys), len(units)))
         for ci, c in enumerate(self.conditions):
-            mask = (
+            cond_mask = (
                 (trials.load == c.load) & (trials.probe_in_set == c.probe_in_set)
                 & (trials.correct == c.correct)
             ).values
-            if mask.sum() == 0:
-                continue
-            out[ci, :] = mean_rate[:, mask].mean(axis=1)
+            for ui, uid in enumerate(units):
+                own_session = uid.split("#")[0]
+                unit_mask = cond_mask & (session_of_trial == own_session)
+                if unit_mask.sum() > 0:
+                    out[ci, ui] = mean_rate[ui, unit_mask].mean()
         return out
 
     def regions(self) -> list[str]:

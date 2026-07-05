@@ -24,6 +24,7 @@ class LogRecord:
     seed: int
     t: int
     trial_id: int
+    session: str
     epoch: str
     load: int
     held_items: list[int]
@@ -67,6 +68,7 @@ ARROW_SCHEMA = pa.schema(
         ("seed", pa.int32()),
         ("t", pa.int32()),
         ("trial_id", pa.int32()),
+        ("session", pa.string()),
         ("epoch", pa.string()),
         ("load", pa.int32()),
         ("held_items", _INT_LIST),

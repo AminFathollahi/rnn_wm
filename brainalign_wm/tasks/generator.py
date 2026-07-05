@@ -46,6 +46,42 @@ class TaskGenerator:
             split=split,
         )
 
+    def sample_batch(
+        self, step_idx: int, total_steps: int, batch_size: int, split: str = "train"
+    ) -> list[list[TrialStep]]:
+        """B independent trials for one training step, sharing a single load
+        drawn once from the curriculum's distribution for this step -- since
+        tick-count is fully determined by `load` (all other draws vary
+        content, not length), this gives every trial in the batch identical
+        epoch/tick structure with no padding needed. Deterministic given
+        (seed, step_idx), same guarantee as `sample_trial`."""
+        params = self.curriculum.params_for(step_idx, total_steps)
+        load_seed_state = np.random.SeedSequence([self.seed, step_idx, 0xBA7C4104D]).generate_state(4)
+        load_rng = np.random.RandomState(load_seed_state)
+        p = None
+        if params["load_weights"] is not None:
+            p = np.asarray(params["load_weights"], dtype=float)
+            p = p / p.sum()
+        shared_load = int(load_rng.choice(params["loads"], p=p))
+
+        batch = []
+        for b in range(batch_size):
+            seed_state = np.random.SeedSequence([self.seed, step_idx, b]).generate_state(4)
+            rng = np.random.RandomState(seed_state)
+            trial_id = step_idx * batch_size + b
+            batch.append(
+                self.sternberg.generate_trial(
+                    rng=rng,
+                    loads=[shared_load],
+                    lure_fraction=params["lure_fraction"],
+                    maintain_steps=params["maintain_steps"],
+                    trial_id=trial_id,
+                    load_weights=None,
+                    split=split,
+                )
+            )
+        return batch
+
     def curriculum_params(self, step_idx: int, total_steps: int) -> dict:
         """The sampling-distribution snapshot for this step (for logging)."""
         return self.curriculum.params_for(step_idx, total_steps)

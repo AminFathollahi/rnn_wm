@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 
 
 def cross_temporal_decoding(
@@ -21,7 +22,14 @@ def cross_temporal_decoding(
 ) -> np.ndarray:
     """X: [n_trials, n_timebins, n_units]; y: [n_trials] labels.
     Returns [n_timebins, n_timebins] cross-validated accuracy matrix
-    (train at row-time, test at column-time)."""
+    (train at row-time, test at column-time). Features (raw firing
+    rates/hidden-unit activations, unbounded and often large-magnitude) are
+    standardized per training fold before fitting `LogisticRegression` --
+    both for L2 regularization to treat units comparably regardless of
+    scale, and because unscaled features were causing `lbfgs` to routinely
+    fail to converge within `max_iter`, silently returning a poorly-fit
+    classifier rather than erroring (audit-fix wiring, found while
+    profiling H5's wall-clock cost across a full grid)."""
     n_trials, n_time, n_units = X.shape
     classes = np.unique(y)
     if len(classes) < 2:
@@ -33,10 +41,13 @@ def cross_temporal_decoding(
     for train_idx, test_idx in skf.split(X[:, 0, :], y_enc):
         n_splits_run += 1
         for t_train in range(n_time):
-            clf = LogisticRegression(max_iter=200)
-            clf.fit(X[train_idx, t_train, :], y_enc[train_idx])
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx, t_train, :])
+            clf = LogisticRegression(max_iter=1000)
+            clf.fit(X_train, y_enc[train_idx])
             for t_test in range(n_time):
-                acc = clf.score(X[test_idx, t_test, :], y_enc[test_idx])
+                X_test = scaler.transform(X[test_idx, t_test, :])
+                acc = clf.score(X_test, y_enc[test_idx])
                 mat[t_train, t_test] += acc
     mat /= max(n_splits_run, 1)
     return mat

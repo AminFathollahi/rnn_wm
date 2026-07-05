@@ -52,7 +52,7 @@ def test_scaffold_train_one_deterministic(tmp_path, monkeypatch):
     r1 = rg._scaffold_train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
     r2 = rg._scaffold_train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
     assert r1["accuracy"] == r2["accuracy"]  # deterministic per run_id
-    assert set(r1["gates"]) == {"load1>0.95", "load3>0.80"}
+    assert set(r1["gates"]) == {"load1>=0.95", "load3>=0.80"}
     assert (tmp_path / "checkpoints" / "M111_s0" / "ckpt.json").exists()
 
 
@@ -60,7 +60,7 @@ def test_write_report(tmp_path):
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(
         json.dumps({"run_id": "M000_s0", "S": 0, "M": 0, "L": 0, "status": "completed",
-                    "gates": {"load1>0.95": True}, "accuracy": {"load1": 0.99},
+                    "gates": {"load1>=0.95": True}, "accuracy": {"load1": 0.99},
                     "rung": 0, "wall_clock_s": 1.2}) + "\n"
     )
     report = tmp_path / "RUN_REPORT.md"

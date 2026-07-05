@@ -327,7 +327,32 @@ def cache_stimulus_features(cfg: dict) -> None:
     """Precompute and cache ResNet features for each dataset's embedded
     `StimulusTemplates` images, keyed by (dataset, session, PicID), enabling
     exact-image alignment between the model and the recorded sessions.
-    Called from `encoders/cache_features.py`."""
+    Called from `encoders/cache_features.py`.
+
+    The trial table's PicID convention is NOT uniform across Tier A: 000673's
+    `PicIDs_Encoding*`/`PicIDs_Probe` values are the real `image_<PicID>` key
+    suffix directly (e.g. PicID 201 -> `image_201`). 000469's are NOT --
+    they are a small 1-indexed POSITION into `StimulusTemplates`'s own
+    `order_of_images` (an `ImageReferences` array of HDF5 object references,
+    in presentation order): PicID 1 -> `order_of_images[0]` -> e.g.
+    `image_22`, not `image_1` (`image_1` doesn't exist in that session at
+    all). Caching by the raw `image_<suffix>` key alone (the previous
+    behavior) silently failed to match ANY of 000469's real trial PicIDs for
+    most sessions (confirmed directly against the mounted NWB files:
+    0/45 real trials matched for 4 of 8 sessions checked, low single digits
+    for 3 more, so `generate_activity_logs.py`'s per-trial stimulus-feature
+    lookup skipped nearly every 000469 trial system-wide -- not "~50% skip"
+    as DECISIONS.md's M8 note flagged and left unresolved, but closer to
+    total data loss for 6 of 8 sessions checked). This alone explains why
+    load=2 conditions (000469 is the only Tier A dataset with a load=2
+    arm) were nearly absent from every activity log.
+
+    Fixed by resolving BOTH candidate PicID->image mappings per session
+    (direct key match, and 1-indexed position into `order_of_images`) and
+    picking whichever actually covers more of THAT session's own real trial
+    PicIDs (self-validating against `intervals/trials`, not a hardcoded
+    per-dataset branch, in case this varies by session rather than by
+    dataset)."""
     import numpy as np
 
     from brainalign_wm.encoders.resnet18_encoder import encode_images
@@ -342,6 +367,7 @@ def cache_stimulus_features(cfg: dict) -> None:
         ds_root = data_root / ds
         if not ds_root.exists():
             continue
+        colmap = COLUMN_MAPS[ds]
         for f in find_wm_sessions(ds_root):
             with h5py.File(f, "r") as h:
                 if "stimulus/templates/StimulusTemplates" not in h:
@@ -349,12 +375,32 @@ def cache_stimulus_features(cfg: dict) -> None:
                 grp = h["stimulus/templates/StimulusTemplates"]
                 identifier = _decode(h["identifier"][()])
                 session_id = f"{ds}-{identifier}"
-                images, pic_ids = [], []
+
+                direct: dict[str, np.ndarray] = {}
                 for key in grp:
                     if not key.startswith("image_"):
                         continue
-                    pic_id = key.split("_", 1)[1]
-                    images.append(np.asarray(grp[key][:], dtype=np.uint8))
+                    direct[key.split("_", 1)[1]] = np.asarray(grp[key][:], dtype=np.uint8)
+
+                positional: dict[str, np.ndarray] = {}
+                if "order_of_images" in grp:
+                    for i, ref in enumerate(grp["order_of_images"][:]):
+                        real_pic_id = h[ref].name.rsplit("_", 1)[-1]
+                        if real_pic_id in direct:
+                            positional[str(i + 1)] = direct[real_pic_id]
+
+                tr = h["intervals/trials"]
+                real_pids = set()
+                if "loads" in tr:
+                    for c in colmap["enc_cols"] + [colmap["probe_col"]]:
+                        real_pids.update(str(int(x)) for x in tr[c][:] if int(x) != 0)
+                n_direct_hits = sum(1 for pid in real_pids if pid in direct)
+                n_positional_hits = sum(1 for pid in real_pids if pid in positional)
+                pic_to_image = positional if n_positional_hits > n_direct_hits else direct
+
+                images, pic_ids = [], []
+                for pic_id, img in pic_to_image.items():
+                    images.append(img)
                     pic_ids.append(pic_id)
                 if not images:
                     continue

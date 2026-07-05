@@ -26,13 +26,26 @@ def persistent_activity_index(
 ) -> np.ndarray:
     """[n_units, n_conditions] maintenance rate vs. [n_units, n_conditions]
     (or [n_units]) baseline -> per-unit index: (preferred-condition maintain
-    rate - baseline) / (baseline + 1), for the condition each unit fires
+    rate - baseline) / (|baseline| + 1), for the condition each unit fires
     most for (memoranda-selectivity requires it depend on which item/
-    category is held, not just be elevated overall)."""
+    category is held, not just be elevated overall).
+
+    Uses `abs(base) + 1.0`, not `base + 1.0`: this function is called on
+    both real neural firing rates (always >= 0, where `abs(base) == base`
+    -- no behavior change) and model GRU hidden-unit activations
+    (`dynamics_and_persistence.py::persistence_index_for_session`), which
+    are tanh/sigmoid-bounded and CAN be negative. `base == -1.0` (a fully
+    saturated-negative unit during the baseline epoch, a real, non-rare
+    occurrence for a trained GRU) previously divided by exactly zero,
+    producing a meaningless `inf` "index" for that unit rather than an
+    error -- found via a recurring `RuntimeWarning: divide by zero` while
+    auditing a real post-grid analysis run. `abs(base) + 1.0` keeps the
+    same near-zero-baseline regularization intent while staying strictly
+    positive for any real-valued `base`."""
     baseline = baseline_rates if baseline_rates.ndim > 1 else baseline_rates[:, None]
     preferred = maintain_rates.max(axis=1)
     base = baseline.mean(axis=1)
-    return (preferred - base) / (base + 1.0)
+    return (preferred - base) / (np.abs(base) + 1.0)
 
 
 def selectivity_anova(rates_by_condition: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:

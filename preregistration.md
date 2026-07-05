@@ -49,4 +49,4 @@ hash. Do not edit after the full grid starts.
 - H5 acceptance guard: chance/untrained-model negative control (audit fix, comments.txt Section H)
   wired into `run_all.py::chance_control_check`, re-verified on every pipeline run.
 
-Frozen at commit: __________  (date: __________)
+Frozen at commit: 92e059e  (date: 2026-07-05)

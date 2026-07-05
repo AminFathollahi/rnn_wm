@@ -33,7 +33,7 @@ Append-only. Record any non-obvious choice (protocol §0 rule 7), especially dev
 - **Performance limitation, not yet fixed:** `neural/adapters/dandi_nwb.py::rates()` recomputes spike-count histograms with no caching (unlike `sim_brain/spiking_generator.py`, which was optimized the same way earlier this session), making the *full* Tier A pool (~1800 units, thousands of trials) impractically slow for a single `run_all.py` invocation. Bounded today's runs via `--max-sessions-per-dataset`; the same per-(unit,trial) rate-caching fix used in `spiking_generator.py` should be ported here before running the final alignment analysis on the complete dataset.
 - **Figures:** `figures/make_all.py` implements F2 (behavior/gates, from `manifest.jsonl`) and F3 (main alignment, from `alignment_results.csv`); both degrade gracefully (skip with a message, not a crash) if their inputs aren't ready yet. F1, F4-F8 are not implemented (Extended-tier analyses: dynamical-systems mechanism, lesions, oblique sweep, cross-dataset replication).
 
-## Audit fix pass (2026-07-05, branch `fix/audit-2026-07-04`)
+## Audit fix pass (2026-07-05, branch `fix/audit-2026-07-04`, frozen at commit 92e059e)
 
 Responds to `comments.txt`, a senior-review audit finding the first grid's
 12 completed runs scientifically invalid (L=1 confounded with supervision

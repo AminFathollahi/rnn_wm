@@ -67,7 +67,7 @@ def run(cfg: dict) -> bool:
 
     # ---- 1. noise ceiling sanity ----
     t0 = time.time()
-    lower, upper = noise_ceiling_from_dataset(brain0, region, epoch, n_splits=cfg["analysis"]["noise_ceiling_splits"])
+    lower, upper = noise_ceiling_from_dataset(brain0, region, epoch)
     _log(f"noise ceiling (brain0, {epoch}): lower={lower:.3f} upper={upper:.3f}  [{time.time()-t0:.1f}s]")
     check = 0.0 <= lower <= upper <= 1.0 + 1e-6 and upper > 0.1
     ok &= check

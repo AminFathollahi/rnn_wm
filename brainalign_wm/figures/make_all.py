@@ -17,7 +17,7 @@ Implemented so far:
   F6 -- dynamic-vs-stable delay coding (cross-temporal stability index),
         model vs. brain (H5).
 
-Explicitly scoped OUT of this pass (audit fix C4), not silently dropped:
+Explicitly scoped out of this pass, not silently dropped:
 F1 (design schematic -- purely illustrative, no analysis dependency) and F8
 (cross-dataset replication against Tier B/001187 -- needs its own adapter
 validation pass, out of scope here).
@@ -31,7 +31,12 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
-CELL_ORDER = ["M000", "M001", "M010", "M011", "M100", "M101", "M110", "M111"]
+CELL_ORDER = [
+    "M00000", "M11111",
+    "M01111", "M10111", "M11011", "M11101", "M11110",
+    "M10000", "M01000", "M00100", "M00010", "M00001",
+    "M10010", "M00011", "M10001",
+]
 
 
 def _load_manifest(path: Path) -> pd.DataFrame:
@@ -135,7 +140,7 @@ def make_f3_alignment(alignment_csv: Path, out_path: Path) -> bool:
 
 
 def make_f4_reflection_shuffle(lesion_csv: Path, out_path: Path) -> bool:
-    """F4 (audit fix C1): normal vs. reflection-shuffled maintenance
+    """F4: normal vs. reflection-shuffled maintenance
     alignment, per M=1 cell -- the causal test of H2."""
     import matplotlib
 
@@ -173,7 +178,7 @@ def make_f4_reflection_shuffle(lesion_csv: Path, out_path: Path) -> bool:
 
 
 def make_f5_persistence(dynamics_csv: Path, out_path: Path) -> bool:
-    """F5 (audit fix C3/C4, H6): model vs. brain persistent-activity-index
+    """F5 (H6): model vs. brain persistent-activity-index
     means, per cell, with the permutation-test effect size annotated."""
     import matplotlib
 
@@ -211,7 +216,7 @@ def make_f5_persistence(dynamics_csv: Path, out_path: Path) -> bool:
 
 
 def make_f6_dynamic_stable(dynamics_csv: Path, out_path: Path) -> bool:
-    """F6 (audit fix C3/C4, H5): model vs. brain cross-temporal stability
+    """F6 (H5): model vs. brain cross-temporal stability
     index (dynamic vs. stable delay coding), per cell."""
     import matplotlib
 
@@ -248,6 +253,57 @@ def make_f6_dynamic_stable(dynamics_csv: Path, out_path: Path) -> bool:
     return True
 
 
+def make_f7_dv_relationship(dv_csv: Path, out_path: Path) -> bool:
+    """F7: accuracy vs. rsa_alignment scatter (one point per cell x seed,
+    colored by S, marker by M), with a fitted line + Pearson r; a second
+    panel does the same for accuracy vs. an organization metric
+    (modularity_q, or mixed_selectivity if modularity_q has no coverage)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not dv_csv.exists():
+        print("[figures] F7: no dv_relationship.csv yet; run `analysis/run_all.py` first. Skipping.")
+        return False
+    df = pd.read_csv(dv_csv)
+    if len(df) == 0:
+        print("[figures] F7: dv_relationship.csv is empty; skipping.")
+        return False
+
+    org_col = "modularity_q" if df["modularity_q"].notna().sum() >= 4 else "mixed_selectivity"
+    markers = {0: "o", 1: "^"}
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    for ax, y_col in zip(axes, ("rsa_alignment", org_col)):
+        sub = df.dropna(subset=["accuracy", y_col])
+        if len(sub) < 2:
+            ax.set_title(f"{y_col}: insufficient data")
+            continue
+        for m_val, marker in markers.items():
+            g = sub[sub["M"] == m_val]
+            if len(g):
+                ax.scatter(g["accuracy"], g[y_col], c=g["S"], cmap="coolwarm", marker=marker,
+                           label=f"M={m_val}", edgecolors="black", linewidths=0.3)
+        if sub["accuracy"].nunique() > 1:
+            coeffs = np.polyfit(sub["accuracy"], sub[y_col], 1)
+            xs = np.linspace(sub["accuracy"].min(), sub["accuracy"].max(), 50)
+            ax.plot(xs, np.polyval(coeffs, xs), color="black", linewidth=1, linestyle="--")
+        r = sub["accuracy"].corr(sub[y_col])
+        ax.set_xlabel("accuracy (load3)")
+        ax.set_ylabel(y_col)
+        ax.set_title(f"{y_col} vs. accuracy (Pearson r={r:.2f})")
+        ax.legend(fontsize=8)
+    fig.suptitle("F7: DV relationship -- performance vs. alignment vs. organization (color=S, marker=M)")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[figures] wrote {out_path}")
+    return True
+
+
 def main(argv=None) -> int:
     import yaml
 
@@ -266,6 +322,7 @@ def main(argv=None) -> int:
     made_any |= make_f4_reflection_shuffle(ROOT / "results" / "reflection_shuffle_lesion.csv", out_dir / "F4_reflection_shuffle.pdf")
     made_any |= make_f5_persistence(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F5_persistence.pdf")
     made_any |= make_f6_dynamic_stable(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F6_dynamic_stable.pdf")
+    made_any |= make_f7_dv_relationship(ROOT / "results" / "dv_relationship.csv", out_dir / "F7_dv_relationship.pdf")
 
     if not made_any:
         print("[figures] no figures produced -- no completed runs or alignment results available yet.")

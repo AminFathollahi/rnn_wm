@@ -41,3 +41,271 @@ call, adversarial-review findings, real-data validation, current status)
 is consolidated in **`RESPONSES.md`** at the repo root -- not duplicated
 here. Frozen at commit `92e059e`; see `RESPONSES.md` for the running list
 of follow-up commits and current grid status.
+
+## v5.0 pass (2026-07-06, comments.txt items 1-4)
+
+- **B2 baseline ceiling** (item 1): `rsa.trial_level_split_half_ceiling`
+  replaces the condition-level crossnobis ceiling B2 was wrongly normalized
+  by; B2's raw score and ceiling now live on the same per-trial Euclidean
+  representation.
+- **Load one-hot** (item 2): `tasks/sternberg.py::context_vector` now fires
+  the load1/2/3 one-hot only during `encode`, incrementing per item shown;
+  zero at every other epoch. Isolated retrain + corr(maintenance_raw_
+  alignment, accuracy_load1) recomputation reported in `RESPONSES.md` Part 5.
+- **Knob P replaces Knob L in Core** (item 3): see `preregistration.md`'s
+  2026-07-06 amendment for the full rationale. Implementation: `PlasticGRUCell`
+  (`models/gru_cell.py`) adds Hebbian fast weights (`W_eff = W + alpha*hebb`,
+  `hebb` decayed/updated per tick, clipped) to the worker (S=1) or flat core
+  (S=0); `HRLCore`/`_GatedFlatCore` gain a `plastic` flag; `train.py`'s
+  `_build_model`/`_step_core`/`_init_state`/`_run_trial`/`evaluate_accuracy`
+  thread a `P` parameter alongside `S`/`M`. `run_grid.py`'s `CELLS` (8, S/M/P
+  bits) and new `LOCAL_LEARNING_CELLS` (4, `M**L` model_ids, `--local-learning`
+  flag) replace the old single 8-cell S/M/L list; `configs/config.yaml` gained
+  `local_learning_cells:` and `mechanisms.hebb_eta_decay/hebb_eta_hebb/hebb_clip`.
+  `analysis/run_all.py` now reads `rec["P"]` for the Core grid and explicitly
+  skips `M**L` manifest rows (reported via rung/accuracy only, not RSA-aligned).
+- **e-prop rung 3** (item 4): `mechanisms/local_learning.py`'s
+  `NodePerturbationLearner` gains an `eprop` flag (rung 3); the eligibility
+  trace's "perturbation" input is replaced by `training/train.py::
+  _eprop_gru_step`'s per-unit pseudo-derivative (the GRU gate nonlinearities'
+  own analytic derivative -- GRU gates are differentiable, so no spiking-style
+  surrogate is needed), reusing `trace_step`/`apply_update` unchanged. `train_one`
+  gained a second escalation check (`train.rung_check_frac_2`, default 0.75) for
+  rung 2 -> 3, mirroring the existing rung 1 -> 2 check. All 8 local-learning
+  cells (M00L/M01L/M10L/M11L x seeds 0-1) retrained through the full 1->2->3
+  escalation and all 8 escalated to rung 3 without clearing the load1>=0.95
+  gate -- results table in RESPONSES.md Part 5. Recorded as the genuine
+  result per item 4's instruction, not retried further.
+- **Neural session count rebenchmarked, cap raised to the full Tier A pool
+  (item 8).** The "impractically slow" worry the M8 section above recorded
+  was ALREADY fixed by the time this pass started (`dandi_nwb.py::rates()`
+  now has the per-`(unit, epoch)` cache the M8 note asked for -- unclear
+  which earlier commit added it, but `git log` shows no dedicated commit
+  message for it, so this benchmark re-verifies it's real rather than
+  trusting the absence of a complaint). Direct timing of
+  `analysis.run_all.align_one_run` (fresh activity-log replay + full
+  maintenance/probe alignment across all 3 region levels) on the M000_s0
+  checkpoint, varying `--max-sessions-per-dataset`:
+  | sessions (both Tier A sets) | wall-clock |
+  |---|---|
+  | 16 (8+8, the old debugging cap) | 79s |
+  | 32 (16+16) | 231s |
+  | 45 (24+24, one set exhausted) | 375s |
+  | 65 (21+44, full Tier A) | 752s (~12.5 min) |
+  Scaling is worse than linear (unit x trial pair count grows with both
+  factors) but stays entirely tractable as a standalone analysis pass, not
+  a training-budget line item: sessions cost analysis wall-clock only
+  (`rates()`/crossnobis), never training wall-clock, so raising them doesn't
+  compete with the seed-count decision the E3 benchmark made. **Decision:**
+  drop `--max-sessions-per-dataset` entirely (the CLI's own default is
+  already `None` = full pool; the 16-session figure that shows up in
+  `RESPONSES.md`'s prior write-ups came from manually passing `--max-
+  sessions-per-dataset 8` during interactive debugging, not from a coded
+  cap) for all analysis passes going forward -- full 65-session Tier A
+  pool, unbounded by dataset. Full-grid analysis cost at this setting:
+  ~752s/run x up to 16-24 runs (8 cells x 2-3 seeds) = roughly 3.3-5h, run
+  as its own pass after training completes (`run_grid.py`'s Step 3), not
+  packed into the same 8h training budget. Seed count is UNCHANGED by this
+  decision (2-3 seeds, per the E3 wall-clock benchmark) -- session count and
+  seed count are orthogonal budgets (sessions -> analysis wall-clock only,
+  seeds -> training wall-clock only), so raising one doesn't require
+  lowering the other.
+- **Ablation battery + identity-catch mechanisms implemented; training
+  campaigns launched (items 5-6).** `train.energy_cost_weight` (L2/mean-
+  firing-rate penalty on `h_star`, added post-loop so it survives both
+  "ce" and "reinforce" signal branches) and `model.recurrent_noise_sigma`
+  (Gaussian noise added to the persisting recurrent state, both S=0 and
+  S=1, in both train and eval modes) are wired into `train.py`'s
+  `_run_trial`/`_step_core`, default 0.0 (off) for every Core cell.
+  `M111_pbwm`: `models/gru_cell.py::PBWMManagerCell` (LSTM-style 3-gate
+  manager, input/forget R_t-driven via `beta*R_t`, output NOT R_t-driven
+  per spec) wired into `HRLCore` via `pbwm_gate`/`reflection_beta`
+  constructor args and `_build_model`/`train_one`'s
+  `run.get("pbwm_gate", False)`. Identity-catch trials
+  (`task.identity_catch_fraction`, §9.4a): `SternbergGenerator` replaces
+  the probe step with a fixed-position (serial position 1) category query
+  on the configured fraction of trials, tagging the whole trial
+  `aux_family=1`; `Heads.identity_aux` (constructed only when the fraction
+  is >0, so Core heads/checkpoints are byte-identical to before this
+  feature existed) reads the same `h_star` the policy head reads; its
+  cross-entropy loss is added post-loop like the energy-cost term. Catch
+  trials are masked out of the ordinary policy/value loss (`non_catch`
+  mask) since they have no real in/out judgment (`in_set=None`).
+
+  Three gaps found and closed on the 2026-07-07 pass, before launching
+  training: (1) `energy_cost_weight`/`recurrent_noise_sigma`/
+  `identity_catch_fraction` were only readable from the global
+  config.yaml, with no way for distinct ablation arms to each set their
+  own value without editing the shared file between launches -- `train_one`
+  now folds `run.get(...)` overrides into its local `full_cfg` copy before
+  any downstream reader (model construction, task generation, eval-time
+  accuracy) consumes it, so every arm's `run` dict carries its own
+  override and arms can be interleaved/resumed freely. (2)
+  `evaluate_accuracy`/`_run_trial` had no separate identity-report-accuracy
+  metric for catch trials -- `_run_trial` now returns a 4th value,
+  `identity_catch: {"correct", "total"}`, accumulated whenever
+  `heads.identity_aux is not None`; `evaluate_accuracy` reports it as
+  `accuracy["identity_catch"]` and excludes catch trials from the
+  match/non-match `load{N}` denominator (they have no real in/out
+  judgment, so leaving them in would silently dilute those gates). (3)
+  `generate_activity_logs.py`'s `_build_model` calls didn't pass
+  `pbwm_gate`/`identity_catch_fraction` at all -- replaying an
+  `M111_pbwm`/`*_idcatch` checkpoint would have crashed on a
+  `load_state_dict` key/shape mismatch; `_run_id_extras(model_id)` now
+  derives both from the run_id suffix convention
+  (`M111_pbwm`/`M000_idcatch`/`M111_idcatch`) and all three `_build_model`
+  call sites use it. `analysis/run_all.py::_is_ablation_or_catch_variant`
+  excludes these runs from the Core S x M x P regression (same S/M/P bits
+  as their base cell, but a materially different trained representation --
+  pooling them in would silently bias that cell's rows); they're reported
+  via their own comparison tables in RESPONSES.md instead. Two new
+  orchestration scripts (`scripts/run_ablation_battery.py`,
+  `scripts/run_identity_catch.py`, run_id convention consumed by both
+  fixes above) launch the >=5-seed/arm and >=4-seed/cell campaigns
+  respectively, reusing `run_grid.py`'s manifest/report/signal-handling
+  machinery. All five smoke-tested end-to-end (including
+  `accuracy["identity_catch"]` reporting a real 0-1 value) before the real
+  campaigns were launched.
+
+  Item 5 (ablation battery, 5 seeds/arm, dev tier) finished 2026-07-08
+  00:11 UTC -- results table in RESPONSES.md Part 5. +energy cost is the
+  only arm that beats M111's own accuracy/gate-clear rate (mean
+  load1=0.930 vs M111's 0.675-0.90 range, 3/5 seeds clearing load1 vs 0/2
+  for M111); +noise is uniformly worse (0/5 gate clears, lowest means on
+  all three loads); +pbwm_gate sits in between, roughly matching M111. The
+  `_is_ablation_or_catch_variant` guard currently means none of these 15
+  runs have RSA alignment computed at all (skipped entirely from
+  `align_one_run`, not just from the pooled regression) -- item 5's actual
+  comparison DV is "probe-epoch alignment at matched accuracy," so this
+  guard needs relaxing (compute alignment, keep excluding only from the
+  pooled S x M x P regression rows) before the ablation battery's real
+  question can be answered; deferred to the consolidated `run_all.py` pass
+  once item 6 also finishes. Item 6 (identity-catch, 4 seeds/cell, dev
+  tier) launched 2026-07-08 ~11:07 (local); no code changes needed to
+  start it, `run_identity_catch.py` was already correct from the prior
+  session's implementation pass -- only item 5 needed babysitting to
+  completion and the item-6 launch step, which the monitoring chain missed
+  (item 5 finished at 03:41 local but nothing launched item 6 until this
+  pass at 11:07 -- the scheduled hourly health-check chain evidently
+  stopped hopping at some point after item 5 completed; noted so future
+  autonomous monitoring chains build in an explicit "did the process exit"
+  check rather than relying solely on the chain continuing to fire).
+- **Reviewer suggestions (§4.1-4.5), applied 2026-07-08: two applied in
+  full, one applied partially (reporting only), two skipped with
+  rationale.**
+
+  **4.1 (performance-matched baselines): applied.** Three flat-GRU control
+  arms off M000 (S=0,M=0,P=0): `flat_gru_2x` (`model.flat_units` doubled,
+  per-run override folded into `_build_model`'s `full_cfg` copy exactly
+  like the item-5 ablation overrides), `flat_gru_l1` (`train.
+  l1_weight_penalty` on the core's own weight-matrix parameters, added as
+  a parameter-space term directly in `train_one`'s step loop -- distinct
+  from `energy_cost_weight`, which is an activation-space penalty inside
+  `_run_trial`), `flat_gru_dropout` (`model.core_dropout_p`, standard
+  dropout on the S=0 core's hidden state, train-mode only via a new
+  `training` flag threaded through `_step_core` -- unlike
+  `recurrent_noise_sigma`, which stays on at eval too since it models a
+  persistent noise source rather than a training-time regularizer).
+  Model_id convention `M000_2x`/`M000_l1`/`M000_dropout`; `_run_id_extras`
+  (`generate_activity_logs.py`) extended to a 3-tuple
+  `(pbwm_gate, identity_catch_fraction, flat_units_mult)` since `_2x`
+  changes the core's actual parameter shapes (replay would otherwise crash
+  on `load_state_dict`, same bug class item 5/6 caught proactively) --
+  `_l1`/`_dropout` need no replay-time handling since neither changes a
+  parameter shape. `run_all.py`'s existing `model_id != "M{S}{M}{P}"` guard
+  already covers these three model_ids with no change needed. Launched via
+  new `scripts/run_perf_matched_baselines.py --seeds 3 --tier dev`
+  (3 arms x 3 seeds = 9 runs), smoke-tested end-to-end first (including a
+  `load_state_dict` round-trip check on the `_2x` arm's doubled-width
+  checkpoint) before real training; running in the background alongside
+  item 6 (both CPU-only per `utils/device.py`'s sm_120 fallback -- 32
+  cores, <10% load before either campaign started, so parallel execution
+  was judged safe rather than queuing item 6 -> item 4.1 sequentially).
+
+  **4.2 (internal brain-like properties): applied.** New
+  `analysis/network_properties.py`: `weight_entropy` (Shannon entropy of a
+  weight tensor's value histogram), `gru_effective_connectivity` (collapses
+  any GRU-family `weight_hh` [n_gates*H, H] into an [H,H] connectivity
+  graph by summing |gate block| per (i,j) -- generic across 3-gate GRU
+  cells and the 4-gate `PBWMManagerCell`), `modularity_q` (Louvain
+  community modularity via `networkx`, added to `pyproject.toml`'s main
+  deps), `small_worldness` (Watts-Strogatz sigma on a thresholded,
+  largest-connected-component subgraph -- deliberately coarse
+  `n_random`/`n_iter` defaults, same tractability tradeoff
+  `rsa.py::within_session_noise_ceiling` makes for its own resample count).
+  Cross-temporal decoding stability (H5) was NOT reimplemented --
+  `dynamics_and_persistence.py::stability_index_for_session` already does
+  this. `mixed_selectivity_index` (Rigotti et al. 2013 nonlinear mixed
+  selectivity: per-unit load x item interaction-SS / total-SS from a
+  standard ANOVA decomposition) uses **held-item identity, not category**,
+  as the second factor -- found while implementing that
+  `generate_activity_logs.py`'s real-data replay path
+  (`generate_activity_log`) hardcodes `held_categories=[""] * len(...)`
+  and `probe_category=""` (the DANDI item-identity mapping carries no
+  semantic category label, so this was never wired up); `held_items`
+  (session-local item index) is always populated and is a legitimate
+  delay-period variable in its own right, so the metric was defined on
+  that instead of blocking on a DANDI-adapter category-labeling fix that's
+  out of scope for this pass. New `scripts/analyze_network_properties.py`
+  computes all four metrics for every completed checkpoint already in
+  `results/manifest.jsonl` (weight/connectivity metrics need only the
+  checkpoint; mixed-selectivity additionally needs an existing
+  `results/activity_logs/{run_id}.parquet`, generating one fresh is out of
+  scope here -- that parquet is the neural-alignment pipeline's own
+  artifact). All 10 new unit tests
+  (`tests/test_network_properties.py`) pass, including a synthetic-data
+  check that `mixed_selectivity_index` correctly isolates a planted
+  XOR-like interaction unit from purely-additive units at matched
+  across-cell variance.
+
+  **4.3 (multi-metric alignment battery): skipped.** `rsa.py`'s own
+  docstring states the operating principle plainly: "no alignment
+  magnitude is interpretable in isolation" -- every existing DV
+  (crossnobis RSA, both raw and normalized) is reported against a
+  carefully-validated, representation-matched noise ceiling
+  (`within_session_noise_ceiling`, itself through several audit-fixed
+  iterations: N3's split-half-vs-fold-reshuffle bug, the B2 trial-level
+  ceiling fix from item 1, etc.). Bolting on CKA/Procrustes/Ridge-encoding/
+  DSA without an equally rigorous, metric-matched ceiling for each would
+  produce additional numbers that LOOK like independent confirmatory
+  evidence but aren't actually validated to the same standard as the
+  existing pipeline -- worse than not reporting them at all, since a
+  reader can't tell which of five metrics to trust without that same
+  design work repeated five times. This is a real, well-scoped follow-up
+  (each metric needs its own ceiling-estimation design pass, not just an
+  API call), not something to rush alongside items 4.1/4.2/5/6 in one
+  session -- left for a dedicated future pass.
+
+  **4.4 (evolutionary conditioning control): skipped.** A structurally
+  different training paradigm (population-based evolutionary optimization
+  pretraining a subtask, not a config knob on the existing BPTT/node-
+  perturbation pipeline) -- new hyperparameters (population size,
+  mutation/crossover operators, generation count, subtask curriculum), a
+  materially larger compute budget on top of the campaigns already
+  running, and a hypothesis (evolved-prior vs. learned-from-scratch
+  inductive bias) the current protocol doesn't include or motivate.
+  Implementing this well would need its own protocol section and design
+  pass, not a bolt-on; flagged as a possible future study rather than
+  attempted at reduced rigor to fit this session.
+
+  **4.5 (effect sizes/power): applied partially -- reporting only, no new
+  training.** Added `stats.bayes_factor_bic` (BF10 via the Wagenmakers
+  2007 / Raftery 1995 BIC approximation -- the simple closed-form version,
+  not the numerically-integrated JZS Bayesian t-test, since this is a
+  reporting complement to the existing Mann-Whitney/rank-biserial
+  comparisons, not a replacement for them) and applied it retroactively to
+  item 5's already-collected ablation-arm-vs-M111-Core accuracy data (see
+  RESPONSES.md Part 5) -- this needed no new compute, just a function over
+  data already on disk. The suggestion's other half, "run the full
+  150k-step grid with 8 seeds," was NOT launched: it's a genuine ~10-20x
+  increase over the dev-tier/2-3-seed budget this project deliberately
+  fixed (see the wall-clock benchmark / grid budget decision entry above),
+  on a single local machine already running two background training
+  campaigns (items 5+6, now also 4.1) -- unilaterally committing many
+  additional hours-to-days of this machine's compute crosses from
+  engineering judgment into a resource decision that needs the user's
+  sign-off, not an autonomous one. Available on request
+  (`run_grid.py --tier full --seeds 8`).
+
+- **2026-07-08: 5-arm ablation battery arm T/D "on" magnitude (`train.topo_loss_weight_on`/`dale_penalty_weight_on` = 0.01 each).** The design added arms T (topographic smoothness) and D (Dale's law) with a per-cell binary bit each (model_id positions 4/5), but `run_grid.py`'s cell dicts only carry the bit itself, not a loss weight -- `train_one` had to translate `run["T"]`/`run["D"]` into an actual nonzero `topo_loss_weight`/`dale_penalty_weight` for cells with the bit on (an explicit override in `run` still takes priority, for supplementary arms that want a custom value). Chose 0.01 for both as a starting point, matching the existing `energy_cost_weight` ablation arm's magnitude (0.01) rather than `l1_weight_penalty`'s (0.001) -- no principled reason to prefer either scale a priori, and per comments.txt §6.1 this is meant to be tuned during the Phase B dev-tier sanity check if training destabilizes, with any change recorded here.
+- **2026-07-08: 3 two-arm interaction-probe cells added to the ablation battery (user request), bringing it from 12 to 15 cells.** The 12-cell reference-anchored design (baseline/full + 5 knock-one-out + 5 add-one) only resolves each arm's NET interaction lumped across all other arms (comments.txt §2's stated scope limitation), not any specific pairwise interaction. Added M10010 (S+T, topography on its native worker-grid substrate, isolated from M/P/D -- closes the T substrate-entanglement gap comments.txt §2.2 flags, since M00010 alone only tests T on the flat substrate), M00011 (T+D on the flat substrate, isolated from S/M/P), and M10001 (S+D "bio-plausible backbone", isolated from M/P/T). These resolve only these 3 specific pairs; the rest (S×M, S×P, M×P, M×T, M×D, P×T, P×D) remain lumped/unresolved, per comments.txt's addendum.

@@ -1,6 +1,6 @@
 """H5 (dynamic vs. stable delay coding) and H6 (persistent activity)
 analyses, wired against real Tier-A data and the model's activity logs
-(audit fix C3/C4 -- these were implemented in `analysis/{cross_temporal,
+(implemented in `analysis/{cross_temporal,
 persistence}.py` but never invoked outside the sim-brain recovery gate).
 
 Both hinge on a per-session, per-tick/bin time series, decoded or indexed

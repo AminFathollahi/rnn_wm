@@ -38,14 +38,25 @@ class TrialStep:
     lure_flag: bool
     image_id: Optional[int]  # the item shown this tick (encode/probe epochs), else None ("no stimulus")
     c_t: list[float]
+    is_identity_catch: bool = False  # §9.4a identity-report catch trial
+    identity_catch_category: Optional[str] = None  # target category for the aux head, catch trials only
 
 
-def context_vector(load: int, epoch: str, lure_flag: bool) -> list[float]:
+def context_vector(epoch: str, lure_flag: bool, encoded_count: int = 0, aux_family: bool = False) -> list[float]:
+    """`encoded_count` is how many items have been shown so far (1-indexed,
+    incrementing as each item is presented) -- fires the load1/2/3 one-hot
+    only during `encode`. Zero at every other epoch: the network must carry
+    load forward in its own recurrent state through maintain/probe rather
+    than reading it off a live exogenous broadcast. `aux_family` (§9.4a) is
+    set for every tick of an identity-report catch trial -- the trial-
+    level task-family cue, analogous to `WM_family` (which stays 1
+    regardless; the trial is still fundamentally a WM trial, just with an
+    auxiliary identity readout at the query point)."""
     c = [0.0] * C_DIM
     c[0] = 1.0  # WM_family (only family in Core)
-    c[1] = 0.0  # aux_family (reserved, Extended/Stretch)
-    if 1 <= load <= 3:
-        c[1 + load] = 1.0  # load1/2/3 one-hot -> indices 2,3,4
+    c[1] = 1.0 if aux_family else 0.0  # aux_family: identity-report catch trial (§9.4a)
+    if epoch == "encode" and 1 <= encoded_count <= 3:
+        c[1 + encoded_count] = 1.0  # load1/2/3 one-hot -> indices 2,3,4
     c[5] = 1.0 if epoch == "encode" else 0.0
     c[6] = 1.0 if epoch == "maintain" else 0.0
     c[7] = 1.0 if epoch == "probe" else 0.0
@@ -75,6 +86,7 @@ class SternbergGenerator:
         trial_id: int,
         load_weights: Optional[list[float]] = None,
         split: str = "train",
+        identity_catch_fraction: float = 0.0,
     ) -> list[TrialStep]:
         p = None
         if load_weights is not None:
@@ -92,11 +104,22 @@ class SternbergGenerator:
             held_categories.append(cat)
             exclude.add(img_id)
 
+        # Identity-report catch trial (§7.1/§9.4a):
+        # replaces the probe step entirely with a query for which category
+        # occupied a GIVEN serial position -- fixed to position 1 (the
+        # first-encoded item) so no extra per-trial signal is needed to
+        # communicate "which position" to the network. Off (0.0) in Core.
+        is_catch = bool(rng.random_sample() < identity_catch_fraction)
+        identity_catch_category = held_categories[0] if is_catch else None
+
         # in_set is drawn first (P=0.5); lure_fraction then conditions only the
         # not-in-set branch, i.e. a fraction of not-in-set probes are lures.
+        # Catch trials skip the in/out judgment entirely (no probe image).
         in_set = bool(rng.random_sample() < 0.5)
         is_lure = False
-        if in_set:
+        if is_catch:
+            probe_item, probe_category = None, None
+        elif in_set:
             probe_item = int(rng.choice(held_items))
             probe_category = held_categories[held_items.index(probe_item)]
         else:
@@ -111,7 +134,7 @@ class SternbergGenerator:
         steps: list[TrialStep] = []
         t = 0
 
-        def emit(epoch: str, n: int, image_id: Optional[int]) -> None:
+        def emit(epoch: str, n: int, image_id: Optional[int], encoded_count: int = 0) -> None:
             nonlocal t
             for _ in range(n):
                 steps.append(
@@ -124,19 +147,21 @@ class SternbergGenerator:
                         held_categories=list(held_categories),
                         probe_item=probe_item,
                         probe_category=probe_category,
-                        in_set=in_set if epoch in ("probe", "feedback") else None,
+                        in_set=(in_set if epoch in ("probe", "feedback") else None) if not is_catch else None,
                         lure_flag=is_lure,
                         image_id=image_id,
-                        c_t=context_vector(load, epoch, is_lure),
+                        c_t=context_vector(epoch, is_lure, encoded_count, aux_family=is_catch),
+                        is_identity_catch=is_catch,
+                        identity_catch_category=identity_catch_category,
                     )
                 )
                 t += 1
 
         emit("fixation", self.fixation_steps, None)
-        for item_id in held_items:
-            emit("encode", self.encode_steps, item_id)
+        for item_num, item_id in enumerate(held_items, start=1):
+            emit("encode", self.encode_steps, item_id, encoded_count=item_num)
         emit("maintain", maintain_steps, None)
-        emit("probe", self.probe_steps, probe_item)
+        emit("probe", self.probe_steps, None if is_catch else probe_item)
         emit("feedback", self.feedback_steps, None)
         emit("iti", self.iti_steps, None)
         return steps

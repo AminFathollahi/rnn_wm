@@ -50,3 +50,107 @@ hash. Do not edit after the full grid starts.
   wired into `run_all.py::chance_control_check`, re-verified on every pipeline run.
 
 Frozen at commit: 92e059e  (date: 2026-07-05)
+
+---
+
+## Amendment (2026-07-06): H3/H4 framing (audit finding N4)
+
+This file's header says "do not edit after the full grid starts." This
+amendment is made anyway, appended (not rewriting the frozen text above),
+under an EXPLICIT PI instruction (comments.txt, 2026-07-06 review, item
+N4) issued specifically because two real defects were found in the
+maintenance-epoch alignment DV (N1: the RDM pooled all loads together,
+letting load rather than held-item identity dominate its structure; N2:
+per-session rectification produced a spurious positive floor) -- both now
+fixed (see `RESPONSES.md` Part 5). No grid seed beyond the already-
+completed seed 0-1 dev-tier runs has been launched under this amendment;
+H1/H2/H5/H6 and the analysis-lock section above are UNCHANGED. Full
+before/after detail (numbers, code, tests) lives in `RESPONSES.md`, per
+this project's one-file discipline for audit responses -- this section
+only records the resulting decision for H3/H4's status per the
+pre-registered rule ("H3 undefined for this cell" if the gate isn't met).
+
+**Finding:** across all 16 completed seed 0-1 runs (8 cells x 2 seeds),
+every L=1 (local-learning) cell sits in a narrow, robust 0.375-0.65
+load1-accuracy band -- never once close to the `load1>=0.95` gate, at
+EITHER seed, for ANY (S,M) combination, including the flagship M111. This
+is a training-signal/budget finding, not touched by the N1-N3 analysis
+fixes (which only changed how the maintenance alignment DV is computed
+from already-trained checkpoints, not `train.py`/`local_learning.py`
+themselves) -- so it is not expected to resolve merely from more seeds at
+the SAME (dev-tier, 20k-step) budget.
+
+**Decision:** per comments.txt N4's explicit recommendation, H3
+("L=1 >= BPTT at matched behavior") is reframed NOW, before any further
+seed compute is spent, as: *H3 records the gap rather than presupposing a
+matched-behavior comparison exists.* Concretely: report L=1's accuracy
+gap to BPTT for every cell (already done in `RESPONSES.md`'s per-seed
+table) and continue to mark H3 "undefined for this cell (L=1 did not
+clear the gate)" per the ORIGINAL pre-registered rule above -- no change
+to that rule's text, just an explicit acknowledgment, ahead of time, that
+it is expected to fire for every cell at dev tier. H4 ("M111 best")
+inherits the same caveat, since M111 is itself an L=1 cell.
+
+**What this does NOT decide:** whether to (a) spend the remaining 8-seed
+budget on tighter CIs for the S/M effects and the now-fixed maintenance DV
+(H3/H4 stay undefined, but H1/H2/H5/H6 gain power), or (b) redirect that
+budget toward a single, higher-training-budget shot at the L=1 arms
+specifically (the dev-tier 20k-step budget is almost certainly the
+binding constraint, not the credit-assignment mechanism itself), is a
+resource-allocation call for the PI, not implied by this amendment. Per
+the user's explicit instruction accompanying this fix pass, NO grid
+relaunch (seed 2 or beyond, nor a targeted L=1 run) has been made under
+this amendment -- this section only settles the H3/H4 FRAMING question so
+that whichever of (a)/(b) is chosen later, the grid is not implicitly
+gated on an impossible matched-behavior comparison.
+
+Also corrected here (documentation-only, matching code already in place
+before this amendment): the "Noise ceiling" bullet above describes the
+maintenance-path ceiling as "per-session repeated-fold-resample
+reliability" -- this described the PRE-N3 implementation. Audit fix N3
+(2026-07-06) replaced it with a genuine per-session split-half reliability
+estimate (disjoint random trial halves, not fold-reshuffles of the SAME
+trials); see `rsa.py::within_session_noise_ceiling` and `RESPONSES.md`
+Part 5 for why the old version saturated near 1.0 and was not a valid
+reliability estimate.
+
+---
+
+## Amendment (2026-07-06): Knob L retired from Core, replaced by Knob P (master protocol v5.0, §17 decision 6)
+
+Per the master protocol's v5.0 revision (comments.txt item 3), the Core
+factorial's third bit is no longer L (local-learning-as-training-
+algorithm) but **P (synaptic plasticity, Hebbian fast weights, §6.2)** --
+all 8 Core cells are BPTT-trained; no cell is training-algorithm-gated.
+This directly resolves the finding in the amendment above (every L=1 cell
+stuck at 0.375-0.65 load1-accuracy, never near the gate, at dev-tier
+budget): P asks a different, always-trainable question (does a fast
+synaptic memory trace improve brain alignment?) instead of gambling the
+whole Core grid's interpretability on whether node-perturbation scales to
+this task.
+
+- **H3 is redefined** (was: "L=1 >= BPTT at matched behavior"; now: "P=1
+  increases alignment via a maintenance-period signature consistent with
+  activity-silent WM -- lower persistence-index, preserved/improved
+  cross-temporal decoding, vs. matched P=0 cells"). The OLD H3 (now H3',
+  Extended-tier only) continues as the local-learning mechanism study on
+  `M00L/M01L/M10L/M11L` (§6.3) -- node-perturbation escalating through
+  rung 2 to rung 3 (e-prop, comments.txt item 4) -- reported on rung
+  reached + accuracy, no longer gating Core interpretability.
+- **H4** ("M111 best") is unaffected in form (still "the fully-constrained
+  cell is best") but M111 now means S=1,M=1,P=1 (Hebbian, BPTT-trained),
+  not S=1,M=1,L=1 (node-perturbation) -- a cell that, unlike its
+  predecessor, is expected to actually clear the behavioral gates.
+- **Analysis lock**: `align ~ S*M*L + accuracy` -> `align ~ S*M*P +
+  accuracy` (`stats.py::mixed_effects_alignment`); `run_all.py` treats
+  `M**L` model_ids as a separate, unrelated string (not parsed as S/M/P)
+  and excludes them from this model entirely.
+- Existing seed-0/1 (and partial seed-2) checkpoints for the four old L=0
+  cells (M000/M010/M100/M110) carry over UNCHANGED as the new P=0 Core
+  cells (P=0 recurrence is architecturally identical to the old L=0
+  recurrence). The four old L=1 checkpoints carry over renamed to
+  `M00L/M01L/M10L/M11L` for the local-learning study. Four NEW P=1 cells
+  (M001/M011/M101/M111) are trained fresh.
+
+This amendment does not reopen or re-litigate H1/H2/H5/H6, which are
+unaffected by the L->P swap.

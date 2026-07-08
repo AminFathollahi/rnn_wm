@@ -8,12 +8,12 @@ This module owns the eligibility-trace bookkeeping and the three-factor
 update; the perturbation itself is injected at the pre-activation of each
 GRU gate unit (dimension `3*hidden`, one term per reset/update/candidate
 unit) by the training loop (`training/train.py::_perturbed_gru_step`), not
-here. An earlier version of this design perturbed the cell's post-gate
-output state directly; that is dimensionally incompatible with the traced
-weight matrices (which have `3*hidden` output rows) and was corrected --
-see DECISIONS.md. Eligibility traces are formed between each perturbed gate
+here. Eligibility traces are formed between each perturbed gate
 unit and its two presynaptic inputs (the previous hidden state, for
-`weight_hh`; the step input, for `weight_ih`):
+`weight_hh`; the step input, for `weight_ih`). Perturbing the cell's
+post-gate output state directly would be dimensionally incompatible with
+the traced weight matrices (which have `3*hidden` output rows), so the
+perturbation is injected at the pre-activation instead:
 
     xi_t ~ N(0, sigma_p^2 I_{3H})                             -- exploratory perturbation on gate pre-activations
     e_hh[b,i,j] = gamma_e * e_hh[b,i,j] + xi_t[b,i] * h_prev[b,j]   -- per-sample eligibility trace, weight_hh
@@ -29,8 +29,6 @@ is known would replace `mean_b[(r_b - Rbar) * xi_b]` with
 `mean_b[r_b - Rbar] * mean_b[xi_b]` -- the product of averages instead of
 the average of products -- which destroys exactly the correlation the
 algorithm exploits and would make the rule learn nothing for batch size > 1.
-This was caught while implementing batching (A1c) and is recorded in
-DECISIONS.md.
 
 A fallback ladder is defined for cells that do not clear their behavioral
 gate under the default rule: rung 1 is the rule above; rung 2 is the same
@@ -39,16 +37,17 @@ normalization, AND a genuinely faster-adapting reward baseline (a smaller
 EMA decay constant, so the baseline tracks recent performance more closely
 and the resulting advantage estimate has different, and for a
 nonstationary/curriculum-shifting reward stream, typically lower variance
-than rung 1's slow baseline). Rung 3 (e-prop, Bellec et al.) is not
-implemented: a correct e-prop implementation requires propagating the GRU's
-local Jacobian (pseudo-derivative) through the masked and gated recurrence,
-a substantial undertaking in its own right, and an incomplete
-implementation risks producing silently incorrect gradients rather than a
-usable result. `make_learner_for_cell` raises `RungExhausted` if rung 3 is
-requested, so the training loop records the gap explicitly (rung=3
-unavailable) rather than failing uninformatively or substituting
-backpropagation. This gap is recorded in DECISIONS.md and the project
-README.
+than rung 1's slow baseline). Rung 3 (e-prop, Bellec et al. 2020) replaces
+the random perturbation `xi_t` with each unit's own local pseudo-derivative
+(`training/train.py::_eprop_gru_step`) as the eligibility trace's
+postsynaptic factor -- a real (if still local, not backpropagated-through-
+time) gradient direction instead of a randomly-probed one -- and reuses
+this module's trace/three-factor-update machinery unchanged (`eprop=True`
+below just changes what `trace_step` is called with, not how the trace or
+update work). If rung 3 also fails to clear the gate, `make_learner_for_cell`
+raises `RungExhausted` for any rung beyond 3, so the training loop records
+the gap explicitly (rung=4, H3' undefined for this cell/seed) rather than
+substituting backpropagation.
 """
 from __future__ import annotations
 
@@ -61,15 +60,16 @@ import torch.nn as nn
 RUNG_NAMES = {
     1: "node_perturbation",
     2: "node_perturbation_normalized_adaptive_baseline",
-    3: "e_prop",  # not implemented this session
-    4: "failed_no_local_rule",
+    3: "e_prop",
+    4: "failed_no_local_rule",  # rungs 1-3 all attempted and failed the gate
 }
 
 
 class RungExhausted(RuntimeError):
-    """Raised when rung 2 fails to clear the behavioral gate and rung 3
-    (e-prop) is unavailable. The caller should record rung=4 (H3 undefined
-    for this cell/seed) rather than substitute BPTT (never allowed for L=1)."""
+    """Raised when rung 3 (e-prop) also fails to clear the behavioral gate.
+    The caller should record rung=4 (H3' undefined for this cell/seed) --
+    all three rungs (node-perturbation, normalized/adaptive, e-prop) were
+    attempted -- rather than substitute BPTT (never allowed for L=1)."""
 
 
 @dataclass
@@ -126,6 +126,7 @@ class NodePerturbationLearner:
         baseline_decay_adaptive: float = 0.9,
         normalize_traces: bool = False,
         adaptive_baseline: bool = False,
+        eprop: bool = False,
         seed: int = 0,
     ):
         self.sigma_p = sigma_p
@@ -135,16 +136,16 @@ class NodePerturbationLearner:
         self.baseline_decay_adaptive = baseline_decay_adaptive
         self.normalize_traces = normalize_traces
         self.adaptive_baseline = adaptive_baseline
-        self.rung = 2 if (normalize_traces or adaptive_baseline) else 1
+        self.eprop = eprop
+        self.rung = 3 if eprop else (2 if (normalize_traces or adaptive_baseline) else 1)
 
         # `weight_ih=None` (or `weight_ih is weight_hh`): single-weight mode,
         # for a plain `Linear` head where there is only one weight matrix.
         # Passing the SAME parameter twice as two "distinct" traced slots
-        # (an earlier version of this code did that for `Heads.pi`/`.value`)
-        # applies the three-factor update to that one parameter TWICE per
-        # trial -- an unintended 2x effective local learning rate for the
-        # heads relative to the recurrent core. Fixed by tracking a single
-        # `TracedWeight` for these modules instead (see DECISIONS.md).
+        # would apply the three-factor update to that one parameter TWICE
+        # per trial -- an unintended 2x effective local learning rate for
+        # `Heads.pi`/`.value` relative to the recurrent core. Track a
+        # single `TracedWeight` for these modules instead.
         self._traced = [TracedWeight(weight_hh, presyn_is_hidden=True)]
         if weight_ih is not None and weight_ih is not weight_hh:
             self._traced.append(TracedWeight(weight_ih, presyn_is_hidden=False))
@@ -219,11 +220,15 @@ def make_learner_for_cell(
     L=1; only recurrent and head weights do, so this is called once per
     trainable cell (the flat GRU cell, or the worker and manager cells
     separately) and again for `Heads.pi`/`Heads.value` (single-weight mode,
-    see `NodePerturbationLearner.__init__`)."""
-    if rung not in (1, 2):
+    see `NodePerturbationLearner.__init__`). Rung 3 (e-prop) keeps rung 2's
+    adaptive baseline (a strict improvement independent of what generates
+    the trace) but not trace normalization (a pseudo-derivative-driven
+    trace has a naturally bounded scale, unlike a random-perturbation-
+    driven one, so normalizing it isn't motivated the same way)."""
+    if rung not in (1, 2, 3):
         raise RungExhausted(
             f"rung {rung} ({RUNG_NAMES.get(rung, '?')}) is not implemented; "
-            f"record rung=4 (H3 undefined for this cell/seed) rather than substituting BPTT."
+            f"record rung=4 (H3' undefined for this cell/seed) rather than substituting BPTT."
         )
     return NodePerturbationLearner(
         weight_hh=cell.weight_hh,
@@ -232,6 +237,7 @@ def make_learner_for_cell(
         gamma_e=gamma_e,
         lr_local=lr_local,
         normalize_traces=(rung == 2),
-        adaptive_baseline=(rung == 2),
+        adaptive_baseline=(rung in (2, 3)),
+        eprop=(rung == 3),
         seed=seed,
     )

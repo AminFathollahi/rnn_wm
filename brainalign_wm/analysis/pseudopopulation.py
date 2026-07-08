@@ -1,5 +1,5 @@
 """Valid cross-session pseudopopulation construction for coarse,
-cross-session-poolable conditions (audit fix A2d).
+cross-session-poolable conditions.
 
 Single units are recorded per-session, never simultaneously across the
 whole population. A condition-level pseudopopulation must therefore never
@@ -19,10 +19,10 @@ units that never co-occur in a trial isn't meaningfully estimable this
 way). This module instead uses the simpler cross-validated (squared)
 Euclidean distance (Walther et al. 2016): still unbiased under the null
 (expectation 0, same fold-based cross-validation logic as crossnobis) but
-without noise-covariance whitening. This is a deliberate scoping decision,
-recorded in DECISIONS.md -- the per-session identity-based path
-(`analysis/rsa.py::_session_condition_rdm`) keeps full crossnobis, since a
-proper trial-level noise covariance IS estimable within one session.
+without noise-covariance whitening. This is a deliberate scoping decision
+-- the per-session identity-based path (`analysis/rsa.py::
+_session_condition_rdm`) keeps full crossnobis, since a proper trial-level
+noise covariance IS estimable within one session.
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def pooled_noise_ceiling(
     ds, region, bin_ms: int, epoch: str, condition_fn: Callable, n_resamples: int = 30, seed: int = 0,
 ) -> tuple[float, float]:
     """(lower, upper) reliability of the SAME pooled representation
-    `pooled_condition_rdm` builds (audit fix A2c: raw and ceiling on the
+    `pooled_condition_rdm` builds (raw and ceiling on the
     same representation). Each resample draws an independent 2-fold split
     of every unit's own-session trials (`build_condition_fold_means` with
     `n_folds=2`); each of the two folds gives one independent "half" RDM

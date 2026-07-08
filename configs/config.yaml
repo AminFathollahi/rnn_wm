@@ -7,8 +7,48 @@ paths:
   results: ./results
   feature_cache: ./results/feat_cache
 
-# The 2x2x2 factorial: S = structure, M = modulation, L = learning.
-cells: [M000, M001, M010, M011, M100, M101, M110, M111]
+# The 5-arm bio-plausibility ABLATION BATTERY (v6.0, comments.txt 2026-07-08;
+# 3 interaction-probe cells added 2026-07-08 per user request):
+# S = structure/hierarchy, M = modulation (reflective gate), P = synaptic
+# plasticity (Hebbian fast weights, §6.2), T = topographic smoothness
+# (§1.2), D = Dale's law soft penalty (§1.3). Model IDs are "M" + 5 binary
+# digits in this fixed arm order. All 15 cells trained by BPTT throughout.
+# Reference-anchored design (NOT a full 2^5): baseline (M00000), full
+# reference (M11111), the 5 knock-one-out-from-full cells, the 5
+# add-one-to-baseline cells, and 3 targeted two-arm interaction probes
+# (below) added to close specific substrate-entanglement/interaction gaps
+# the 12-cell core battery leaves open. Answers per-arm add-one/knock-out
+# effects (and their NET, lumped-across-other-arms interaction) on two DVs
+# -- task performance and brain alignment -- per comments.txt §2.
+cells: [
+  M00000,   # baseline: every arm off
+  M11111,   # full reference: every arm on
+  M01111,   # -S: full minus structure/hierarchy
+  M10111,   # -M: full minus modulation
+  M11011,   # -P: full minus plasticity
+  M11101,   # -T: full minus topography
+  M11110,   # -D: full minus Dale's law
+  M10000,   # +S: baseline plus structure/hierarchy
+  M01000,   # +M: baseline plus modulation
+  M00100,   # +P: baseline plus plasticity
+  M00010,   # +T: baseline plus topography (All-TNNs "topography without hierarchy" test)
+  M00001,   # +D: baseline plus Dale's law
+  # Targeted two-arm interaction probes (§2's "substrate entanglement"
+  # caveat: T behaves differently on the worker's intrinsic grid (S=1) vs.
+  # the imposed flat grid (S=0) -- M00010 alone only tests T on the flat
+  # substrate; these probes isolate specific pairwise interactions the
+  # 12-cell core battery's lumped lookout/add-one design cannot resolve).
+  M10010,   # S+T: topography on its native hierarchical (worker-grid) substrate, isolated from M/P/D
+  M00011,   # T+D: spatial smoothness + E/I balance on the flat substrate, isolated from S/M/P
+  M10001,   # S+D: anatomical routing (hierarchy) + Dale's law "bio-plausible backbone", isolated from M/P/T
+]
+
+# Extended local-learning study (§6.3, §3): the same S/M architecture as
+# above, trained by node-perturbation escalating to e-prop instead of BPTT.
+# Distinct model_ids (M**L, not M**1) so they never collide with the Core
+# P-cells; carries over the checkpoints/logs the old L-knob Core grid
+# produced for these S/M combinations before v5.0 retired L from Core.
+local_learning_cells: [M00L, M01L, M10L, M11L]
 
 model:
   encoder: resnet18                        # frozen, ImageNet-pretrained
@@ -16,6 +56,8 @@ model:
   task_vec_dim: 10
   bottleneck: 128
   input_noise_sigma: 0.05
+  recurrent_noise_sigma: 0.0                # bio-plausible ablation battery §4.4 "+noise" (Core default: off)
+  core_dropout_p: 0.0                       # performance-matched baseline "flat_gru_dropout" (Core default: off)
   flat_units: 256                          # S=0 (flat GRU) hidden width
   worker_units: 196                        # S=1 worker population, 14x14 grid
   worker_grid: [14, 14]
@@ -27,14 +69,23 @@ model:
   action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no}
   g_dim: 128                               # top-down context g_t = W_g . h^m_t dimension
   worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t
+  flat_grid: [16, 16]                      # arm T on S=0 (§1.2): imposed 16x16 layout on the 256 flat units
+                                            # (All-TNNs "topography without hierarchy" test) -- arbitrary unit
+                                            # ordering is fine, the smoothness loss makes the map meaningful
+                                            # over training; S=1's worker already has an intrinsic worker_grid.
+  dale_ei_split: 0.8                       # arm D (§1.3): fraction of recurrent hidden units treated as
+                                            # excitatory (Song et al. 2016 / Balwani 2025's 80/20 split)
 
 mechanisms:
   reflection_lambda: 0.9                   # R_t leak rate
   reflection_beta: 1.0                     # gate bias gain
-  local_rule: node_perturbation            # L=1 default rule; fallback ladder escalates to e-prop
+  local_rule: node_perturbation            # local-learning-study default rule; fallback ladder escalates to e-prop
   perturb_sigma: 0.05
   elig_decay: 0.9
   lr_local: 1.0e-3
+  hebb_eta_decay: 0.9                      # Knob P (§6.2): Hebb_ij(t) decay
+  hebb_eta_hebb: 0.05                      # Knob P: Hebb_ij(t) update rate on x_j(t-1)*h_i(t)
+  hebb_clip: 2.0                           # Knob P: Hebb_ij clipped to [-hebb_clip, hebb_clip]
 
 task:                                      # image-Sternberg working-memory task
   loads: [1, 2, 3]
@@ -44,6 +95,9 @@ task:                                      # image-Sternberg working-memory task
   lure_fraction: 0.3
   n_categories: 4
   categories: [faces, animals, objects, places]
+  identity_catch_fraction: 0.0              # §7.1/§9.4a: fraction of trials replacing the probe with an
+                                             # identity-report query (position 1's category). 0.0 in Core;
+                                             # 0.12 for the {M000, M111} identity-auxiliary sub-experiment.
   fixation_steps: 3
   iti_steps: 2
   feedback_steps: 1
@@ -88,8 +142,19 @@ train:
   eval_batch_size: 8                       # batch width used only for evaluate_accuracy's own trial batches
   value_loss_weight: 0.5
   entropy_coef: 0.01                       # REINFORCE (L=0, ramp/target phases) entropy bonus; audit fix A1a
-  rung_check_frac: 0.5                     # fraction of budget before checking the rung-1 gate (L=1 fallback)
+  rung_check_frac: 0.5                     # fraction of budget before checking the rung-1 gate (local-learning fallback)
+  rung_check_frac_2: 0.75                  # fraction of budget before checking the rung-2 gate -> escalate to e-prop (rung 3)
   batch_size: 16                           # trials per training step, all sharing one drawn load; audit fix A1c
+  energy_cost_weight: 0.0                  # bio-plausible ablation battery §4.4 "+energy cost" (Core default: off)
+  l1_weight_penalty: 0.0                   # performance-matched baseline "flat_gru_l1" (Core default: off)
+  topo_loss_weight: 0.0                    # arm T (§1.2): spatial-smoothness penalty on the recurrent
+                                            # population's grid layout (off for cells with T=0)
+  topo_loss_weight_on: 0.01                # magnitude applied to cells with T=1; starting point, tune during
+                                            # the Phase B dev-tier sanity check if training is unstable
+  dale_penalty_weight: 0.0                 # arm D (§1.3): soft Dale's-law sign penalty on recurrent weight_hh
+                                            # matrices (off for cells with D=0)
+  dale_penalty_weight_on: 0.01             # magnitude applied to cells with D=1; starting point, tune during
+                                            # the Phase B dev-tier sanity check if training is unstable
 
 # Behavioral gates.
 gates:
@@ -108,6 +173,7 @@ neural:
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.
 tiers:
-  smoke: {steps: 100, scaffold_sleep_s: 0.02}
-  dev:   {steps: 20000, scaffold_sleep_s: 0.05}
-  full:  {steps: 150000, scaffold_sleep_s: 0.10}
+  smoke: {steps: 100, scaffold_sleep_s: 0.02}                  # end-to-end pipeline smoke test
+  dev:   {steps: 20000, scaffold_sleep_s: 0.05}                 # NOT a results tier -- new-mechanism (topo/dale)
+                                                                 # sanity check only: does the loss decrease, no NaNs
+  full:  {steps: 150000, scaffold_sleep_s: 0.10}                # the real, resumable results tier (5 seeds)

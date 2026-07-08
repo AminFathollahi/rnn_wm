@@ -7,7 +7,7 @@ places.
 CIFAR-100 was chosen for being disk-light (~170MB), license-clean, and
 auto-downloadable via torchvision, with fine and superclass labels already
 provided -- a tractable way to build a broad training pool without
-hand-curating thousands of images (rationale recorded in DECISIONS.md).
+hand-curating thousands of images.
 Images are low-resolution (32x32, upsampled to 224 by the encoder
 transform), but this pool is used only to train a general working-memory
 operation; the brain-alignment comparison uses the datasets' own embedded

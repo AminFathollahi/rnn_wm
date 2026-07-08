@@ -15,7 +15,12 @@ from collections import namedtuple
 import numpy as np
 import pandas as pd
 
-from brainalign_wm.analysis.rsa import _session_condition_rdm, noise_ceiling_from_dataset, within_session_noise_ceiling
+from brainalign_wm.analysis.rsa import (
+    _session_condition_rdm,
+    noise_ceiling_from_dataset,
+    trial_level_split_half_ceiling,
+    within_session_noise_ceiling,
+)
 
 
 class _RareConditionFixture:
@@ -62,11 +67,60 @@ def test_session_rdm_survives_a_singleton_condition():
     assert len(conds) == 6  # labels 0..5 kept, label 6 dropped
 
 
+class _SplitHalfViableFixture:
+    """One session; 6 conditions x 4 trials each (24 trials total). Audit
+    fix N3 rewrote `within_session_noise_ceiling` to use genuinely DISJOINT
+    trial halves rather than fold-reshuffling the SAME trials -- each half
+    now needs its own >=2 trials per condition to support a 2-fold
+    crossnobis fit, i.e. >=4 trials/condition overall, twice what the old
+    (fold-reshuffle) algorithm needed. `_RareConditionFixture` above (2
+    trials/condition) is deliberately too sparse for a genuine split-half
+    estimate post-N3 -- this fixture is the minimum viable size instead."""
+
+    bin_ms = 50
+
+    def __init__(self):
+        labels = [c for c in range(6) for _ in range(4)]
+        n = len(labels)
+        self._trials = pd.DataFrame({
+            "session": ["S0"] * n, "cond": labels, "trial_id": list(range(n)),
+        })
+        rng = np.random.RandomState(0)
+        self._data = rng.randn(n, 8) + np.array(labels)[:, None] * 0.3
+
+    def units(self, region=None):
+        return [f"S0#u{i}" for i in range(8)]
+
+    def trials(self):
+        return self._trials
+
+    def sessions(self):
+        return ["S0"]
+
+    def rates(self, region, bin_ms, epochs):
+        n_units = len(self.units(region))
+        n_trials = len(self._trials)
+        return self._data.T.reshape(n_units, n_trials, 1)
+
+
 def test_within_session_noise_ceiling_sane_bounds():
-    ds = _RareConditionFixture()
+    ds = _SplitHalfViableFixture()
     lower, upper = within_session_noise_ceiling(ds, "S0", None, "maintain", ds.bin_ms, condition_fn=_cond_fn, n_resamples=10)
     assert 0.0 <= lower <= upper <= 1.0 + 1e-6
     assert upper > 0.0
+
+
+def test_within_session_noise_ceiling_is_not_saturated_near_one():
+    """Audit fix N3: the pre-fix algorithm (fold-reshuffling of the SAME
+    full trial set every resample) measured estimator STABILITY, not
+    split-half RELIABILITY, and saturated near 1.0 for every real cell
+    (observed ~0.88-0.91 universally). A genuine disjoint split-half
+    ceiling on i.i.d. noisy synthetic data should NOT be pinned near 1;
+    this is a coarse regression guard against silently reintroducing the
+    old (data-reusing) resampling scheme."""
+    ds = _SplitHalfViableFixture()
+    _, upper = within_session_noise_ceiling(ds, "S0", None, "maintain", ds.bin_ms, condition_fn=_cond_fn, n_resamples=15)
+    assert upper < 0.95, "ceiling should not be saturated near 1.0 for genuinely disjoint (non-reused) halves"
 
 
 class _DisjointConditionsFixture:
@@ -120,3 +174,26 @@ def test_noise_ceiling_declines_when_sessions_share_no_conditions():
         "sessions with same RDM shape but disjoint condition identities must not be "
         "spuriously correlated as if aligned (A2e)"
     )
+
+
+def test_trial_level_split_half_ceiling_sane_bounds():
+    """comments.txt item 1: B2's ceiling must be estimated on the same
+    per-trial Euclidean representation its raw score uses, not the
+    condition-level crossnobis ceiling."""
+    rng = np.random.RandomState(0)
+    labels = [c for c in range(6) for _ in range(4)]
+    data = rng.randn(len(labels), 8) + np.array(labels)[:, None] * 0.3
+    lower, upper = trial_level_split_half_ceiling(data, labels, n_resamples=10)
+    assert 0.0 <= lower <= upper <= 1.0 + 1e-6
+    assert upper > 0.0
+
+
+def test_trial_level_split_half_ceiling_needs_repeat_structure():
+    """All-unique labels (no trial shares a label with any other) means no
+    label survives in both split halves -- must degrade to (0, 0) rather
+    than crash or fabricate a ceiling from a single-condition RDM."""
+    rng = np.random.RandomState(0)
+    labels = list(range(12))  # every trial its own unique label
+    data = rng.randn(len(labels), 8)
+    lower, upper = trial_level_split_half_ceiling(data, labels, n_resamples=10)
+    assert (lower, upper) == (0.0, 0.0)

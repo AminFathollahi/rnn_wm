@@ -24,6 +24,7 @@ dependencies = [
     "hydra-core",
     "omegaconf",
     "tqdm",
+    "networkx",      # modularity Q / small-worldness (analysis/network_properties.py, §4.2)
 ]
 
 [project.optional-dependencies]

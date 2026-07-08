@@ -18,19 +18,20 @@ pool but *evaluated*, for alignment purposes, on the identical images the
 recorded patients viewed. Every tick of the replay is logged via
 `training.logging_schema.LogRecord`, tagged with the source `session` so
 downstream alignment can restrict to session-matched (model, neural) pairs
-(audit fix A2b/A2d -- see `analysis/run_all.py`).
+(see `analysis/run_all.py`).
 
-Audit fix A2g: the M=1 reflective gate's R_t is now driven by the replay's
-own evolving per-tick surprise (reward-prediction error at feedback,
-self-generated surprise -- 1 - p(chosen action) -- elsewhere), computed
-exactly as `training/train.py::_run_trial` does, using the REPLAY's own
-policy/value output and the trial's real recorded outcome as the feedback
-reward. The previous version fed `delta_t = 0` every tick, so R_t was
-static throughout replay and M's dynamic signature was absent from the very
-logs the alignment DV is computed on.
+The M=1 reflective gate's R_t is driven by the replay's own evolving
+per-tick surprise (reward-prediction error at feedback, self-generated
+surprise -- 1 - p(chosen action) -- elsewhere), computed exactly as
+`training/train.py::_run_trial` does, using the replay's own policy/value
+output and the trial's real recorded outcome as the feedback reward --
+not a static `delta_t = 0`, which would leave R_t constant throughout
+replay and erase M's dynamic signature from the logs the alignment DV is
+computed on.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -38,15 +39,74 @@ import numpy as np
 import torch
 
 from brainalign_wm.training.logging_schema import LogRecord, ParquetLogWriter
-from brainalign_wm.training.train import ROOT, _build_model, _gate_width, _load_full_config, _step_core
+from brainalign_wm.training.train import ROOT, _build_model, _gate_width, _init_state, _load_full_config, _step_core
 from brainalign_wm.tasks.sternberg import context_vector
 
+# 5-arm bio-plausibility ablation battery (v6.0, arm order fixed as
+# S,M,P,T,D): model IDs are "M" + 5 binary digits, e.g. M11111 (full
+# reference), M00000 (baseline). Matched with re.match (not fullmatch) so
+# a run_id suffix (bio-plausible-ablation-battery/identity-catch/perf-
+# matched-baseline arms, e.g. "M11111_energy", "M00000_idcatch") stays
+# attached to `model_id` without breaking the digit match.
+_RE_5BIT = re.compile(r"^M([01])([01])([01])([01])([01])")
+# Extended local-learning study (§6.3): a SEPARATE, unchanged 2-bit + "L"
+# cell family (M00L/M01L/M10L/M11L) -- dispatched to its own branch below,
+# never migrated to the 5-bit scheme.
+_RE_LOCAL = re.compile(r"^M([01])([01])L")
 
-def _parse_run_id(run_id: str) -> tuple[str, int, int, int, int]:
-    """'M101_s3' -> (model_id='M101', S=1, M=0, L=1, seed=3)."""
+
+def _parse_model_id(model_id: str) -> tuple[int, int, int, int, int]:
+    """'M11111' -> (S=1,M=1,P=1,T=1,D=1); 'M10111' -> (1,0,1,1,1).
+    'M10L' -> (S=1,M=0,P=0,T=0,D=0) -- a local-learning cell (§6.3) is
+    architecturally identical to the P=0 Core cell with the same S/M
+    (plasticity is orthogonal to which algorithm trained the weights), so
+    P=0 is the right replay architecture for it, and T/D never apply to
+    the local-learning study (kept separate from the 5-arm ablation), so
+    both are 0. This module only ever replays a FROZEN checkpoint
+    (forward pass only), which never depends on L, T, or D (T/D are
+    training-time LOSS penalties only -- see training/train.py -- they
+    change no parameter shape, so a frozen checkpoint's forward pass is
+    identical regardless of what T/D were set to at train time)."""
+    m5 = _RE_5BIT.match(model_id)
+    if m5:
+        S, M, P, T, D = (int(x) for x in m5.groups())
+        return S, M, P, T, D
+    mL = _RE_LOCAL.match(model_id)
+    if mL:
+        S, M = int(mL.group(1)), int(mL.group(2))
+        return S, M, 0, 0, 0
+    raise ValueError(f"model_id {model_id!r} matches neither M[01]{{5}} nor M[01]{{2}}L")
+
+
+def _parse_run_id(run_id: str) -> tuple[str, int, int, int, int, int, int]:
+    """'M11111_s3' -> (model_id='M11111', S=1, M=1, P=1, T=1, D=1, seed=3).
+    Also handles the bio-plausible-ablation-battery / identity-catch /
+    performance-matched-baseline run_id suffix convention ('M11111_pbwm_s0',
+    'M00000_idcatch_s0', §4.4/§9.4a/§4.1): `model_id` keeps the full
+    suffixed string (so parquet filenames stay unambiguous) while
+    S/M/P/T/D still come from the leading 5 (or 2+L) characters via
+    `_parse_model_id`."""
     model_part, seed_part = run_id.split("_s")
-    S, M, L = int(model_part[1]), int(model_part[2]), int(model_part[3])
-    return model_part, S, M, L, int(seed_part)
+    S, M, P, T, D = _parse_model_id(model_part)
+    return model_part, S, M, P, T, D, int(seed_part)
+
+
+def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
+    """(pbwm_gate, identity_catch_fraction, flat_units_mult) implied by the
+    run_id suffix convention above -- the S/M/P/T/D bits alone don't
+    distinguish M11111_pbwm or M11111_idcatch/M00000_idcatch from the plain
+    Core cell, but `_build_model`/`Heads` need to match the checkpoint's
+    actual trained architecture or `load_state_dict` fails on a shape/key
+    mismatch. `flat_units_mult` (performance-matched baseline family,
+    §4.1: M00000_2x): the S=0 core's hidden width was doubled at train time,
+    which changes every `weight_ih`/`weight_hh` shape -- `_l1`/`_dropout`
+    baselines don't change any parameter shape (pure training-time
+    regularizers), so they need no entry here."""
+    return (
+        model_id.endswith("_pbwm"),
+        0.12 if model_id.endswith("_idcatch") else 0.0,
+        2 if model_id.endswith("_2x") else 1,
+    )
 
 
 def _load_checkpoint(front_end, core, heads, run_id: str, device) -> int:
@@ -71,7 +131,7 @@ def _stimulus_features_for_session(session_id: str) -> Optional[dict]:
 
 
 def replay_session(
-    front_end, core, heads, reflective_gate, S: int, M: int,
+    front_end, core, heads, reflective_gate, S: int, M: int, P: int,
     session_trials, pic_to_feature: dict, cfg: dict, device, run_id: str, model_id: str, seed: int,
     session_id: str, writer: ParquetLogWriter, t0: int,
     shuffled_R_by_trial: Optional[dict] = None,
@@ -98,9 +158,9 @@ def replay_session(
         if any(_feat(pid) is None for pid in held_items) or _feat(probe_item) is None:
             continue  # incomplete stimulus cache coverage for this trial; skip rather than fabricate
 
-        state = core.init_state(1, device) if S == 1 else {"h": core.init_state(1, device)}
+        state = _init_state(core, S, P, 1, device)
         R_prev = reflective_gate.init_state(1, device) if reflective_gate is not None else None
-        # Live per-tick surprise stream (A2g): tracked exactly as
+        # Live per-tick surprise stream: tracked exactly as
         # `training/train.py::_run_trial`'s eval path does, reset per trial.
         prev_policy = torch.full((1, action_dim), 1.0 / action_dim, device=device)
         prev_value = torch.zeros(1, 1, device=device)
@@ -108,29 +168,29 @@ def replay_session(
         prev_is_feedback = torch.zeros(1, 1, device=device)
         prev_reward = torch.zeros(1, 1, device=device)
 
-        schedule: list[tuple[str, Optional[np.ndarray]]] = []
-        schedule += [("fixation", None)] * t_cfg["fixation_steps"]
-        for pid in held_items:
-            schedule += [("encode", _feat(pid))] * t_cfg["encode_steps"]
-        schedule += [("maintain", None)] * t_cfg["maintain_steps"]
-        schedule += [("probe", _feat(probe_item))] * t_cfg["probe_steps"]
-        schedule += [("feedback", None)] * t_cfg.get("feedback_steps", 1)
-        schedule += [("iti", None)] * t_cfg.get("iti_steps", 1)
+        schedule: list[tuple[str, Optional[np.ndarray], int]] = []
+        schedule += [("fixation", None, 0)] * t_cfg["fixation_steps"]
+        for item_num, pid in enumerate(held_items, start=1):
+            schedule += [("encode", _feat(pid), item_num)] * t_cfg["encode_steps"]
+        schedule += [("maintain", None, 0)] * t_cfg["maintain_steps"]
+        schedule += [("probe", _feat(probe_item), 0)] * t_cfg["probe_steps"]
+        schedule += [("feedback", None, 0)] * t_cfg.get("feedback_steps", 1)
+        schedule += [("iti", None, 0)] * t_cfg.get("iti_steps", 1)
 
-        for i, (epoch, feat) in enumerate(schedule):
+        for i, (epoch, feat, encoded_count) in enumerate(schedule):
             v_t = (
                 torch.as_tensor(feat, dtype=torch.float32, device=device).unsqueeze(0)
                 if feat is not None
                 else torch.zeros(1, feature_dim, device=device)
             )
-            c_t = torch.tensor([context_vector(load, epoch, lure_flag=False)], dtype=torch.float32, device=device)
+            c_t = torch.tensor([context_vector(epoch, lure_flag=False, encoded_count=encoded_count)], dtype=torch.float32, device=device)
 
             gate_bias = None
             delta_t = None
             if reflective_gate is not None:
                 delta_t = reflective_gate.surprise(prev_is_feedback, prev_reward, prev_value, prev_action_logp)
                 if shuffled_R_by_trial is not None and trial_idx in shuffled_R_by_trial:
-                    # Reflection-shuffle causal control (H2, audit fix C1):
+                    # Reflection-shuffle causal control (H2):
                     # bypass the natural surprise->R_t chain and inject this
                     # trial's OWN R_t sequence but time-shuffled within the
                     # trial (temporal alignment with epoch/load/lure
@@ -143,7 +203,7 @@ def replay_session(
 
             with torch.no_grad():
                 z_t = front_end(v_t, c_t)
-                h_star, state, u_t = _step_core(core, S, M, z_t, state, t=i, gate_bias=gate_bias)
+                h_star, state, u_t = _step_core(core, S, M, P, z_t, state, t=i, gate_bias=gate_bias, R_t=R_prev)
                 policy, value, logits = heads(h_star)
 
             action = int(torch.argmax(policy, dim=-1).item())
@@ -182,12 +242,17 @@ def generate_activity_log(run_id: str, dandi_data, out_dir: Optional[Path] = Non
     replaying every session in `dandi_data` for which cached stimulus
     features exist. Returns the output Parquet path."""
     cfg = _load_full_config()
-    model_id, S, M, L, seed = _parse_run_id(run_id)
+    model_id, S, M, P, T, D, seed = _parse_run_id(run_id)  # noqa: F841 -- T/D never affect the frozen forward pass
     device = torch.device("cpu")  # replay is cheap (forward-only, no batching benefit from GPU here)
 
     from brainalign_wm.mechanisms.reflective_gate import ReflectiveGate
 
-    front_end, core, heads = _build_model(cfg, S, M, device)
+    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    if identity_catch_fraction:
+        cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
+    if flat_units_mult != 1:
+        cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     _load_checkpoint(front_end, core, heads, run_id, device)
     front_end.eval()
     core.eval()
@@ -208,14 +273,14 @@ def generate_activity_log(run_id: str, dandi_data, out_dir: Optional[Path] = Non
             if len(session_trials) == 0:
                 continue
             t = replay_session(
-                front_end, core, heads, reflective_gate, S, M, session_trials,
+                front_end, core, heads, reflective_gate, S, M, P, session_trials,
                 pic_to_feature, cfg, device, run_id, model_id, seed, session_id, writer, t,
             )
     return out_path
 
 
 def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: Optional[Path] = None) -> Path:
-    """Chance-model negative control (comments.txt acceptance gate H5): an
+    """Chance-model negative control (H5 acceptance gate): an
     UNTRAINED (randomly initialized, never optimized) model of the given
     architecture, replayed through the exact same real-session pipeline as
     a trained checkpoint. Wired into `analysis/run_all.py`'s standard
@@ -224,14 +289,19 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
     random one -- if a chance model's normalized alignment is NOT clearly
     below trained cells', the alignment DV is still degenerate."""
     cfg = _load_full_config()
-    S, M, L = int(model_id[1]), int(model_id[2]), int(model_id[3])
+    S, M, P, T, D = _parse_model_id(model_id)  # noqa: F841 -- T/D never affect the untrained forward pass either
     device = torch.device("cpu")
 
     from brainalign_wm.utils.seeding import seed_everything
     from brainalign_wm.mechanisms.reflective_gate import ReflectiveGate
 
     seed_everything(seed)
-    front_end, core, heads = _build_model(cfg, S, M, device)
+    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    if identity_catch_fraction:
+        cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
+    if flat_units_mult != 1:
+        cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     front_end.eval()
     core.eval()
     heads.eval()
@@ -252,14 +322,14 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
             if len(session_trials) == 0:
                 continue
             t = replay_session(
-                front_end, core, heads, reflective_gate, S, M, session_trials,
+                front_end, core, heads, reflective_gate, S, M, P, session_trials,
                 pic_to_feature, cfg, device, run_id, model_id, seed, session_id, writer, t,
             )
     return out_path
 
 
 def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: Optional[Path] = None) -> Path:
-    """Reflection-shuffle causal control (H2's causal claim, audit fix C1):
+    """Reflection-shuffle causal control (H2's causal claim):
     re-replays every trial using that SAME trial's own natural R_t sequence
     (read back from the normal activity log, generating it first if
     missing) but time-shuffled WITHIN the trial via
@@ -273,7 +343,7 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
     from brainalign_wm.training.logging_schema import read_log
 
     cfg = _load_full_config()
-    model_id, S, M, L, seed = _parse_run_id(run_id)
+    model_id, S, M, P, T, D, seed = _parse_run_id(run_id)  # noqa: F841 -- T/D never affect the frozen forward pass
     if not M:
         raise ValueError(f"{run_id} has M=0 (no reflective gate) -- reflection-shuffle lesion is undefined")
     device = torch.device("cpu")
@@ -285,9 +355,8 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
 
     # hashlib, NOT Python's built-in hash(): hash() on a str is salted per
     # PYTHONHASHSEED, so this seed would differ across process launches --
-    # the exact non-determinism class audit fix B1 eliminated for the grid's
-    # config_hash (see run_grid.py::config_hash), reintroduced here (found
-    # during adversarial review) and now fixed the same way.
+    # the same non-determinism class `run_grid.py::config_hash` avoids by
+    # using sha256 instead of hash().
     import hashlib
 
     _seed_bytes = hashlib.sha256(f"{run_id}:reflection_shuffle".encode()).digest()[:4]
@@ -295,9 +364,15 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
     shuffled_R: dict[tuple, torch.Tensor] = {}
     for (session_id, trial_id), g in normal_df.sort_values("t").groupby(["session", "trial_id"]):
         R_seq = torch.as_tensor(g["reflection_R"].to_numpy(), dtype=torch.float32).view(-1, 1, 1)  # [T,1,1]
+        assert R_seq.shape[1] == 1, "replay is batch=1; a batch-major R_seq would silently mis-shuffle across trials"
         shuffled_R[(session_id, trial_id)] = shuffle_reflection(R_seq, generator=gen).view(-1)  # [T]
 
-    front_end, core, heads = _build_model(cfg, S, M, device)
+    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    if identity_catch_fraction:
+        cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
+    if flat_units_mult != 1:
+        cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     _load_checkpoint(front_end, core, heads, run_id, device)
     front_end.eval()
     core.eval()
@@ -323,7 +398,7 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
                 if (session_id, trial_idx) in shuffled_R
             }
             t = replay_session(
-                front_end, core, heads, reflective_gate, S, M, session_trials,
+                front_end, core, heads, reflective_gate, S, M, P, session_trials,
                 pic_to_feature, cfg, device, run_id, model_id, seed, session_id, writer, t,
                 shuffled_R_by_trial=this_session_shuffled,
             )

@@ -6,7 +6,20 @@ probe-epoch pooled path against real Tier-A data."""
 import numpy as np
 import pandas as pd
 
-from brainalign_wm.analysis.run_all import _filter_min_trials, MIN_TRIALS_PER_CONDITION, _model_epoch_patterns, _coarse_condition
+from brainalign_wm.analysis.run_all import (
+    _filter_min_trials, MIN_TRIALS_PER_CONDITION, _model_epoch_patterns, _coarse_condition,
+    _is_ablation_or_catch_variant,
+)
+
+
+def test_is_ablation_or_catch_variant():
+    assert not _is_ablation_or_catch_variant({"model_id": "M11111", "S": 1, "M": 1, "P": 1, "T": 1, "D": 1})
+    assert not _is_ablation_or_catch_variant({"model_id": "M00000", "S": 0, "M": 0, "P": 0, "T": 0, "D": 0})
+    assert _is_ablation_or_catch_variant({"model_id": "M11111_energy", "S": 1, "M": 1, "P": 1, "T": 1, "D": 1})
+    assert _is_ablation_or_catch_variant({"model_id": "M11111_noise", "S": 1, "M": 1, "P": 1, "T": 1, "D": 1})
+    assert _is_ablation_or_catch_variant({"model_id": "M11111_pbwm", "S": 1, "M": 1, "P": 1, "T": 1, "D": 1})
+    assert _is_ablation_or_catch_variant({"model_id": "M00000_idcatch", "S": 0, "M": 0, "P": 0, "T": 0, "D": 0})
+    assert _is_ablation_or_catch_variant({"model_id": "M11111_idcatch", "S": 1, "M": 1, "P": 1, "T": 1, "D": 1})
 
 
 def test_filter_drops_rare_conditions():

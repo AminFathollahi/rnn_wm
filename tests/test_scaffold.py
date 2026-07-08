@@ -18,22 +18,49 @@ def test_parse_budget():
     assert rg.parse_budget("42") == 42
 
 
-def test_eight_cells_with_correct_bits():
-    assert len(rg.CELLS) == 8
-    ids = {c["model_id"] for c in rg.CELLS}
-    assert ids == {f"M{s}{m}{l}" for s in (0, 1) for m in (0, 1) for l in (0, 1)}
+def test_ablation_battery_cells_with_correct_bits():
+    """The 5-arm ablation battery: 15 cells (baseline, full reference, 5
+    knock-one-out, 5 add-one, 3 two-arm interaction probes), all trained
+    by BPTT (S/M/P/T/D, not L)."""
+    assert len(rg.CELLS) == 15
     for c in rg.CELLS:
-        assert c["model_id"] == f"M{c['S']}{c['M']}{c['L']}"
+        assert c["model_id"] == f"M{c['S']}{c['M']}{c['P']}{c['T']}{c['D']}"
+        assert "L" not in c
+    ids = {c["model_id"] for c in rg.CELLS}
+    assert ids == {
+        "M00000", "M11111",
+        "M01111", "M10111", "M11011", "M11101", "M11110",
+        "M10000", "M01000", "M00100", "M00010", "M00001",
+        "M10010", "M00011", "M10001",
+    }
+
+
+def test_four_local_learning_cells_with_correct_bits():
+    assert len(rg.LOCAL_LEARNING_CELLS) == 4
+    ids = {c["model_id"] for c in rg.LOCAL_LEARNING_CELLS}
+    assert ids == {f"M{s}{m}L" for s in (0, 1) for m in (0, 1)}
+    for c in rg.LOCAL_LEARNING_CELLS:
+        assert c["model_id"] == f"M{c['S']}{c['M']}L"
+        assert c["L"] == 1
+        assert "P" not in c
 
 
 def test_enumerate_is_breadth_first():
     runs = rg.enumerate_runs([0, 1])
-    # seed-major: all 8 cells at seed 0 come before any seed-1 run
-    first8 = runs[:8]
-    assert all(r["seed"] == 0 for r in first8)
-    assert {r["model_id"] for r in first8} == {c["model_id"] for c in rg.CELLS}
-    assert runs[8]["seed"] == 1
-    assert len(runs) == 16
+    n_cells = len(rg.CELLS)
+    # seed-major: all cells at seed 0 come before any seed-1 run
+    first_batch = runs[:n_cells]
+    assert all(r["seed"] == 0 for r in first_batch)
+    assert {r["model_id"] for r in first_batch} == {c["model_id"] for c in rg.CELLS}
+    assert runs[n_cells]["seed"] == 1
+    assert len(runs) == 2 * n_cells
+
+
+def test_enumerate_includes_local_learning_cells_when_requested():
+    runs = rg.enumerate_runs([0], include_local_learning=True)
+    assert len(runs) == len(rg.CELLS) + 4  # ablation battery + 4 local-learning
+    ll_ids = {r["model_id"] for r in runs} & {c["model_id"] for c in rg.LOCAL_LEARNING_CELLS}
+    assert ll_ids == {c["model_id"] for c in rg.LOCAL_LEARNING_CELLS}
 
 
 def test_resume_skips_completed(tmp_path):
@@ -48,7 +75,7 @@ def test_resume_skips_completed(tmp_path):
 
 def test_scaffold_train_one_deterministic(tmp_path, monkeypatch):
     monkeypatch.setattr(rg, "RESULTS", tmp_path)
-    run = {"run_id": "M111_s0", "model_id": "M111", "S": 1, "M": 1, "L": 1, "seed": 0}
+    run = {"run_id": "M111_s0", "model_id": "M111", "S": 1, "M": 1, "P": 1, "seed": 0}
     r1 = rg._scaffold_train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
     r2 = rg._scaffold_train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
     assert r1["accuracy"] == r2["accuracy"]  # deterministic per run_id
@@ -56,10 +83,17 @@ def test_scaffold_train_one_deterministic(tmp_path, monkeypatch):
     assert (tmp_path / "checkpoints" / "M111_s0" / "ckpt.json").exists()
 
 
+def test_scaffold_train_one_local_learning_cell(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    run = {"run_id": "M11L_s0", "model_id": "M11L", "S": 1, "M": 1, "L": 1, "seed": 0}
+    r = rg._scaffold_train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
+    assert r["rung"] == 1  # local-learning cells start at rung 1
+
+
 def test_write_report(tmp_path):
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(
-        json.dumps({"run_id": "M000_s0", "S": 0, "M": 0, "L": 0, "status": "completed",
+        json.dumps({"run_id": "M000_s0", "S": 0, "M": 0, "P": 0, "status": "completed",
                     "gates": {"load1>=0.95": True}, "accuracy": {"load1": 0.99},
                     "rung": 0, "wall_clock_s": 1.2}) + "\n"
     )

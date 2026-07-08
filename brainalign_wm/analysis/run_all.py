@@ -2,69 +2,35 @@
 training runs have completed so far (reads `results/manifest.jsonl`; does
 not require the full grid to have finished).
 
-Audit-fix rewrite (A2a-A2g, B3, C2): two epoch-appropriate condition
-schemas, each on the representation appropriate to it (A2c: raw alignment
-and its noise ceiling are always computed on the SAME representation):
+Two epoch-appropriate condition schemas, each scored against a noise
+ceiling built on that same representation:
 
-  * **maintenance** (delay-period) alignment uses REAL held-item IDENTITY
-    (preferred) or REAL dataset-embedded CATEGORY (fallback) + load as the
-    condition (A2a/A2b -- NOT the probe/response-time in_set/correct
-    labels, which cannot causally structure activity that occurred before
-    the probe). Two prior versions of this code got this wrong or
-    compromised, both corrected after checking the real data directly
-    (see DECISIONS.md for the full history):
-      1. First assumed identity never repeats (checked only dataset
-         000673, where every trial genuinely does draw a fresh,
-         non-repeating item set) and imputed a category label via
-         nearest-neighbor in the model's OWN frozen-encoder feature space
-         -- risking a confound where the metric measures "how much of the
-         encoder survives training" rather than task-driven
-         representational change (plausibly why a chance/untrained model
-         scored ABOVE a well-trained one during validation).
-      2. Checking ALL 65 sessions found dataset 000469 (21 sessions) uses
-         a FIXED, CLOSED pool of exactly 25 item-sets per session, each
-         repeated ~8-10 times -- real repeat structure supporting a proper
-         crossnobis condition mean on TRUE item identity, no proxy needed.
-      3. For dataset 000673 (44 sessions, genuinely non-repeating item
-         identity), the raw PicID values themselves decode a REAL,
-         dataset-embedded category: `pid // 100` gives exactly 5 groups of
-         ~55-57 images each. This is not a guess -- it is EXACTLY the
-         convention the original authors' own published analysis code
-         uses: `NWB_calcSelective_SB.m` in
-         github.com/rutishauserlab/SBCAT-release-NWB (cited by the
-         dataset's own `dandiset.yaml`) derives category as
-         `str2double(num2str(picID)(1))`, i.e. the first digit of the
-         PicID -- arithmetically identical to `pid // 100` for these
-         3-digit codes. Independently corroborated against the cached
-         ResNet features (mean within-group cosine similarity 0.64 vs.
-         0.52 across-group). A genuine experimenter-assigned label, NOT a
-         model-derived proxy, so it carries none of (1)'s confound.
-    `_maintenance_condition_fn` picks per-session, from the session's own
-    REAL trials (identical choice applied to both model replay and neural
-    data): real identity if it has repeat structure in this session, else
-    the real `pid // 100` category, else the session contributes nothing
-    (honestly reported as "insufficient_shared_conditions", A2f, rather
-    than worked around). Computed PER SESSION: a per-session crossnobis
-    RDM (model replay vs. that session's neural trials), against that
-    session's OWN within-session reliability ceiling
-    (`rsa.within_session_noise_ceiling` -- a cross-session LOSO ceiling is
-    meaningless here since conditions are session-specific pools, not
-    shared across sessions). Per-session rows carry the session's patient
-    (via `patient_of`), directly feeding the LME's patient factor (B3).
+  * **maintenance** (delay-period) alignment conditions on REAL held-item
+    IDENTITY (preferred) or REAL dataset-embedded CATEGORY (fallback) +
+    load -- never the probe/response-time in_set/correct labels, which
+    can't causally structure activity that occurred before the probe.
+    `_maintenance_condition_fn` picks per-session (same choice applied to
+    both model replay and neural data): identity if this session's real
+    trials have repeat structure, else category, else the session
+    contributes nothing ("insufficient_shared_conditions" rather than
+    worked around). Scored per session against that session's own
+    within-session reliability ceiling (`rsa.within_session_noise_
+    ceiling`) -- a cross-session LOSO ceiling is meaningless here since
+    conditions are session-specific pools, not shared across sessions.
+    Per-session rows carry the session's patient, feeding the LME's
+    patient factor.
   * **probe-epoch** alignment uses the coarse (load, in_set, correct)
-    schema, which DOES generalize across sessions, and is pooled --
-    correctly, via `analysis/pseudopopulation.py` (A2d: each unit's
-    condition mean uses only that unit's own session's trials, never
-    diluted by another session's zero-filled entries), with a ceiling
-    computed on that SAME pooled representation (A2c).
+    schema, which generalizes across sessions, pooled via
+    `analysis/pseudopopulation.py` (each unit's condition mean uses only
+    its own session's trials) against a ceiling on that same pooled
+    representation.
 
 Both schemas are computed at the pooled-region level (region=None) and at
-each region-family level (MTL, MFC -- audit fix C2), feeding a region factor
-into the mixed-effects model.
-
-A degenerate-RDM guard (A2f) requires >= `MIN_SHARED_CONDITIONS` shared
-conditions before reporting a score; below that, the row is marked
-"insufficient_shared_conditions" rather than emitting a number.
+each region-family level (MTL, MFC), feeding a region factor into the
+mixed-effects model. A degenerate-RDM guard requires >= `MIN_SHARED_
+CONDITIONS` shared conditions before reporting a score; below that, the
+row is marked "insufficient_shared_conditions" rather than emitting a
+number.
 
 Results are written to `results/alignment_results.csv` (one row per
 run x epoch x region, aggregated across sessions for the per-session path)
@@ -125,37 +91,51 @@ def _load_completed_runs(manifest_path: Path) -> list[dict]:
 
 
 def _identity_condition(row) -> tuple:
-    """Maintenance-epoch condition, identity variant (audit fix A2a/A2b):
-    the SORTED SET of real held-item PicIDs + load, NOT the probe/response-
-    time in_set/correct labels (which cannot causally structure activity
-    that occurred before the probe). Only sessions with a genuinely
-    repeating item-set pool (dataset 000469) produce enough same-condition
-    trials to pass the per-session min-trial filter and
-    MIN_SHARED_CONDITIONS_MAINTENANCE floor below -- see module
-    docstring."""
+    """Maintenance-epoch condition, identity variant: the sorted set of
+    real held-item PicIDs + load, never the probe/response-time in_set/
+    correct labels (which can't causally structure activity that occurred
+    before the probe). `(item_tuple, load)`-ordered for `_dpca_for_run`,
+    which marginalizes item and load as separate tensor axes -- unlike the
+    RSA crossnobis path (`_identity_condition_stratified`), so it doesn't
+    need load-first stratification."""
     return (tuple(sorted(int(x) for x in row.held_items)), int(row.load))
 
 
 def _category_condition(row) -> tuple:
-    """Maintenance-epoch condition, REAL-category variant (audit fix
-    A2a/A2b, dataset 000673): the SORTED MULTISET of held-item CATEGORY
-    codes + load, where category = first digit of the PicID (`pid // 100`)
-    -- the exact convention the original authors' own published analysis
-    code uses (`NWB_calcSelective_SB.m`,
-    github.com/rutishauserlab/SBCAT-release-NWB: `CAT = str2double(
-    num2str(picID)(1))`), NOT a model-derived proxy. See module
-    docstring."""
+    """Maintenance-epoch condition, real-category variant (dataset 000673,
+    which never repeats item identity): the sorted multiset of held-item
+    category codes + load, where category = first digit of the PicID
+    (`pid // 100`) -- the same convention the dataset's own published
+    analysis code (`NWB_calcSelective_SB.m`, github.com/rutishauserlab/
+    SBCAT-release-NWB) uses, not a model-derived proxy. `(item_tuple,
+    load)`-ordered for dPCA; see `_identity_condition`."""
     return (tuple(sorted(int(x) // 100 for x in row.held_items)), int(row.load))
 
 
+def _identity_condition_stratified(row) -> tuple:
+    """RSA/crossnobis counterpart of `_identity_condition`: `(load,
+    item_tuple)`, load FIRST as an explicit stratum, for
+    `rsa._session_condition_rdm(..., stratified=True)`/`rdm.
+    stratified_crossnobis_rdm`, which builds a separate crossnobis RDM
+    within each load stratum and assembles them block-diagonally (NaN
+    cross-load entries, never computed) rather than pooling every load
+    into one RDM whose off-diagonal is dominated by load."""
+    return (int(row.load), tuple(sorted(int(x) for x in row.held_items)))
+
+
+def _category_condition_stratified(row) -> tuple:
+    """Stratified (load-first) counterpart to `_category_condition` -- see
+    `_identity_condition_stratified`."""
+    return (int(row.load), tuple(sorted(int(x) // 100 for x in row.held_items)))
+
+
 def _session_has_identity_repeats(session_trials: pd.DataFrame, min_conditions: int = 2, min_count: int = 2) -> bool:
-    """True if this session's REAL held-item-set+load combinations recur
+    """True if this session's real held-item-set+load combinations recur
     often enough (>=`min_conditions` distinct combinations with
     >=`min_count` trials each) to support `_identity_condition` directly;
-    False means fall back to `_category_condition` (see module
-    docstring). Decided from the session's own real trial table so the
-    SAME choice applies identically to the model replay and the neural
-    data for that session."""
+    False means fall back to `_category_condition`. Decided from the
+    session's own real trial table so the SAME choice applies identically
+    to the model replay and the neural data for that session."""
     counts: dict = {}
     for row in session_trials.itertuples():
         key = (tuple(sorted(int(x) for x in row.held_items)), int(row.load))
@@ -165,16 +145,38 @@ def _session_has_identity_repeats(session_trials: pd.DataFrame, min_conditions: 
 
 def _maintenance_condition_fn(session_trials: pd.DataFrame) -> callable:
     """Picks `_identity_condition` or `_category_condition` for one session
-    based on that session's own real trial data (see module docstring for
-    the A2a/A2b design and its history)."""
+    based on that session's own real trial data. `(item_tuple, load)`-
+    ordered, for dPCA only -- see `_maintenance_condition_fn_stratified`
+    for the RSA/crossnobis path."""
     return _identity_condition if _session_has_identity_repeats(session_trials) else _category_condition
 
 
+def _maintenance_condition_fn_stratified(session_trials: pd.DataFrame) -> callable:
+    """Picks the `(load, item_tuple)`-ordered, load-stratified counterpart
+    of `_maintenance_condition_fn`, for every RSA/crossnobis maintenance-
+    path use (`_maintenance_alignment_for_run`, `_baselines_for_run`'s
+    B1/B2, and `_encoding_for_run`'s ceiling). Same session-level identity-
+    vs-category decision as `_maintenance_condition_fn`."""
+    return _identity_condition_stratified if _session_has_identity_repeats(session_trials) else _category_condition_stratified
+
+
+def _is_ablation_or_catch_variant(rec: dict) -> bool:
+    """True for a bio-plausible-ablation (§4.4: M11111_energy/M11111_noise/
+    M11111_pbwm) or identity-catch (§9.4a: M00000_idcatch/M11111_idcatch)
+    run -- same S/M/P/T/D bits as a Core ablation-battery cell but a
+    materially different trained representation, so it must not be pooled
+    into that cell's S x M x P x T x D regression rows (reported via its
+    own comparison table instead). Reconstructs the 5-bit model_id (not
+    the pre-v6.0 3-bit S/M/P one) so every real 15-cell battery cell is
+    correctly recognized as non-variant."""
+    return rec["model_id"] != f"M{rec['S']}{rec['M']}{rec['P']}{rec['T']}{rec['D']}"
+
+
 def _coarse_condition(row) -> tuple:
-    """Probe-epoch condition (audit fix A2b): a property of the
-    response/decision itself, legitimately poolable across sessions. The
-    model's activity log (`in_set`) and the NWB trial table (`probe_in_set`)
-    name the same field differently -- accept either."""
+    """Probe-epoch condition: a property of the response/decision itself,
+    legitimately poolable across sessions. The model's activity log
+    (`in_set`) and the NWB trial table (`probe_in_set`) name the same
+    field differently -- accept either."""
     in_set = row.probe_in_set if hasattr(row, "probe_in_set") else row.in_set
     return (int(row.load), bool(in_set), bool(row.correct))
 
@@ -188,15 +190,13 @@ def _model_epoch_patterns(df: pd.DataFrame, epoch: str, condition_fn) -> tuple[n
 
     Groups by `(session, trial_id)`, NOT `trial_id` alone: `trial_id` is
     assigned per-session by `generate_activity_logs.replay_session`
-    (`enumerate(session_trials.itertuples())`, reset to 0 for every
-    session), so it is NOT globally unique across the full log. Grouping by
-    `trial_id` alone (a real bug found while validating the probe-epoch
-    pooled path against real data) silently merged activity from
-    DIFFERENT trials in DIFFERENT sessions that happened to share the same
-    trial index into a single averaged "trial" -- corrupting every pooled
-    condition pattern. The maintenance-epoch path never hit this because it
-    pre-filters `model_df` to one session before calling this function; the
-    probe-epoch pooled path passes the full multi-session log directly."""
+    (reset to 0 for every session), so it is not globally unique across
+    the full log -- grouping by `trial_id` alone would silently merge
+    activity from different trials in different sessions that happen to
+    share a trial index. The maintenance-epoch path never hits this
+    because it pre-filters `model_df` to one session before calling this
+    function; the probe-epoch pooled path passes the full multi-session
+    log directly."""
     sub = df[df.epoch == epoch]
     if len(sub) == 0:
         return np.zeros((0, 0)), []
@@ -231,14 +231,51 @@ def _shared_conditions_or_none(a_conds: list, b_conds: list, floor: int = MIN_SH
 MIN_SHARED_CONDITIONS_MAINTENANCE = 4
 
 
-def _maintenance_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> list[dict]:
+MIN_VALID_PAIRS_MAINTENANCE = 3
+
+
+def _n_valid_pairs(rdm_a: np.ndarray, rdm_b: np.ndarray) -> int:
+    """Number of condition pairs actually usable for `compare_rdms` between
+    two RDMs -- i.e. neither side NaN at that pair. Under load
+    stratification, `len(shared)` (the shared condition count) doesn't
+    guarantee a proportional number of informative pairs, since shared
+    conditions can be spread thin across load strata (e.g. 4 shared
+    conditions split 2+1+1 across three loads gives only one real
+    same-stratum pair, not the ~6 a flat 4-condition RDM would). Guards
+    `_maintenance_alignment_for_run`/`_baselines_for_run` against reporting
+    a number computed from too few genuine (non-cross-stratum) pairs."""
+    from brainalign_wm.analysis.rdm import vectorize_upper
+
+    va, vb = vectorize_upper(rdm_a), vectorize_upper(rdm_b)
+    return int(np.sum(~np.isnan(va) & ~np.isnan(vb)))
+
+
+def _maintenance_alignment_for_run(
+    run_id: str, model_df: pd.DataFrame, dandi_data, region, n_permutations: int = 0, permutation_seed: int = 0,
+) -> list[dict]:
     """Per-session maintenance-epoch alignment, using real identity or real
-    category per session (see `_maintenance_condition_fn` and the module
-    docstring). Returns one row per session with usable data (both model
-    replay coverage and neural trials for that session)."""
+    category per session, stratified by load (see
+    `_maintenance_condition_fn_stratified`/`rdm.stratified_crossnobis_rdm`
+    -- pooling all loads into one crossnobis run lets the off-diagonal be
+    dominated by load rather than identity). Returns one row per session
+    with usable data (both model replay coverage and neural trials for
+    that session).
+
+    `n_permutations > 0` additionally computes, per session, a label-
+    permutation null: the neural side's condition labels are shuffled
+    within each load stratum (`stratified_crossnobis_rdm(...,
+    permute_seed=...)`), the model RDM is left at its true, observed value,
+    and `n_permutations` independent draws of the resulting raw alignment
+    are stashed under `"_perm_raw_alignments"` -- consumed by `main()` to
+    build a null distribution of the run's aggregate maintenance DV via the
+    identical (signed-mean) aggregation pipeline the observed statistic
+    uses, so any residual rectification bias cancels between the two
+    rather than inflating one but not the other. The (expensive) neural
+    `ds.rates()` fetch happens once per session regardless of
+    `n_permutations` (`rsa._session_trial_patterns`), not once per draw."""
     from brainalign_wm.analysis.rsa import compare_rdms, within_session_noise_ceiling
     from brainalign_wm.analysis import rsa as rsa_mod
-    from brainalign_wm.analysis.rdm import crossnobis_rdm
+    from brainalign_wm.analysis.rdm import stratified_crossnobis_rdm
 
     rows = []
     model_sessions = set(model_df["session"].unique()) if "session" in model_df.columns else set()
@@ -247,21 +284,28 @@ def _maintenance_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_da
         session_trials = all_trials[all_trials.session == session_id]
         if len(session_trials) == 0:
             continue
-        condition_fn = _maintenance_condition_fn(session_trials)
+        condition_fn = _maintenance_condition_fn_stratified(session_trials)
 
         sess_df = model_df[model_df["session"] == session_id]
         model_patterns, model_labels = _model_epoch_patterns(sess_df, "maintain", condition_fn)
         model_patterns, model_labels = _filter_min_trials(model_patterns, model_labels, min_count=2)
         if len(set(model_labels)) < 2:
             continue
-        n_folds_model = max(2, min(4, min(model_labels.count(l) for l in set(model_labels))))
-        if n_folds_model < 2:
+        model_strata = [l[0] for l in model_labels]
+        model_conds_only = [l[1] for l in model_labels]
+        model_rdm, model_conds = stratified_crossnobis_rdm(model_patterns, model_conds_only, model_strata, n_folds=4, seed=0)
+        if model_rdm is None:
             continue
-        model_rdm, model_conds = crossnobis_rdm(model_patterns, model_labels, n_folds=n_folds_model)
 
-        neural_rdm, neural_conds = rsa_mod._session_condition_rdm(
-            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn,
+        neural_data, neural_session_trials = rsa_mod._session_trial_patterns(
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms
         )
+        if neural_data is None:
+            continue
+        neural_labels = [condition_fn(row) for row in neural_session_trials.itertuples()]
+        neural_strata = [l[0] for l in neural_labels]
+        neural_conds_only = [l[1] for l in neural_labels]
+        neural_rdm, neural_conds = stratified_crossnobis_rdm(neural_data, neural_conds_only, neural_strata, n_folds=2, seed=0)
         if neural_rdm is None:
             continue
 
@@ -272,16 +316,33 @@ def _maintenance_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_da
             continue
         m_idx = [model_conds.index(c) for c in shared]
         n_idx = [neural_conds.index(c) for c in shared]
-        raw = compare_rdms(model_rdm[np.ix_(m_idx, m_idx)], neural_rdm[np.ix_(n_idx, n_idx)])
+        model_sub = model_rdm[np.ix_(m_idx, m_idx)]
+        neural_sub = neural_rdm[np.ix_(n_idx, n_idx)]
+        if _n_valid_pairs(model_sub, neural_sub) < MIN_VALID_PAIRS_MAINTENANCE:
+            rows.append({"run_id": run_id, "session": session_id, "region": region or "pooled",
+                          "status": "insufficient_shared_conditions", "n_shared_conditions": len(shared)})
+            continue
+        raw = compare_rdms(model_sub, neural_sub)
         ceiling_lower, ceiling_upper = within_session_noise_ceiling(
-            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn,
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
         )
-        rows.append({
+        row = {
             "run_id": run_id, "session": session_id, "region": region or "pooled",
             "patient": dandi_data.patient_of(session_id), "status": "ok",
             "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
             "normalized_alignment": _norm(raw, ceiling_upper), "n_shared_conditions": len(shared),
-        })
+        }
+        if n_permutations > 0:
+            perm_raws = []
+            for p in range(n_permutations):
+                neural_rdm_p, neural_conds_p = stratified_crossnobis_rdm(
+                    neural_data, neural_conds_only, neural_strata, n_folds=2, seed=0, permute_seed=permutation_seed + p,
+                )
+                if neural_rdm_p is None or neural_conds_p != neural_conds:
+                    continue
+                perm_raws.append(compare_rdms(model_sub, neural_rdm_p[np.ix_(n_idx, n_idx)]))
+            row["_perm_raw_alignments"] = perm_raws
+        rows.append(row)
     return rows
 
 
@@ -291,8 +352,40 @@ def _norm(raw: float, ceiling_upper: float) -> float:
     return normalized_alignment(raw, ceiling_upper)
 
 
+def _aggregate_maintenance(rows_ok: list[dict]) -> dict:
+    """Audit fix N2: aggregate SIGNED per-session `raw_alignment`/
+    `noise_ceiling_upper` via a plain mean FIRST, then normalize ONCE --
+    NOT the reverse (each session's raw/ceiling ratio clipped to [0,1]
+    THEN averaged). Per-session raw alignment is noisy around a near-zero
+    mean (verified: std ~0.09 per session, with 40-56% of sessions
+    NEGATIVE for well-trained cells); clipping each session at 0 before
+    averaging rectifies that symmetric noise into a strictly positive
+    bias -- concretely, a session with signed mean raw alignment of
+    -0.0004 (indistinguishable from zero) still reported a clipped
+    `normalized_alignment` of 0.041, and this bias is exactly what put an
+    untrained chance model at the trained-cell distribution's MEDIAN
+    rather than at a floor. The signed aggregate is reported explicitly
+    (not just the normalized one), per the fix's own instruction not to
+    let this recur silently.
+
+    Used identically by `main()`'s headline computation, `chance_control_
+    check`, and `reflection_shuffle_lesion_for_run` -- the three places
+    that used to each independently average `normalized_alignment`."""
+    raws = np.array([r["raw_alignment"] for r in rows_ok], dtype=float)
+    ceilings = np.array([r["noise_ceiling_upper"] for r in rows_ok], dtype=float)
+    mean_raw = float(raws.mean())
+    mean_ceiling = float(ceilings.mean())
+    return {
+        "maintenance_signed_raw_alignment": mean_raw,
+        "maintenance_raw_alignment": mean_raw,
+        "maintenance_noise_ceiling_upper": mean_ceiling,
+        "maintenance_normalized_alignment": _norm(mean_raw, mean_ceiling),
+        "n_sessions_ok": len(rows_ok),
+    }
+
+
 def _probe_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> dict:
-    """Pooled coarse-condition probe-epoch alignment (audit fix A2d/A2c)."""
+    """Pooled coarse-condition probe-epoch alignment."""
     from brainalign_wm.analysis.rdm import crossnobis_rdm
     from brainalign_wm.analysis.rsa import compare_rdms
     from brainalign_wm.analysis.pseudopopulation import pooled_condition_rdm, pooled_noise_ceiling
@@ -321,23 +414,22 @@ def _probe_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, re
     }
 
 
-def _task_model_rdm(conds: list) -> np.ndarray:
-    """B2 (master protocol §4.2, non-negotiable): the RDM implied by
-    ground-truth task variables alone -- a hypothetical "perfect task
-    solver" representation that encodes EXACTLY the condition-defining
-    variables (item/category identity, load) and nothing else. Each
-    condition here is `(item_or_category_tuple, load)`; distance between
-    two conditions = (0 if same item/category else 1) + (0 if same load
-    else 1), normalized to [0,1]. Needs no real data at all -- built
-    directly from the condition list."""
-    n = len(conds)
+def _task_model_rdm_per_trial(labels: list) -> np.ndarray:
+    """B2 (master protocol §4.2, non-negotiable): the per-trial RDM implied
+    by ground-truth task structure alone -- 0 if two trials share the same
+    held-item set (within a load stratum), 1 otherwise. Trial-level (not
+    condition-level) because under load stratification, every condition
+    within a stratum is unique, so a condition-level version would be
+    constant (zero variance); per-trial labels have real repeats. Returns
+    an [n_trials, n_trials] RDM, compared against per-trial Euclidean
+    neural distances by `_baselines_for_run`."""
+    n = len(labels)
     rdm = np.zeros((n, n))
     for i in range(n):
         for j in range(i + 1, n):
-            item_i, load_i = conds[i]
-            item_j, load_j = conds[j]
-            d = (0.0 if item_i == item_j else 1.0) + (0.0 if load_i == load_j else 1.0)
-            rdm[i, j] = rdm[j, i] = d / 2.0
+            # labels are (stratum, item_tuple) tuples
+            same = (labels[i] == labels[j])
+            rdm[i, j] = rdm[j, i] = 0.0 if same else 1.0
     return rdm
 
 
@@ -365,13 +457,22 @@ def _encoder_only_patterns_for_session(session_id: str, session_trials: pd.DataF
 
 def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> list[dict]:
     """B1 (encoder-only) and B2 (task-model) baselines, master protocol
-    §4.2: computed per session, on the SAME shared-condition set and
-    neural RDM the real maintenance alignment uses for that session/region,
-    so B1/B2 rows are directly comparable to the trained-model rows in
-    `alignment_by_session.csv`."""
+    S4.2: computed per session, on the SAME shared-condition set and
+    neural RDM the real maintenance alignment uses for that session/region
+    -- load-stratified, so B1/B2 rows stay directly
+    comparable to the trained-model rows in `alignment_by_session.csv`
+    (a non-stratified baseline compared against a stratified trained-model
+    row would not be an apples-to-apples baseline).
+
+    B2 is a per-trial task-model RSA: the condition-level task-model RDM
+    is degenerate under load-stratification (each
+    within-stratum condition is unique, producing a constant RDM with zero
+    variance). Instead, B2 builds a per-trial "same held-set = 0,
+    different = 1" task-model RDM and correlates it against per-trial
+    Euclidean neural distances, which have real trial-level variation."""
     from brainalign_wm.analysis.rsa import compare_rdms, within_session_noise_ceiling
     from brainalign_wm.analysis import rsa as rsa_mod
-    from brainalign_wm.analysis.rdm import crossnobis_rdm
+    from brainalign_wm.analysis.rdm import stratified_crossnobis_rdm
 
     rows = []
     model_sessions = set(model_df["session"].unique()) if "session" in model_df.columns else set()
@@ -380,45 +481,71 @@ def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) 
         session_trials = all_trials[all_trials.session == session_id]
         if len(session_trials) == 0:
             continue
-        condition_fn = _maintenance_condition_fn(session_trials)
+        condition_fn = _maintenance_condition_fn_stratified(session_trials)
 
         neural_rdm, neural_conds = rsa_mod._session_condition_rdm(
-            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn,
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
         )
         if neural_rdm is None:
             continue
+        # Also extract per-trial neural data for B2's per-trial task-model RDM
+        neural_data, neural_session_trials = rsa_mod._session_trial_patterns(
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms
+        )
         ceiling_lower, ceiling_upper = within_session_noise_ceiling(
-            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn,
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
         )
 
         # B1: encoder-only
         b1_patterns, b1_labels = _encoder_only_patterns_for_session(session_id, session_trials, condition_fn)
         b1_patterns, b1_labels = _filter_min_trials(b1_patterns, b1_labels, min_count=2)
         if len(set(b1_labels)) >= 2:
-            n_folds_b1 = max(2, min(4, min(b1_labels.count(l) for l in set(b1_labels))))
-            if n_folds_b1 >= 2:
-                b1_rdm, b1_conds = crossnobis_rdm(b1_patterns, b1_labels, n_folds=n_folds_b1)
+            b1_strata = [l[0] for l in b1_labels]
+            b1_conds_only = [l[1] for l in b1_labels]
+            b1_rdm, b1_conds = stratified_crossnobis_rdm(b1_patterns, b1_conds_only, b1_strata, n_folds=4, seed=0)
+            if b1_rdm is not None:
                 shared_b1 = _shared_conditions_or_none(b1_conds, neural_conds, floor=MIN_SHARED_CONDITIONS_MAINTENANCE)
                 if shared_b1 is not None:
                     m_idx = [b1_conds.index(c) for c in shared_b1]
                     n_idx = [neural_conds.index(c) for c in shared_b1]
-                    raw_b1 = compare_rdms(b1_rdm[np.ix_(m_idx, m_idx)], neural_rdm[np.ix_(n_idx, n_idx)])
-                    rows.append({
-                        "run_id": run_id, "session": session_id, "region": region or "pooled", "baseline": "B1_encoder_only",
-                        "patient": dandi_data.patient_of(session_id), "status": "ok", "raw_alignment": raw_b1,
-                        "noise_ceiling_upper": ceiling_upper, "normalized_alignment": _norm(raw_b1, ceiling_upper),
-                        "n_shared_conditions": len(shared_b1),
-                    })
+                    b1_sub, neural_sub_b1 = b1_rdm[np.ix_(m_idx, m_idx)], neural_rdm[np.ix_(n_idx, n_idx)]
+                    if _n_valid_pairs(b1_sub, neural_sub_b1) >= MIN_VALID_PAIRS_MAINTENANCE:
+                        raw_b1 = compare_rdms(b1_sub, neural_sub_b1)
+                        rows.append({
+                            "run_id": run_id, "session": session_id, "region": region or "pooled", "baseline": "B1_encoder_only",
+                            "patient": dandi_data.patient_of(session_id), "status": "ok", "raw_alignment": raw_b1,
+                            "noise_ceiling_upper": ceiling_upper, "normalized_alignment": _norm(raw_b1, ceiling_upper),
+                            "n_shared_conditions": len(shared_b1),
+                        })
 
-        # B2: task-model (ground-truth condition structure only)
-        b2_rdm = _task_model_rdm(neural_conds)
-        raw_b2 = compare_rdms(b2_rdm, neural_rdm)
-        rows.append({
-            "run_id": run_id, "session": session_id, "region": region or "pooled", "baseline": "B2_task_model",
-            "patient": dandi_data.patient_of(session_id), "status": "ok", "raw_alignment": raw_b2,
-            "noise_ceiling_upper": ceiling_upper, "normalized_alignment": _norm(raw_b2, ceiling_upper),
-            "n_shared_conditions": len(neural_conds),
-        })
+        # B2: task-model (ground-truth condition structure only). A
+        # condition-level RDM is degenerate under load-stratification (each
+        # within-stratum condition is unique, so the RDM is constant = zero
+        # variance); use the per-trial task-model RDM instead, correlated
+        # against per-trial Euclidean neural distances (a noise-whitened-
+        # free approximation to crossnobis at the trial level, which is the
+        # level at which the task-model ground truth has real variation).
+        neural_labels = [condition_fn(row) for row in neural_session_trials.itertuples()]
+        if len(neural_labels) >= 4:
+            from brainalign_wm.analysis.rdm import vectorize_upper as _vu
+            b2_task_rdm = _task_model_rdm_per_trial(neural_labels)
+            # Per-trial Euclidean distances on the raw neural data
+            from scipy.spatial.distance import squareform, pdist
+            neural_trial_rdm = squareform(pdist(neural_data, metric="euclidean"))
+            raw_b2 = compare_rdms(b2_task_rdm, neural_trial_rdm)
+            n_valid_b2 = int(np.sum(~np.isnan(_vu(b2_task_rdm)) & ~np.isnan(_vu(neural_trial_rdm))))
+            # B2's raw score lives on the per-trial Euclidean
+            # representation, not the condition-level crossnobis one
+            # `ceiling_upper` (above) estimates -- normalize against a
+            # ceiling built on that same per-trial representation instead.
+            b2_ceiling_lower, b2_ceiling_upper = rsa_mod.trial_level_split_half_ceiling(neural_data, neural_labels)
+            rows.append({
+                "run_id": run_id, "session": session_id, "region": region or "pooled", "baseline": "B2_task_model",
+                "patient": dandi_data.patient_of(session_id), "status": "ok", "raw_alignment": raw_b2,
+                "b2_noise_ceiling_upper": b2_ceiling_upper, "b2_noise_ceiling_lower": b2_ceiling_lower,
+                "normalized_alignment": _norm(raw_b2, b2_ceiling_upper),
+                "n_shared_conditions": n_valid_b2,
+            })
     return rows
 
 
@@ -476,10 +603,12 @@ def _encoding_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -
     works on every session with model replay coverage, regardless of
     whether that session supports identity- or category-based conditions.
     The ceiling used to normalize is this session's own RSA within-session
-    ceiling (`_maintenance_condition_fn`-selected schema), reused here as a
-    practical proxy for the per-target-neuron reliability ceiling a
-    dedicated single-unit split-half estimate would give (not separately
-    computed, for tractability)."""
+    ceiling (`_maintenance_condition_fn_stratified`-selected, load-
+    stratified schema, kept consistent with every other maintenance-path
+    ceiling), reused here as a practical proxy for the
+    per-target-neuron reliability ceiling a dedicated single-unit
+    split-half estimate would give (not separately computed, for
+    tractability)."""
     from brainalign_wm.analysis.encoding import encoding_r2, noise_ceiling_normalized_r2
     from brainalign_wm.analysis.rsa import within_session_noise_ceiling
 
@@ -491,8 +620,10 @@ def _encoding_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -
         if X_model.shape[0] < 10:  # need enough trials for a meaningful outer CV split
             continue
         session_trials = all_trials[all_trials.session == session_id]
-        condition_fn = _maintenance_condition_fn(session_trials)
-        _, ceiling_upper = within_session_noise_ceiling(dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn)
+        condition_fn = _maintenance_condition_fn_stratified(session_trials)
+        _, ceiling_upper = within_session_noise_ceiling(
+            dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
+        )
         r2_model_to_neuron = encoding_r2(X_model, Y_neural, n_folds=5, seed=0)
         r2_neuron_to_model = encoding_r2(Y_neural, X_model, n_folds=5, seed=0)
         rows.append({
@@ -618,10 +749,18 @@ def _dpca_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> li
     return rows
 
 
-def align_one_run(run_id: str, dandi_data, force_regenerate: bool = False) -> dict:
+def align_one_run(
+    run_id: str, dandi_data, force_regenerate: bool = False, n_permutations: int = 0, permutation_seed: int = 0,
+) -> dict:
     """Generates/loads the run's activity log and computes both the
     per-session maintenance alignment and the pooled probe alignment, at
-    each region level. Returns {"maintenance": [rows...], "probe": [rows...]}."""
+    each region level. Returns {"maintenance": [rows...], "probe": [rows...]}.
+
+    `n_permutations` is forwarded only to the pooled-region
+    (region=None) maintenance call, matching the pooled-only scope of
+    `main()`'s headline DV and chance-control gate -- computing it for
+    MTL/MFC too would triple an already-expensive per-session permutation
+    loop for numbers nothing downstream currently consumes."""
     from brainalign_wm.training.generate_activity_logs import generate_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
@@ -632,7 +771,12 @@ def align_one_run(run_id: str, dandi_data, force_regenerate: bool = False) -> di
 
     maintenance_rows, probe_rows = [], []
     for region in REGIONS:
-        maintenance_rows.extend(_maintenance_alignment_for_run(run_id, df, dandi_data, region))
+        region_n_permutations = n_permutations if region is None else 0
+        maintenance_rows.extend(
+            _maintenance_alignment_for_run(
+                run_id, df, dandi_data, region, n_permutations=region_n_permutations, permutation_seed=permutation_seed,
+            )
+        )
         probe_rows.append(_probe_alignment_for_run(run_id, df, dandi_data, region))
     return {"maintenance": maintenance_rows, "probe": probe_rows}
 
@@ -663,11 +807,17 @@ def reflection_shuffle_lesion_for_run(run_id: str, dandi_data) -> dict:
     if not normal_ok or not shuffled_ok:
         return {"run_id": run_id, "status": "insufficient_sessions",
                 "n_normal_sessions_ok": len(normal_ok), "n_shuffled_sessions_ok": len(shuffled_ok)}
-    normal_norm = float(np.mean([r["normalized_alignment"] for r in normal_ok]))
-    shuffled_norm = float(np.mean([r["normalized_alignment"] for r in shuffled_ok]))
+    # Audit fix N2: aggregate SIGNED raw alignment/ceiling first, normalize
+    # once -- not mean-of-per-session-clipped (see `_aggregate_maintenance`).
+    normal_agg = _aggregate_maintenance(normal_ok)
+    shuffled_agg = _aggregate_maintenance(shuffled_ok)
+    normal_norm = normal_agg["maintenance_normalized_alignment"]
+    shuffled_norm = shuffled_agg["maintenance_normalized_alignment"]
     return {
         "run_id": run_id, "status": "ok",
         "normal_normalized_alignment": normal_norm, "shuffled_normalized_alignment": shuffled_norm,
+        "normal_signed_raw_alignment": normal_agg["maintenance_signed_raw_alignment"],
+        "shuffled_signed_raw_alignment": shuffled_agg["maintenance_signed_raw_alignment"],
         "lesion_effect": normal_norm - shuffled_norm,
         "n_normal_sessions_ok": len(normal_ok), "n_shuffled_sessions_ok": len(shuffled_ok),
     }
@@ -677,7 +827,7 @@ MAX_SESSIONS_FOR_DYNAMICS = 20
 
 
 def dynamics_and_persistence_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, max_sessions: int = MAX_SESSIONS_FOR_DYNAMICS) -> dict:
-    """H5/H6 (audit fix C3/C4): aggregates per-session stability-index
+    """H5/H6: aggregates per-session stability-index
     (dynamic vs. stable delay coding) and persistent-activity-index
     (memoranda-selective persistence) comparisons across every session with
     usable model+neural data, and compares the model's vs. the brain's
@@ -732,7 +882,7 @@ def dynamics_and_persistence_for_run(run_id: str, model_df: pd.DataFrame, dandi_
 
 
 def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
-    """comments.txt acceptance-gate H5: an untrained (chance) model must
+    """H5 acceptance gate: an untrained (chance) model must
     land near the alignment floor -- wired into the standard `run_all.py`
     output (not a one-off spot check), so this is re-verified every time
     the pipeline runs, not just once during validation."""
@@ -749,7 +899,9 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
 
     out = {"run_id": run_id, "model_id": model_id}
     if maintenance_ok:
-        out["maintenance_normalized_alignment"] = float(np.mean([r["normalized_alignment"] for r in maintenance_ok]))
+        # Audit fix N2: signed-aggregate-then-normalize, not
+        # mean-of-per-session-clipped (see `_aggregate_maintenance`).
+        out.update(_aggregate_maintenance(maintenance_ok))
     if probe_row.get("status") == "ok":
         out["probe_normalized_alignment"] = probe_row["normalized_alignment"]
     return out
@@ -763,7 +915,7 @@ def main(argv=None) -> int:
         "--max-sessions-per-dataset", type=int, default=None,
         help="bound the number of sessions loaded per dataset; `dandi_nwb.rates()` recomputes "
              "spike histograms with no caching (unlike sim_brain's), so the full Tier A pool "
-             "(~1800 units, thousands of trials) is currently impractically slow -- see DECISIONS.md.",
+             "(~1800 units, thousands of trials) can be slow for repeated interactive runs.",
     )
     ap.add_argument(
         "--skip-reflection-shuffle", action="store_true",
@@ -790,7 +942,25 @@ def main(argv=None) -> int:
         "--skip-dpca", action="store_true",
         help="skip the master-protocol §9.5/Core dPCA marginalization on real per-session data (pooled region only).",
     )
+    ap.add_argument(
+        "--n-permutations", type=int, default=20,
+        help="number of within-load-stratum, within-session label-permutation draws per run, "
+             "used to build a null distribution of the run's aggregate maintenance DV (pooled region only). "
+             "Pass 0 (or --skip-permutation-null) to disable -- each draw re-runs a per-session crossnobis fit.",
+    )
+    ap.add_argument(
+        "--skip-permutation-null", action="store_true",
+        help="alias for --n-permutations 0.",
+    )
+    ap.add_argument(
+        "--skip-dv-relationship", action="store_true",
+        help="skip the comments.txt §2.1 DV-relationship analysis (accuracy<->alignment<->organization "
+             "correlations across ablation cells/seeds) -- needs results/network_properties.jsonl and "
+             "results/dynamics_persistence.csv to already exist for full coverage.",
+    )
     args = ap.parse_args(argv)
+    if args.skip_permutation_null:
+        args.n_permutations = 0
 
     cfg = yaml.safe_load(Path(args.config).read_text())
     completed = _load_completed_runs(ROOT / "results" / "manifest.jsonl")
@@ -812,16 +982,28 @@ def main(argv=None) -> int:
     maintenance_session_rows, probe_rows, lesion_rows, dynamics_rows, encoding_rows, dpca_rows = [], [], [], [], [], []
     for rec in completed:
         run_id = rec["run_id"]
+        if "P" not in rec:
+            # Extended local-learning cells (M**L, §6.3) carry "L", not "P"
+            # -- reported on their own terms (rung reached + accuracy,
+            # already in manifest.jsonl) rather than pooled into the Core
+            # S x M x P RSA/dPCA/encoding analyses below.
+            print(f"[run_all]   skipping {run_id} (local-learning cell, not part of the Core S x M x P grid)")
+            continue
+        if _is_ablation_or_catch_variant(rec):
+            print(f"[run_all]   skipping {run_id} (ablation/identity-catch variant {rec['model_id']!r}, reported separately)")
+            continue
         print(f"[run_all] aligning {run_id} ...")
         try:
-            result = align_one_run(run_id, dandi_data, force_regenerate=args.regenerate)
+            result = align_one_run(run_id, dandi_data, force_regenerate=args.regenerate, n_permutations=args.n_permutations)
         except FileNotFoundError as e:
             print(f"[run_all]   skipped ({e})")
             continue
+
         for row in result["maintenance"]:
-            maintenance_session_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "L": rec["L"], "seed": rec["seed"]})
+            clean_row = {k: v for k, v in row.items() if k != "_perm_raw_alignments"}
+            maintenance_session_rows.append({**clean_row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
         for row in result["probe"]:
-            probe_rows.append({**row, "run_id": run_id, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "L": rec["L"], "seed": rec["seed"],
+            probe_rows.append({**row, "run_id": run_id, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"],
                                 "accuracy_load1": rec.get("accuracy", {}).get("load1"), "accuracy_load3": rec.get("accuracy", {}).get("load3")})
         ok_n = sum(1 for r in result["maintenance"] if r.get("status") == "ok")
         print(f"[run_all]   maintenance: {ok_n}/{len(result['maintenance'])} session-rows ok; "
@@ -829,7 +1011,7 @@ def main(argv=None) -> int:
 
         if rec["M"] == 1 and not args.skip_reflection_shuffle:
             lesion = reflection_shuffle_lesion_for_run(run_id, dandi_data)
-            lesion_rows.append({**lesion, "model_id": rec["model_id"], "S": rec["S"], "L": rec["L"], "seed": rec["seed"]})
+            lesion_rows.append({**lesion, "model_id": rec["model_id"], "S": rec["S"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
             print(f"[run_all]   C1 reflection-shuffle lesion: {lesion.get('status')} "
                   f"(effect={lesion.get('lesion_effect')})" if lesion.get("status") == "ok" else
                   f"[run_all]   C1 reflection-shuffle lesion: {lesion.get('status')}")
@@ -840,7 +1022,7 @@ def main(argv=None) -> int:
                 from brainalign_wm.training.logging_schema import read_log
 
                 dyn = dynamics_and_persistence_for_run(run_id, read_log(log_path), dandi_data)
-                dynamics_rows.append({**dyn, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "L": rec["L"], "seed": rec["seed"]})
+                dynamics_rows.append({**dyn, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   H5/H6 dynamics/persistence: {dyn.get('status')}")
 
         if not args.skip_encoding:
@@ -851,7 +1033,7 @@ def main(argv=None) -> int:
                 enc_df = read_log(log_path)
                 enc_rows_this_run = _encoding_for_run(run_id, enc_df, dandi_data, None)
                 for row in enc_rows_this_run:
-                    encoding_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "L": rec["L"], "seed": rec["seed"]})
+                    encoding_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   encoding models (pooled): {len(enc_rows_this_run)} session-rows")
 
         if not args.skip_dpca:
@@ -862,7 +1044,7 @@ def main(argv=None) -> int:
                 dpca_df = read_log(log_path)
                 dpca_rows_this_run = _dpca_for_run(run_id, dpca_df, dandi_data, None)
                 for row in dpca_rows_this_run:
-                    dpca_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "L": rec["L"], "seed": rec["seed"]})
+                    dpca_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   dPCA (pooled): {len(dpca_rows_this_run)} session-rows")
 
     if lesion_rows:
@@ -925,18 +1107,34 @@ def main(argv=None) -> int:
 
     probe_df = pd.DataFrame(probe_rows)
 
-    # headline per-cell CSV: maintenance aggregated across sessions (mean,
-    # pooled-region only) + the pooled-region probe row, joined by run_id.
+    # headline per-cell CSV: maintenance aggregated across sessions
+    # (pooled-region only) + the pooled-region probe row, joined by run_id.
+    # Aggregation is signed-mean-then-normalize-once, via
+    # `_aggregate_maintenance` -- NOT `ok.normalized_alignment.mean()` (mean
+    # of per-session values already clipped to [0,1], which rectifies
+    # symmetric per-session noise into a spurious positive floor). Per-cell
+    # permutation p-values are intentionally omitted from the headline: the
+    # one-sided "greater" test against a null centered well below zero is
+    # anti-informative (cells with negative alignment get flagged
+    # "significant"), and the distributional chance gate (Mann-Whitney
+    # trained vs. chance) is the correct, already-wired statistical test
+    # for this DV.
+    # Audit fix M10: explicit guard instead of a conditional-as-iterable
+    # (`for x in y if cond else []`), which is easy to misread and silently
+    # skips the whole loop rather than failing loudly on an empty session_df.
     headline_rows = []
-    for run_id, g in session_df[session_df.get("region") == "pooled"].groupby("run_id") if len(session_df) else []:
-        ok = g[g.status == "ok"]
-        if len(ok) == 0:
-            continue
-        headline_rows.append({
-            "run_id": run_id, "model_id": ok.model_id.iloc[0], "S": ok.S.iloc[0], "M": ok.M.iloc[0], "L": ok.L.iloc[0], "seed": ok.seed.iloc[0],
-            "maintenance_raw_alignment": ok.raw_alignment.mean(), "maintenance_noise_ceiling_upper": ok.noise_ceiling_upper.mean(),
-            "maintenance_normalized_alignment": ok.normalized_alignment.mean(), "n_sessions_ok": len(ok),
-        })
+    if len(session_df) == 0:
+        print("[run_all] no session rows; skipping headline aggregation.")
+    else:
+        for run_id, g in session_df[session_df.get("region") == "pooled"].groupby("run_id"):
+            ok = g[g.status == "ok"]
+            if len(ok) == 0:
+                continue
+            headline_rows.append({
+                "run_id": run_id, "model_id": ok.model_id.iloc[0], "S": ok.S.iloc[0], "M": ok.M.iloc[0], "P": ok.P.iloc[0],
+                "T": ok.T.iloc[0], "D": ok.D.iloc[0], "seed": ok.seed.iloc[0],
+                **_aggregate_maintenance(ok.to_dict("records")),
+            })
     headline_df = pd.DataFrame(headline_rows)
     if len(probe_df):
         probe_cols = ["run_id", "status", "raw_alignment", "noise_ceiling_upper", "normalized_alignment",
@@ -969,15 +1167,15 @@ def main(argv=None) -> int:
     # dissociation (H1/C2) gets its OWN separate model below instead.
     ok_sessions = session_df[(session_df.get("region") == "pooled") & (session_df.get("status") == "ok")] if len(session_df) else session_df
     accuracy_lookup = pd.DataFrame([{"run_id": r["run_id"], "accuracy": r.get("accuracy", {}).get("load3")} for r in completed])
-    if len(ok_sessions) and ok_sessions["S"].nunique() >= 2 and ok_sessions["M"].nunique() >= 2 and ok_sessions["L"].nunique() >= 2 and len(ok_sessions) >= 6:
+    if len(ok_sessions) and ok_sessions["S"].nunique() >= 2 and ok_sessions["M"].nunique() >= 2 and ok_sessions["P"].nunique() >= 2 and len(ok_sessions) >= 6:
         sub = ok_sessions.rename(columns={"normalized_alignment": "align_score"}).merge(accuracy_lookup, on="run_id", how="left")
-        res = mixed_effects_alignment(sub, formula="align_score ~ S * M * L + accuracy")
+        res = mixed_effects_alignment(sub, formula="align_score ~ S * M * P + accuracy")
         print(f"\n[run_all] maintenance mixed-effects fit ({res['method']}):")
         for k, v in res["params"].items():
             print(f"    {k}: {v:.4f}")
     else:
         print("\n[run_all] insufficient factor coverage for mixed-effects inference on the maintenance path "
-              "(need >=2 levels of S, M, L and >=6 session-rows); re-run once more cells complete.")
+              "(need >=2 levels of S, M, P and >=6 session-rows); re-run once more cells complete.")
 
     # H1/C2 region-dissociation model: restricted to MTL/MFC rows (excludes
     # pooled, which would double-count each session against its own
@@ -999,31 +1197,86 @@ def main(argv=None) -> int:
               "(need both region levels, >=2 levels of S, and >=6 rows).")
 
     if not args.skip_chance_control and len(headline_df):
-        # H5 needs a genuinely well-trained comparison model -- NOT "M111
-        # if present" (the previous default): M111 is the flagship
-        # SCIENTIFIC target cell, but it's also an L=1 cell, and L=1 has
-        # repeatedly failed to train above near-chance behavior (see
-        # RESPONSES.md). Comparing an untrained model against a cell that
-        # itself never behaviorally learned makes this gate compare chance
-        # to chance, not chance to trained -- found via a real post-grid
-        # run where this silently produced a FAIL (chance=trained=0.000)
-        # that had nothing to do with the chance-control machinery itself.
-        # Pick the row with the best accuracy_load1 (ties broken by
-        # accuracy_load3) among completed runs instead.
+        # H5 needs a genuinely well-trained comparison model, not just
+        # "M111 if present": M111 is the flagship scientific target cell,
+        # but comparing an untrained model against a cell that itself never
+        # behaviorally learned would make this gate compare chance to
+        # chance, not chance to trained. Pick the row with the best
+        # accuracy_load1 (ties broken by accuracy_load3) among completed
+        # runs instead.
         best_idx = (headline_df["accuracy_load1"] + headline_df["accuracy_load3"] * 1e-3).idxmax()
         control_model_id = headline_df.loc[best_idx, "model_id"]
         control_seed = int(headline_df.loc[best_idx, "seed"])
         print(f"\n[run_all] H5 chance-model negative control ({control_model_id}, untrained) ...")
-        chance = chance_control_check(control_model_id, control_seed, dandi_data)
+        chance_rows = []
+
+        # Probe epoch: this single-cell comparison is solid and unambiguous
+        # (chance=0.000 vs trained=0.337) -- kept as is, unlike the
+        # maintenance path below.
+        chance_best = chance_control_check(control_model_id, control_seed, dandi_data)
         trained_row = headline_df[(headline_df.model_id == control_model_id) & (headline_df.seed == control_seed)].iloc[0]
-        pd.DataFrame([{**chance, "role": "chance"}, {**trained_row.to_dict(), "role": "trained"}]).to_csv(
-            ROOT / "results" / "chance_control.csv", index=False
-        )
-        for col in ("maintenance_normalized_alignment", "probe_normalized_alignment"):
-            if col in chance and col in trained_row and pd.notna(trained_row[col]):
-                verdict = "PASS" if chance[col] < trained_row[col] else "FAIL"
-                print(f"    {col}: chance={chance[col]:.3f} trained={trained_row[col]:.3f}  [{verdict}]")
+        chance_rows.append({**chance_best, "role": "chance_best_accuracy_model"})
+        chance_rows.append({**trained_row.to_dict(), "role": "trained_best_accuracy_model"})
+        if "probe_normalized_alignment" in chance_best and pd.notna(trained_row.get("probe_normalized_alignment")):
+            verdict = "PASS" if chance_best["probe_normalized_alignment"] < trained_row["probe_normalized_alignment"] else "FAIL"
+            print(f"    probe_normalized_alignment: chance={chance_best['probe_normalized_alignment']:.3f} "
+                  f"trained={trained_row['probe_normalized_alignment']:.3f}  [{verdict}]")
+
+        # Maintenance epoch: a single untrained model vs a single best-
+        # accuracy cell is meaningless given how noisy the per-cell DV is
+        # -- a single-cell comparison can't distinguish signal from
+        # per-cell noise. Instead: one untrained ("chance") instantiation
+        # per distinct architecture present in the grid, compared against
+        # the full trained-cell distribution via a one-sided Mann-Whitney
+        # test (is the trained distribution stochastically greater than
+        # chance?), reusing `stats.compare_distributions` (already used for
+        # H5/H6's model-vs-brain distribution comparisons). Two
+        # pseudoreplication guards: (a) deduplicate chance values to one
+        # per distinct architecture -- an untrained forward pass ignores P,
+        # so M**0 and M**1 chance rows are byte-identical, effective chance
+        # n = 4, not 8; (b) aggregate trained values to per-cell means
+        # before the test -- the trained rows are 8 cells x N seeds; seeds
+        # within a cell are correlated, not independent.
+        from brainalign_wm.analysis.stats import compare_distributions
+
+        chance_by_arch = {}
+        for model_id in sorted(headline_df["model_id"].unique()):
+            model_row = headline_df[headline_df.model_id == model_id].iloc[0]
+            c = chance_control_check(model_id, int(model_row["seed"]), dandi_data)
+            chance_rows.append({**c, "role": "chance_maintenance_distribution"})
+            if "maintenance_normalized_alignment" in c:
+                arch = model_id[:-1]  # M**0 / M**1 share architecture
+                if arch not in chance_by_arch:
+                    chance_by_arch[arch] = c["maintenance_normalized_alignment"]
+        chance_maintenance = list(chance_by_arch.values())
+
+        trained_by_cell = headline_df.groupby("model_id")["maintenance_normalized_alignment"].mean().dropna()
+        trained_maintenance = trained_by_cell.to_numpy()
+        if len(chance_maintenance) >= 2 and len(trained_maintenance) >= 2:
+            dist_test = compare_distributions(trained_maintenance, np.array(chance_maintenance), alternative="greater")
+            verdict = "PASS" if dist_test["p_value"] < 0.05 and dist_test["rank_biserial"] > 0 else "FAIL"
+            print(f"    maintenance_normalized_alignment (trained-distribution vs chance-distribution): "
+                  f"trained n={len(trained_maintenance)} mean={trained_maintenance.mean():.3f}, "
+                  f"chance n={len(chance_maintenance)} mean={np.mean(chance_maintenance):.3f}, "
+                  f"Mann-Whitney p={dist_test['p_value']:.3f}, rank_biserial={dist_test['rank_biserial']:.3f}  [{verdict}]")
+            chance_rows.append({
+                "role": "maintenance_distributional_test", **dist_test,
+                "trained_n": len(trained_maintenance), "trained_mean": float(trained_maintenance.mean()),
+                "chance_n": len(chance_maintenance), "chance_mean": float(np.mean(chance_maintenance)),
+            })
+        else:
+            print("    maintenance_normalized_alignment (trained-distribution vs chance-distribution): "
+                  "insufficient completed cells yet for a distributional test.")
+
+        pd.DataFrame(chance_rows).to_csv(ROOT / "results" / "chance_control.csv", index=False)
         print(f"[run_all] wrote {ROOT / 'results' / 'chance_control.csv'}")
+
+    if not args.skip_dv_relationship:
+        from brainalign_wm.analysis.dv_relationship import run_dv_relationship
+
+        print("\n[run_all] DV-relationship analysis (comments.txt §2.1) ...")
+        run_dv_relationship()
+
     return 0
 
 

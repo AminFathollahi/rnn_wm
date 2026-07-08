@@ -136,7 +136,7 @@ class SimulatedBrain:
                     w_persistent=self._rng.randn() * 4.0,
                     w_dyn1=self._rng.randn() * 4.0,
                     w_dyn2=self._rng.randn() * 4.0,
-                    w_load=self._rng.randn() * 8.0,  # strong enough to clearly clear the noise floor at default trial counts (see DECISIONS.md)
+                    w_load=self._rng.randn() * 8.0,  # strong enough to clearly clear the noise floor at default trial counts
                     w_error=abs(self._rng.randn()) * 3.0,
                     base_rate=max(0.5, self.base_rate_hz + self._rng.randn() * 1.0),
                     phase=self._rng.uniform(0, 2 * np.pi, size=self.item_dim),
@@ -196,7 +196,7 @@ class SimulatedBrain:
             # to the rate. An earlier softplus-of-sum version let a large load_term
             # saturate the nonlinearity and crush the item/category axes' effective
             # contribution -- an unwanted interaction for a generator whose whole
-            # purpose is independently-recoverable planted axes (see DECISIONS.md).
+            # purpose is independently-recoverable planted axes.
             rate = tuning.base_rate + drive + delay_term
             rate = np.clip(rate, 0.0, self.max_rate_hz)
             all_t.append(centers)
@@ -320,7 +320,7 @@ class SimulatedBrain:
     def noise_ceiling(self, region: str | None, epoch: str) -> tuple[float, float]:
         from brainalign_wm.analysis.rsa import noise_ceiling_from_dataset
 
-        return noise_ceiling_from_dataset(self, region, epoch, n_splits=20)
+        return noise_ceiling_from_dataset(self, region, epoch)
 
     def sessions(self) -> list[str]:
         return list(self._sessions)

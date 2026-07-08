@@ -35,20 +35,38 @@ def _make_bank():
 # ---------------- context_vector (no ImageTokenBank needed) ----------------
 
 def test_context_vector_one_hot_consistency():
-    c = context_vector(load=2, epoch="encode", lure_flag=False)
+    c = context_vector(epoch="encode", lure_flag=False, encoded_count=2)
     assert len(c) == 10
     assert c[0] == 1.0 and c[1] == 0.0  # WM_family, aux_family
-    assert c[2] == 0.0 and c[3] == 1.0 and c[4] == 0.0  # load1,load2,load3 one-hot -> load2
+    assert c[2] == 0.0 and c[3] == 1.0 and c[4] == 0.0  # load1,load2,load3 one-hot -> 2nd item encoded
     assert c[5] == 1.0 and c[6] == 0.0 and c[7] == 0.0  # epoch_encode
     assert c[8] == 0.0  # lure_flag only live at probe
     assert c[9] == 0.0  # rule_flag reserved
 
 
+def test_context_vector_load_zero_outside_encode():
+    """v5.0 fix (comments.txt item 2): load one-hot must not leak into
+    maintain/probe -- the network carries load in its own recurrent state
+    instead of reading a live exogenous broadcast."""
+    c_maintain = context_vector(epoch="maintain", lure_flag=False, encoded_count=2)
+    assert c_maintain[2:5] == [0.0, 0.0, 0.0]
+    c_probe = context_vector(epoch="probe", lure_flag=False, encoded_count=2)
+    assert c_probe[2:5] == [0.0, 0.0, 0.0]
+
+
 def test_context_vector_lure_only_at_probe():
-    c_probe_lure = context_vector(load=1, epoch="probe", lure_flag=True)
+    c_probe_lure = context_vector(epoch="probe", lure_flag=True, encoded_count=0)
     assert c_probe_lure[8] == 1.0
-    c_maintain_lure = context_vector(load=1, epoch="maintain", lure_flag=True)
+    c_maintain_lure = context_vector(epoch="maintain", lure_flag=True, encoded_count=0)
     assert c_maintain_lure[8] == 0.0  # lure_flag not asserted outside probe
+
+
+def test_context_vector_aux_family_flag():
+    """§9.4a identity-report catch trials (comments.txt item 6)."""
+    c = context_vector(epoch="encode", lure_flag=False, encoded_count=1, aux_family=True)
+    assert c[1] == 1.0
+    c_off = context_vector(epoch="encode", lure_flag=False, encoded_count=1, aux_family=False)
+    assert c_off[1] == 0.0
 
 
 # ---------------- curriculum (no ImageTokenBank needed) ----------------
@@ -131,6 +149,45 @@ def test_lure_fraction_matches_config_in_aggregate():
                 n_lures += 1
     observed = n_lures / n_not_in_set
     assert abs(observed - lure_fraction) < 0.12, f"observed lure rate {observed:.2f} vs configured {lure_fraction}"
+
+
+@pytestmark_needs_stimuli
+def test_identity_catch_trial_replaces_probe():
+    """§9.4a (comments.txt item 6): a catch trial shows no probe image, has
+    no in/out judgment, tags every tick aux_family=True, and records the
+    FIRST held item's category as the report target."""
+    bank = _make_bank()
+    gen = SternbergGenerator(FULL_CFG, bank)
+    rng = np.random.RandomState(2)
+    n_trials = 200
+    n_catch = 0
+    for i in range(n_trials):
+        steps = gen.generate_trial(
+            rng, loads=[2], lure_fraction=0.3, maintain_steps=5, trial_id=i, identity_catch_fraction=0.3,
+        )
+        if not steps[0].is_identity_catch:
+            continue
+        n_catch += 1
+        assert all(s.is_identity_catch for s in steps), "catch status is a trial-level property"
+        assert steps[0].identity_catch_category == steps[0].held_categories[0]
+        probe_steps = [s for s in steps if s.epoch == "probe"]
+        assert all(s.image_id is None for s in probe_steps)
+        assert all(s.in_set is None for s in probe_steps)
+        assert all(s.c_t[1] == 1.0 for s in steps), "aux_family bit must be set for the whole trial"
+    assert n_catch > 0, "no catch trials drawn in 200 tries at fraction=0.3 -- fixture too small or RNG unlucky"
+
+
+@pytestmark_needs_stimuli
+def test_identity_catch_fraction_zero_never_produces_catch_trials():
+    """Core default (`identity_catch_fraction=0.0`, the default when the
+    param is omitted entirely) must be a strict no-op."""
+    bank = _make_bank()
+    gen = SternbergGenerator(FULL_CFG, bank)
+    rng = np.random.RandomState(3)
+    for i in range(50):
+        steps = gen.generate_trial(rng, loads=[2], lure_fraction=0.3, maintain_steps=5, trial_id=i)
+        assert not steps[0].is_identity_catch
+        assert all(s.c_t[1] == 0.0 for s in steps)
 
 
 @pytestmark_needs_stimuli

@@ -6,8 +6,8 @@ near-identical schema). Reads NWB files directly via `h5py`, without a
 (`analysis/rdm.py`, `analysis/rsa.py`, and related modules) that runs on
 `SimulatedBrain` runs unchanged on real data.
 
-Schema verified directly against the on-disk files (2026-07, see
-DECISIONS.md): WM sessions are identified by presence of a `loads` trials
+Schema verified directly against the on-disk files (2026-07): WM
+sessions are identified by presence of a `loads` trials
 column (not by `ses-` numbering, which is not guaranteed ordered). Column
 names differ slightly between datasets (harmonized in `COLUMN_MAPS`). There
 is no region column on `units` -- region comes from joining
@@ -194,7 +194,7 @@ class DandiSternbergTierA:
 
     def _region_matches(self, canonical_region: str, region: Optional[str]) -> bool:
         """`region` may be a canonical single region (e.g. 'hippocampus'), a
-        region FAMILY ('MTL'/'MFC', audit fix C2, resolved via
+        region FAMILY ('MTL'/'MFC', resolved via
         `dataset_contract.region_family`), or None (no filter)."""
         if region is None:
             return True
@@ -243,17 +243,16 @@ class DandiSternbergTierA:
         pooled analysis might) silently dilutes every condition mean with
         injected zeros -- see `response_patterns` and
         `analysis/pseudopopulation.py` for the valid cross-session
-        pooling path (audit fix A2d).
+        pooling path.
 
         Per-(unit, epoch) results are cached at `self.bin_ms` (the
         constructor's resolution -- the only one ever requested in
         practice): the audit-fix alignment pipeline calls `rates()` far more
         often than the original single-pass code did (once per session, per
         region, per noise-ceiling resample), and recomputing every unit's
-        spike histogram from scratch each time (as this used to) was
-        "impractically slow" for anything beyond a small session subset --
-        see DECISIONS.md's M8 performance note, and `sim_brain`'s
-        `_rate_cache`, which this mirrors."""
+        spike histogram from scratch each time would be impractically
+        slow for anything beyond a small session subset -- mirrors
+        `sim_brain`'s own `_rate_cache`."""
         units = self.units(region)
         all_trials = self.trials()
         bin_s = bin_ms / 1000.0
@@ -341,9 +340,9 @@ def cache_stimulus_features(cfg: dict) -> None:
     most sessions (confirmed directly against the mounted NWB files:
     0/45 real trials matched for 4 of 8 sessions checked, low single digits
     for 3 more, so `generate_activity_logs.py`'s per-trial stimulus-feature
-    lookup skipped nearly every 000469 trial system-wide -- not "~50% skip"
-    as DECISIONS.md's M8 note flagged and left unresolved, but closer to
-    total data loss for 6 of 8 sessions checked). This alone explains why
+    lookup skipped nearly every 000469 trial system-wide -- closer to total
+    data loss for 6 of 8 sessions checked than a partial-coverage gap.
+    This alone explains why
     load=2 conditions (000469 is the only Tier A dataset with a load=2
     arm) were nearly absent from every activity log.
 

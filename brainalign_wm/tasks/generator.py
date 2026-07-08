@@ -44,6 +44,7 @@ class TaskGenerator:
             trial_id=trial_id,
             load_weights=params["load_weights"],
             split=split,
+            identity_catch_fraction=float(self.cfg["task"].get("identity_catch_fraction", 0.0)),
         )
 
     def sample_batch(
@@ -78,6 +79,7 @@ class TaskGenerator:
                     trial_id=trial_id,
                     load_weights=None,
                     split=split,
+                    identity_catch_fraction=float(self.cfg["task"].get("identity_catch_fraction", 0.0)),
                 )
             )
         return batch

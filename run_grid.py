@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Orchestrator for the 2x2x2 factorial training grid.
+"""Orchestrator for the 5-arm bio-plausibility ablation battery.
 
-Enumerates the eight factorial cells (M000-M111) crossed with a configurable
-number of random seeds and executes `brainalign_wm.training.train.train_one`
-for each (cell, seed) pair. Design properties:
+Enumerates the 15 ablation-battery cells (S,M,P,T,D arms; see `CELLS`
+below) crossed with a configurable number of random seeds and executes
+`brainalign_wm.training.train.train_one` for each (cell, seed) pair.
+Design properties:
 
-  * seed-major run ordering, so a complete pass over all eight cells is
-    produced before any seed's replicate count is incremented (breadth
-    before depth);
+  * seed-major run ordering, so a complete pass over all cells is produced
+    before any seed's replicate count is incremented (breadth before
+    depth);
   * resumable: completed runs recorded in `results/manifest.jsonl` are
     skipped on subsequent invocations, and `train_one` itself resumes each
     individual run from its last checkpoint (see `training/train.py`);
@@ -21,7 +22,7 @@ the orchestration logic to be exercised without the model/training
 dependencies installed.
 
 Usage:
-  python run_grid.py --seeds 8 --budget 48h            # execute the training grid
+  python run_grid.py --seeds 5 --budget 48h            # execute the training grid
   python run_grid.py --scaffold --seeds 3 --budget 30m # orchestration-only demonstration
 """
 from __future__ import annotations
@@ -43,12 +44,57 @@ ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 MANIFEST = RESULTS / "manifest.jsonl"
 REPORT = ROOT / "RUN_REPORT.md"
-RESOLVED_CONFIG_PATH = RESULTS / "resolved_config.yaml"
 
-# The eight factorial cells, ordered by (S, M, L) bits -> M<S><M><L>.
+
+def resolved_config_path(campaign: str = "grid") -> Path:
+    """Per-campaign resolved-config artifact (audit fix B5): `run_grid.py`
+    and the three per-arm campaign scripts (`run_ablation_battery.py`,
+    `run_perf_matched_baselines.py`, `run_identity_catch.py`) each write
+    their OWN resolved config under a campaign-qualified filename, so one
+    script's launch doesn't clobber another's reproducibility artifact when
+    they're run interleaved (as they are in Phase C, §6.2)."""
+    return RESULTS / f"resolved_config_{campaign}.yaml"
+
+
+# The 5-arm bio-plausibility ABLATION BATTERY (v6.0, arm order S,M,P,T,D
+# fixed; comments.txt 2026-07-08; 3 interaction-probe cells added
+# 2026-07-08 per user request), mirroring configs/config.yaml's `cells:`
+# list: baseline, full reference, the 5 knock-one-out-from-full cells, the
+# 5 add-one-to-baseline cells, and 3 targeted two-arm interaction probes
+# closing specific substrate-entanglement gaps (T behaves differently on
+# the worker's intrinsic grid (S=1) vs. the imposed flat grid (S=0); the
+# 12-cell core battery's lumped add-one/knock-out design can't resolve a
+# SPECIFIC pairwise interaction like S x T in isolation from M/P/D). All
+# trained by BPTT (`train_one` reads "P", no "L" key).
+_ABLATION_BITS = [
+    (0, 0, 0, 0, 0),  # baseline: every arm off
+    (1, 1, 1, 1, 1),  # full reference: every arm on
+    (0, 1, 1, 1, 1),  # -S: full minus structure/hierarchy
+    (1, 0, 1, 1, 1),  # -M: full minus modulation
+    (1, 1, 0, 1, 1),  # -P: full minus plasticity
+    (1, 1, 1, 0, 1),  # -T: full minus topography
+    (1, 1, 1, 1, 0),  # -D: full minus Dale's law
+    (1, 0, 0, 0, 0),  # +S: baseline plus structure/hierarchy
+    (0, 1, 0, 0, 0),  # +M: baseline plus modulation
+    (0, 0, 1, 0, 0),  # +P: baseline plus plasticity
+    (0, 0, 0, 1, 0),  # +T: baseline plus topography
+    (0, 0, 0, 0, 1),  # +D: baseline plus Dale's law
+    (1, 0, 0, 1, 0),  # S+T: topography on its native hierarchical substrate, isolated from M/P/D
+    (0, 0, 0, 1, 1),  # T+D: spatial smoothness + E/I balance on the flat substrate, isolated from S/M/P
+    (1, 0, 0, 0, 1),  # S+D: hierarchy + Dale's law "bio-plausible backbone", isolated from M/P/T
+]
 CELLS = [
-    {"model_id": f"M{s}{m}{l}", "S": s, "M": m, "L": l}
-    for s in (0, 1) for m in (0, 1) for l in (0, 1)
+    {"model_id": f"M{s}{m}{p}{t}{d}", "S": s, "M": m, "P": p, "T": t, "D": d}
+    for (s, m, p, t, d) in _ABLATION_BITS
+]
+
+# Extended local-learning study (§6.3): same S/M architecture, trained by
+# node-perturbation/e-prop instead of BPTT (`train_one` reads "L", no "P"
+# key). Distinct model_ids (M**L) so they never collide with the Core
+# P-cells above -- not enumerated by default (see `--local-learning`).
+LOCAL_LEARNING_CELLS = [
+    {"model_id": f"M{s}{m}L", "S": s, "M": m, "L": 1}
+    for s in (0, 1) for m in (0, 1)
 ]
 
 _STOP = False
@@ -74,12 +120,19 @@ def parse_budget(s: str) -> float:
     return float(s)
 
 
-def enumerate_runs(seeds: list[int]) -> list[dict]:
-    """Seed-major ordering => all 8 cells at seed0, then seed1, ... (breadth-first)."""
+def enumerate_runs(seeds: list[int], include_local_learning: bool = False) -> list[dict]:
+    """Seed-major ordering => all 8 Core cells at seed0, then seed1, ...
+    (breadth-first). `include_local_learning` appends the 4 Extended
+    local-learning cells (§6.3) after the Core cells within each seed --
+    off by default, since that study is reported on its own terms and
+    doesn't gate the Core grid (§17 decision 6)."""
     runs = []
     for seed in seeds:
         for cell in CELLS:
             runs.append({**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"})
+        if include_local_learning:
+            for cell in LOCAL_LEARNING_CELLS:
+                runs.append({**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"})
     return runs
 
 
@@ -117,18 +170,18 @@ def load_all_records(manifest: Path) -> list[dict]:
 
 
 def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str) -> dict:
-    """The FULL merged, resolved config for this grid invocation: every
-    project subsystem (model/mechanisms/task/train/gates/neural), plus the
-    tier subset actually in effect -- not just the tier subset run_grid.py
-    threads through to `train_one` (audit fix B1: the old config_hash only
-    covered the tier subset, silently ignoring changes to everything else)."""
+    """The full merged, resolved config for this grid invocation: every
+    project subsystem (model/mechanisms/task/train/gates/neural) plus the
+    tier subset actually in effect -- covers every config change that
+    could affect a run, not just the tier subset `run_grid.py` threads
+    through to `train_one`."""
     resolved = {k: v for k, v in full_cfg.items() if k != "tiers"}
     resolved["tier"] = {"name": tier, **tier_cfg}
     return resolved
 
 
 def config_hash(resolved_cfg: dict) -> str:
-    """Deterministic hex digest of the full resolved config (audit fix B1).
+    """Deterministic hex digest of the full resolved config.
     `hashlib.sha256` (not Python's built-in `hash()`) is used because
     `hash()` on a str is salted per-process by `PYTHONHASHSEED` -- the same
     config would otherwise produce a different "hash" on every process
@@ -165,16 +218,22 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         "",
         "## Per-run",
         "",
-        "| run_id | S | M | L | status | gates | acc(load1/2/3) | rung | wall(s) |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | wall(s) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in sorted(recs, key=lambda x: x.get("run_id", "")):
         g = r.get("gates", {})
         gates = ",".join(f"{k}:{'P' if v else 'F'}" for k, v in g.items()) or "-"
         acc = r.get("accuracy", {})
         accs = "/".join(str(acc.get(f"load{i}", "-")) for i in (1, 2, 3))
+        # Core cells carry "P" (BPTT throughout); the 4 local-learning
+        # cells carry "L" instead -- show whichever is present. T/D (§1.2/
+        # §1.3) are absent (shown "-") for local-learning and any
+        # supplementary-arm run that predates the 5-arm ablation battery.
+        p_or_l = r.get("P", r.get("L", "-"))
         lines.append(
-            f"| {r.get('run_id','?')} | {r.get('S','-')} | {r.get('M','-')} | {r.get('L','-')} | "
+            f"| {r.get('run_id','?')} | {r.get('S','-')} | {r.get('M','-')} | {p_or_l} | "
+            f"{r.get('T','-')} | {r.get('D','-')} | "
             f"{r.get('status','?')} | {gates} | {accs} | {r.get('rung','-')} | {r.get('wall_clock_s','-')} |"
         )
     errs = [r for r in recs if r.get("status") in ("error", "failed")]
@@ -211,10 +270,11 @@ def _scaffold_train_one(run: dict, cfg: dict) -> dict:
     (ckpt_dir / "ckpt.json").write_text(json.dumps({"step": cfg.get("steps", 100), **run}))
     time.sleep(cfg.get("scaffold_sleep_s", 0.05))
     # local-learning (L=1) is the risky arm; fake a lower pass-rate for it
-    base = 0.98 - (0.15 if run["L"] == 1 else 0.0)
+    is_local_learning = run.get("L", 0) == 1
+    base = 0.98 - (0.15 if is_local_learning else 0.0)
     acc = {f"load{i}": round(max(0.0, base - 0.06 * (i - 1) + rng.uniform(-0.03, 0.03)), 3) for i in (1, 2, 3)}
     gates = {"load1>=0.95": acc["load1"] >= 0.95, "load3>=0.80": acc["load3"] >= 0.80}
-    rung = 1 if run["L"] == 1 else 0
+    rung = 1 if is_local_learning else 0
     return {"status": "completed", "gates": gates, "accuracy": acc, "rung": rung}
 
 
@@ -236,11 +296,14 @@ def resolve_train_fn(force_scaffold: bool):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--seeds", type=int, default=8, help="number of seeds (0..N-1); breadth-first")
+    ap.add_argument("--seeds", type=int, default=5, help="number of seeds (0..N-1); breadth-first; study default 5")
     ap.add_argument("--budget", type=str, default="10h", help="wall-clock budget, e.g. 10h / 30m / 600s")
     ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
-    ap.add_argument("--tier", type=str, default="full", choices=["smoke", "dev", "full"])
+    ap.add_argument("--tier", type=str, default="full", choices=["smoke", "dev", "full"],
+                     help="compute tier (default: full, the 150k-step results tier the study uses)")
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
+    ap.add_argument("--local-learning", action="store_true",
+                     help="also enumerate the 4 Extended local-learning cells (M**L, §6.3)")
     args = ap.parse_args(argv)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -249,19 +312,32 @@ def main(argv=None) -> int:
     RESULTS.mkdir(exist_ok=True)
     budget_s = parse_budget(args.budget)
     seeds = list(range(args.seeds))
-    runs = enumerate_runs(seeds)
+    runs = enumerate_runs(seeds, include_local_learning=args.local_learning)
     completed = load_completed(MANIFEST)
     commit = git_commit()
 
-    # Minimal config load (YAML optional; scaffold defaults if unavailable).
+    # Config load (YAML optional; scaffold defaults if unavailable). Audit
+    # fix B3: a bare `except Exception: pass` here used to silently swallow
+    # a malformed config.yaml and run the full grid on scaffold defaults
+    # (100 steps) with no indication anything was wrong -- now each failure
+    # mode is handled on its own terms, and a parse error is fatal rather
+    # than silent.
     cfg = {"steps": 100, "scaffold_sleep_s": 0.05, "tier": args.tier}
     full_cfg = {}
+    yaml = None
     try:
         import yaml  # type: ignore
-        full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
-        cfg.update(full_cfg.get("tiers", {}).get(args.tier, {}))
-    except Exception:
-        pass  # scaffold runs fine without a config
+    except ModuleNotFoundError:
+        print("[run_grid] pyyaml not installed; using scaffold defaults.", flush=True)
+    else:
+        try:
+            full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+            cfg.update(full_cfg.get("tiers", {}).get(args.tier, {}))
+        except FileNotFoundError:
+            print(f"[run_grid] config not found at {args.config}; using scaffold defaults.", flush=True)
+        except yaml.YAMLError as e:
+            print(f"[run_grid] failed to parse {args.config}: {e}", flush=True)
+            raise
 
     # Audit fix B1: hash the FULL resolved config (not just the tier
     # subset), computed once per invocation -- every run in this grid
@@ -270,12 +346,15 @@ def main(argv=None) -> int:
     resolved_cfg = build_resolved_config(full_cfg, cfg, args.tier) if full_cfg else {"tier": {"name": args.tier, **cfg}}
     cfg_hash = config_hash(resolved_cfg)
     if full_cfg:
+        # Audit fix L1: reuse the `yaml` module imported above rather than
+        # re-importing; the JSON fallback below is for a write/serialize
+        # failure only, not a missing dependency (already handled above).
+        resolved_path = resolved_config_path("grid")
         try:
-            import yaml  # type: ignore
-
-            RESOLVED_CONFIG_PATH.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
-        except Exception:
-            RESOLVED_CONFIG_PATH.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
+            resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
+        except (OSError, yaml.YAMLError) as e:
+            print(f"[run_grid] failed to write resolved config as YAML ({e}); falling back to JSON.", flush=True)
+            resolved_path.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
     train_one = resolve_train_fn(args.scaffold)
 

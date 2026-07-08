@@ -46,7 +46,7 @@ after each invocation.
 | `brainalign_wm/analysis/` | Representational similarity analysis, demixed PCA, cross-temporal decoding, encoding models, statistics |
 | `brainalign_wm/training/` | Logging schema and the single-run training entrypoint (`train.py::train_one`) |
 | `configs/config.yaml` | The project's configuration contract |
-| `DECISIONS.md` | Log of design decisions and their rationale, including deviations from the original specification |
+| `RESPONSES.md` | Project status, design decisions and their rationale, and the response to `comments.txt` |
 
 ## Notes
 

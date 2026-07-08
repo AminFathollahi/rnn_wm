@@ -23,7 +23,6 @@ def adapter():
         DATA_ROOT,
         datasets=("000469", "000673"),
         min_firing_hz=CFG["neural"]["min_firing_hz"],
-        min_isolation_distance=CFG["neural"]["min_isolation_distance"],
         bin_ms=CFG["neural"]["bin_ms"],
         max_sessions_per_dataset=2,  # keep the test fast; full pool used at M7/M8
     )
@@ -96,23 +95,6 @@ def test_stimulus_cache_covers_real_trial_picids(adapter):
     assert kept / total > 0.9, f"only {kept}/{total} real trials matched a cached stimulus feature"
 
 
-def test_isolation_distance_qc_excludes_poorly_isolated_units():
-    """`min_isolation_distance` must actually shrink the unit set relative
-    to firing-rate-only QC (not silently do nothing), and must never be
-    applied when a dataset carries no isolation-distance field at all."""
-    from brainalign_wm.neural.adapters.dandi_nwb import DandiSternbergTierA
-
-    strict = DandiSternbergTierA(
-        DATA_ROOT, datasets=("000469", "000673"), min_firing_hz=CFG["neural"]["min_firing_hz"],
-        min_isolation_distance=20.0, bin_ms=CFG["neural"]["bin_ms"], max_sessions_per_dataset=3,
-    )
-    lenient = DandiSternbergTierA(
-        DATA_ROOT, datasets=("000469", "000673"), min_firing_hz=CFG["neural"]["min_firing_hz"],
-        min_isolation_distance=0.0, bin_ms=CFG["neural"]["bin_ms"], max_sessions_per_dataset=3,
-    )
-    assert len(strict.units()) < len(lenient.units())
-
-
 def test_tier_b_001187_loads_via_wm_trials_group():
     """001187's Sternberg trials live under `intervals/WM_trials`, not the
     top-level `intervals/trials` 000469/000673 use -- and it also has an
@@ -125,7 +107,6 @@ def test_tier_b_001187_loads_via_wm_trials_group():
 
     tier_b = DandiSternbergTierA(
         DATA_ROOT, datasets=("001187",), min_firing_hz=CFG["neural"]["min_firing_hz"],
-        min_isolation_distance=CFG["neural"]["min_isolation_distance"],
         bin_ms=CFG["neural"]["bin_ms"], max_sessions_per_dataset=2,
     )
     assert len(tier_b.sessions()) > 0

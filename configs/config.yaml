@@ -169,8 +169,6 @@ neural:
   regions_MTL: [hippocampus, amygdala]
   regions_MFC: [dACC, preSMA, vmPFC]
   min_firing_hz: 0.2
-  min_isolation_distance: 20.0             # single-unit isolation-quality QC (Harris et al. 2001 / Schmitzer-Torbert
-                                            # et al. 2005); applied only when a dataset release carries the field
   bin_ms: 50
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.

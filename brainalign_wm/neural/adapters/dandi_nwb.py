@@ -90,7 +90,6 @@ class _SessionData:
     unit_ids: list[str]
     unit_region: dict
     spikes: dict
-    unit_isolation_distance: dict = field(default_factory=dict)
 
 
 # Working-memory trials for 000469/000673 live at the top-level
@@ -147,14 +146,8 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
         n_units = h["units/id"].shape[0]
         spike_idx = h["units/spike_times_index"][:]
         spike_times_all = h["units/spike_times"][:]
-        # Isolation distance (Harris et al. 2001 / Schmitzer-Torbert et al.
-        # 2005 cluster-quality metric; reported directly by the Rutishauser
-        # lab's own spike-sorting pipeline, Kyzar et al. 2024) -- NaN for a
-        # unit where the metric couldn't be computed (e.g. no distinct noise
-        # cluster), not present at all for datasets released without it.
-        iso_all = h["units/waveforms_isolation_distance"][:] if "units/waveforms_isolation_distance" in h else None
 
-        unit_ids, unit_region, spikes, unit_isolation_distance = [], {}, {}, {}
+        unit_ids, unit_region, spikes = [], {}, {}
         for u in range(n_units):
             uid = f"{session_id}#u{u}"
             unit_ids.append(uid)
@@ -163,12 +156,10 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
             start = int(spike_idx[u - 1]) if u > 0 else 0
             end = int(spike_idx[u])
             spikes[uid] = spike_times_all[start:end]
-            unit_isolation_distance[uid] = float(iso_all[u]) if iso_all is not None else None
 
     return _SessionData(
         session_id=session_id, patient_id=patient_id, trials=trials_df,
         unit_ids=unit_ids, unit_region=unit_region, spikes=spikes,
-        unit_isolation_distance=unit_isolation_distance,
     )
 
 
@@ -182,14 +173,12 @@ class DandiSternbergTierA:
         data_root: str | Path,
         datasets: tuple[str, ...] = ("000469", "000673"),
         min_firing_hz: float = 0.2,
-        min_isolation_distance: float = 20.0,
         bin_ms: int = 50,
         max_sessions_per_dataset: Optional[int] = None,
     ):
         self.data_root = Path(data_root)
         self.bin_ms = bin_ms
         self.min_firing_hz = min_firing_hz
-        self.min_isolation_distance = min_isolation_distance
         self._sessions: dict[str, _SessionData] = {}
         self._trials_cache: Optional[pd.DataFrame] = None
         self._rate_cache: dict[tuple, np.ndarray] = {}  # (uid, epoch) -> [n_all_trials, n_bins], at self.bin_ms only
@@ -213,28 +202,26 @@ class DandiSternbergTierA:
         self._build_conditions()
 
     def _apply_firing_qc(self, sess: _SessionData) -> None:
-        """Firing-rate + single-unit isolation-quality QC. Isolation
-        distance (Harris et al. 2001 / Schmitzer-Torbert et al. 2005) is
-        NOT applied when the dataset release doesn't carry the field at
-        all (`unit_isolation_distance[uid] is None`) -- only when the
-        field exists but is NaN for a specific unit (the metric couldn't
-        be computed for it, e.g. no distinct noise cluster), which this
-        pipeline treats as a QC failure, consistent with standard practice
-        for this metric in the single-unit literature."""
+        """Unit inclusion is bare firing rate only. The released `units`
+        table already reflects the source papers' own spike-sorting
+        curation (OSort, qualitative firing-rate/waveform-stability/ISI/
+        refractory-violation criteria) -- isolation-distance/SNR fields on
+        `units` are reported there only as post-hoc descriptive statistics
+        in these papers, never as a numeric inclusion threshold, so adding
+        one here would be an invented criterion with no support in the
+        methodology being replicated. (A NaN isolation distance in
+        particular is the expected value for a unit that is the only
+        cluster on its channel -- no second cluster to compute a
+        Mahalanobis distance against -- not a quality flag; an earlier
+        version of this function treated it as a QC failure, which was
+        wrong.)"""
         if len(sess.trials) == 0:
             sess.unit_ids = []
             return
         duration = max(sess.trials.t_stop.max() - sess.trials.t_start.min(), 1e-6)
-
-        def _passes_isolation(uid: str) -> bool:
-            iso = sess.unit_isolation_distance.get(uid)
-            if iso is None:
-                return True  # dataset doesn't carry this field; not a criterion here
-            return not np.isnan(iso) and iso >= self.min_isolation_distance
-
         sess.unit_ids = [
             uid for uid in sess.unit_ids
-            if len(sess.spikes[uid]) / duration >= self.min_firing_hz and _passes_isolation(uid)
+            if len(sess.spikes[uid]) / duration >= self.min_firing_hz
         ]
 
     def _build_conditions(self) -> None:

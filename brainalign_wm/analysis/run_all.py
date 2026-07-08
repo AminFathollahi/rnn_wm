@@ -973,7 +973,9 @@ def main(argv=None) -> int:
 
     dandi_data = DandiSternbergTierA(
         cfg["paths"]["data_root"], datasets=tuple(cfg["neural"]["datasets_tierA"]),
-        min_firing_hz=cfg["neural"]["min_firing_hz"], bin_ms=cfg["neural"]["bin_ms"],
+        min_firing_hz=cfg["neural"]["min_firing_hz"],
+        min_isolation_distance=cfg["neural"].get("min_isolation_distance", 20.0),
+        bin_ms=cfg["neural"]["bin_ms"],
         max_sessions_per_dataset=args.max_sessions_per_dataset,
     )
     print(f"[run_all] Tier A loaded: {len(dandi_data.sessions())} sessions, {len(dandi_data.units())} units, "

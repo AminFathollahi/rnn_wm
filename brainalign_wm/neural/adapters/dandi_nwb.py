@@ -6,13 +6,22 @@ near-identical schema). Reads NWB files directly via `h5py`, without a
 (`analysis/rdm.py`, `analysis/rsa.py`, and related modules) that runs on
 `SimulatedBrain` runs unchanged on real data.
 
-Schema verified directly against the on-disk files (2026-07): WM
-sessions are identified by presence of a `loads` trials
-column (not by `ses-` numbering, which is not guaranteed ordered). Column
-names differ slightly between datasets (harmonized in `COLUMN_MAPS`). There
-is no region column on `units` -- region comes from joining
-`units/electrodes` -> `general/extracellular_ephys/electrodes/location`,
-normalized via `dataset_contract.normalize_region`.
+Schema verified directly against the on-disk files (2026-07): WM sessions
+are identified by presence of a `loads` column on a candidate trials
+group (`TRIALS_GROUP_CANDIDATES`: `intervals/trials` for 000469/000673,
+`intervals/WM_trials` for 001187, which also has a separate
+`intervals/LTM_trials` New/Old-recognition task table that must NOT be
+picked up), not by `ses-` numbering, which is not guaranteed ordered.
+Column names differ slightly between datasets (harmonized in
+`COLUMN_MAPS`; 001187's `WM_trials` matches 000673's schema exactly).
+`DandiSternbergTierA` itself only ever loads `datasets_tierA`
+(000469+000673) by default -- 001187 (Tier B) is loadable via this same
+adapter class but not yet consumed by any analysis path (see
+`config.yaml`'s `neural.datasets_tierB`); 000574 (Tier C) uses an
+unrelated verbal-task schema and needs its own adapter. There is no
+region column on `units` -- region comes from joining `units/electrodes`
+-> `general/extracellular_ephys/electrodes/location`, normalized via
+`dataset_contract.normalize_region`.
 """
 from __future__ import annotations
 
@@ -32,6 +41,12 @@ COLUMN_MAPS = {
         "probe_col": "loadsProbe_PicIDs",
     },
     "000673": {
+        "enc_cols": ["PicIDs_Encoding1", "PicIDs_Encoding2", "PicIDs_Encoding3"],
+        "probe_col": "PicIDs_Probe",
+    },
+    # 001187 (SBCAT-NO, Tier B): its `intervals/WM_trials` group carries
+    # the identical column schema to 000673's `intervals/trials`.
+    "001187": {
         "enc_cols": ["PicIDs_Encoding1", "PicIDs_Encoding2", "PicIDs_Encoding3"],
         "probe_col": "PicIDs_Probe",
     },
@@ -55,12 +70,12 @@ def _decode(x) -> str:
 
 def find_wm_sessions(dataset_root: Path) -> list[Path]:
     """Working-memory sessions are identified by the presence of a `loads`
-    column on the trials table."""
+    column on a candidate trials group (`TRIALS_GROUP_CANDIDATES`)."""
     wm = []
     for f in sorted(Path(dataset_root).glob("**/*.nwb")):
         try:
             with h5py.File(f, "r") as h:
-                if "intervals/trials" in h and "loads" in h["intervals/trials"]:
+                if _trials_group(h) is not None:
                     wm.append(f)
         except OSError:
             continue
@@ -75,6 +90,23 @@ class _SessionData:
     unit_ids: list[str]
     unit_region: dict
     spikes: dict
+    unit_isolation_distance: dict = field(default_factory=dict)
+
+
+# Working-memory trials for 000469/000673 live at the top-level
+# `intervals/trials`; 001187 (SBCAT-NO, "Sternberg-CAT New-Old") instead
+# splits its two tasks into `intervals/WM_trials` (Sternberg, same column
+# schema as 000673) and `intervals/LTM_trials` (a separate New/Old
+# recognition task, not a WM trial table at all -- must not be picked up
+# here). Checked in order; the first present group is used.
+TRIALS_GROUP_CANDIDATES = ["intervals/trials", "intervals/WM_trials"]
+
+
+def _trials_group(h: h5py.File) -> Optional[str]:
+    for name in TRIALS_GROUP_CANDIDATES:
+        if name in h and "loads" in h[name]:
+            return name
+    return None
 
 
 def _load_session(path: Path, dataset: str) -> _SessionData:
@@ -84,7 +116,7 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
         session_id = f"{dataset}-{identifier}"
         patient_id = identifier.split("_")[-1] if "_" in identifier else identifier
 
-        tr = h["intervals/trials"]
+        tr = h[_trials_group(h)]
         n_trials = tr["id"].shape[0]
         enc_cols = [tr[c][:] for c in colmap["enc_cols"]]
         rows = []
@@ -115,8 +147,14 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
         n_units = h["units/id"].shape[0]
         spike_idx = h["units/spike_times_index"][:]
         spike_times_all = h["units/spike_times"][:]
+        # Isolation distance (Harris et al. 2001 / Schmitzer-Torbert et al.
+        # 2005 cluster-quality metric; reported directly by the Rutishauser
+        # lab's own spike-sorting pipeline, Kyzar et al. 2024) -- NaN for a
+        # unit where the metric couldn't be computed (e.g. no distinct noise
+        # cluster), not present at all for datasets released without it.
+        iso_all = h["units/waveforms_isolation_distance"][:] if "units/waveforms_isolation_distance" in h else None
 
-        unit_ids, unit_region, spikes = [], {}, {}
+        unit_ids, unit_region, spikes, unit_isolation_distance = [], {}, {}, {}
         for u in range(n_units):
             uid = f"{session_id}#u{u}"
             unit_ids.append(uid)
@@ -125,10 +163,12 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
             start = int(spike_idx[u - 1]) if u > 0 else 0
             end = int(spike_idx[u])
             spikes[uid] = spike_times_all[start:end]
+            unit_isolation_distance[uid] = float(iso_all[u]) if iso_all is not None else None
 
     return _SessionData(
         session_id=session_id, patient_id=patient_id, trials=trials_df,
         unit_ids=unit_ids, unit_region=unit_region, spikes=spikes,
+        unit_isolation_distance=unit_isolation_distance,
     )
 
 
@@ -142,12 +182,14 @@ class DandiSternbergTierA:
         data_root: str | Path,
         datasets: tuple[str, ...] = ("000469", "000673"),
         min_firing_hz: float = 0.2,
+        min_isolation_distance: float = 20.0,
         bin_ms: int = 50,
         max_sessions_per_dataset: Optional[int] = None,
     ):
         self.data_root = Path(data_root)
         self.bin_ms = bin_ms
         self.min_firing_hz = min_firing_hz
+        self.min_isolation_distance = min_isolation_distance
         self._sessions: dict[str, _SessionData] = {}
         self._trials_cache: Optional[pd.DataFrame] = None
         self._rate_cache: dict[tuple, np.ndarray] = {}  # (uid, epoch) -> [n_all_trials, n_bins], at self.bin_ms only
@@ -171,13 +213,28 @@ class DandiSternbergTierA:
         self._build_conditions()
 
     def _apply_firing_qc(self, sess: _SessionData) -> None:
+        """Firing-rate + single-unit isolation-quality QC. Isolation
+        distance (Harris et al. 2001 / Schmitzer-Torbert et al. 2005) is
+        NOT applied when the dataset release doesn't carry the field at
+        all (`unit_isolation_distance[uid] is None`) -- only when the
+        field exists but is NaN for a specific unit (the metric couldn't
+        be computed for it, e.g. no distinct noise cluster), which this
+        pipeline treats as a QC failure, consistent with standard practice
+        for this metric in the single-unit literature."""
         if len(sess.trials) == 0:
             sess.unit_ids = []
             return
         duration = max(sess.trials.t_stop.max() - sess.trials.t_start.min(), 1e-6)
+
+        def _passes_isolation(uid: str) -> bool:
+            iso = sess.unit_isolation_distance.get(uid)
+            if iso is None:
+                return True  # dataset doesn't carry this field; not a criterion here
+            return not np.isnan(iso) and iso >= self.min_isolation_distance
+
         sess.unit_ids = [
             uid for uid in sess.unit_ids
-            if len(sess.spikes[uid]) / duration >= self.min_firing_hz
+            if len(sess.spikes[uid]) / duration >= self.min_firing_hz and _passes_isolation(uid)
         ]
 
     def _build_conditions(self) -> None:

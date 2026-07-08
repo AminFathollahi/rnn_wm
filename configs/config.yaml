@@ -164,11 +164,13 @@ gates:
 # Neural alignment: Tier A is the pooled 000469 + 000673 dataset.
 neural:
   datasets_tierA: ["000469", "000673"]     # picture Sternberg, MTL+MFC, poolable
-  datasets_tierB: ["001187"]               # MTL replication
-  datasets_tierC: ["000574"]               # verbal, coarse conditions only
+  datasets_tierB: ["001187"]               # MTL replication (loadable via intervals/WM_trials; not yet wired into any analysis path)
+  datasets_tierC: ["000574"]               # verbal WM, different schema (set_letters/set_size/probe_letter) -- needs its own adapter, not yet built
   regions_MTL: [hippocampus, amygdala]
   regions_MFC: [dACC, preSMA, vmPFC]
   min_firing_hz: 0.2
+  min_isolation_distance: 20.0             # single-unit isolation-quality QC (Harris et al. 2001 / Schmitzer-Torbert
+                                            # et al. 2005); applied only when a dataset release carries the field
   bin_ms: 50
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.

@@ -19,7 +19,7 @@ hash. Do not edit after the full grid starts.
 - H5 (Oblique/dynamic): oblique regime more brain-aligned; stable+dynamic delay code. Wired via
   `analysis/dynamics_and_persistence.py::stability_index_for_session` (audit fix C3/C4), using LOAD
   as the shared decodable factor across maintenance timebins (item/category identity recurs too
-  rarely per session for a stratified decode -- see DECISIONS.md's 2026-07-05 entry).
+  rarely per session for a stratified decode -- see RESPONSES.md's 2026-07-05 entry).
 - H6 (Persistent activity): constrained models show more memoranda-selective persistence. Wired via
   `persistence_index_for_session` (audit fix C3/C4), same LOAD-indexed basis as H5.
 
@@ -28,7 +28,7 @@ hash. Do not edit after the full grid starts.
 
 ## Analysis lock
 - Metric: crossnobis RSA (maintenance epoch, per-session category-multiset+load conditions --
-  audit fix A2a/A2b, see DECISIONS.md) and pooled coarse-condition crossnobis (probe epoch, audit
+  audit fix A2a/A2b, see RESPONSES.md) and pooled coarse-condition crossnobis (probe epoch, audit
   fix A2d), both noise-ceiling-normalized; inference by condition-label permutation.
 - Model: align ~ S*M*L + accuracy, fit on POOLED-region rows only, with seed and patient as CROSSED
   MixedLM variance components (audit fix B3/R15 -- see `stats.py::mixed_effects_alignment`). A

@@ -5,6 +5,10 @@ RUN_REPORT.md
 **/feat_cache/
 stimuli/
 
+# internal working documents (not part of the shipped codebase)
+RESPONSES.md
+comments.txt
+
 # python
 __pycache__/
 *.py[cod]

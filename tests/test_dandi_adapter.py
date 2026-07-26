@@ -23,6 +23,7 @@ def adapter():
         DATA_ROOT,
         datasets=("000469", "000673"),
         min_firing_hz=CFG["neural"]["min_firing_hz"],
+        min_session_accuracy=CFG["neural"]["min_session_accuracy"],
         bin_ms=CFG["neural"]["bin_ms"],
         max_sessions_per_dataset=2,  # keep the test fast; full pool used at M7/M8
     )
@@ -107,6 +108,7 @@ def test_tier_b_001187_loads_via_wm_trials_group():
 
     tier_b = DandiSternbergTierA(
         DATA_ROOT, datasets=("001187",), min_firing_hz=CFG["neural"]["min_firing_hz"],
+        min_session_accuracy=CFG["neural"]["min_session_accuracy"],
         bin_ms=CFG["neural"]["bin_ms"], max_sessions_per_dataset=2,
     )
     assert len(tier_b.sessions()) > 0

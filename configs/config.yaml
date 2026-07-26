@@ -168,7 +168,8 @@ neural:
   datasets_tierC: ["000574"]               # verbal WM, different schema (set_letters/set_size/probe_letter) -- needs its own adapter, not yet built
   regions_MTL: [hippocampus, amygdala]
   regions_MFC: [dACC, preSMA, vmPFC]
-  min_firing_hz: 0.2
+  min_firing_hz: 0.1         # Daume et al. 2024 (001187) STAR Methods; the only of the 3 source papers with a number, applied uniformly across datasets
+  min_session_accuracy: 0.55 # same source/rationale
   bin_ms: 50
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.

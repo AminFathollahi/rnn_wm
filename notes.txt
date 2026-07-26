@@ -1,0 +1,1 @@
+should we train each cell with the same step count or train each until they clear a gate (based on accuracy) and compare convergence speed? or both?

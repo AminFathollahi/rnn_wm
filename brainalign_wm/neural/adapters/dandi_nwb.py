@@ -92,6 +92,23 @@ class _SessionData:
     spikes: dict
 
 
+# Of the three source papers (Kyzar et al. 2024 for 000469, Daume et al.
+# 2024 Nature for 000673, Daume et al. 2024 Neuron for 001187), only the
+# 001187 paper's STAR Methods gives numeric session-accuracy/firing-rate
+# exclusion criteria -- verified directly against the published text, not
+# assumed: "Two patients with task performance lower than 55% correct in
+# either the WM or the LTM task were excluded from further analyses" and
+# "Neurons with a firing rate lower than 0.1 Hz in either the WM or the
+# LTM tasks were excluded from analysis." 000469/000673 report accuracy
+# and firing rate only as descriptive statistics, no threshold. Rather
+# than use a different (undocumented) cutoff per dataset -- or no cutoff
+# at all for two of the three -- these defaults are applied UNIFORMLY to
+# all datasets this adapter loads: 001187 is the only one of the three
+# with a literature-sourced number, so it's the number used everywhere.
+MIN_SESSION_ACCURACY = 0.55
+MIN_FIRING_HZ = 0.1
+
+
 # Working-memory trials for 000469/000673 live at the top-level
 # `intervals/trials`; 001187 (SBCAT-NO, "Sternberg-CAT New-Old") instead
 # splits its two tasks into `intervals/WM_trials` (Sternberg, same column
@@ -172,13 +189,15 @@ class DandiSternbergTierA:
         self,
         data_root: str | Path,
         datasets: tuple[str, ...] = ("000469", "000673"),
-        min_firing_hz: float = 0.2,
+        min_firing_hz: float = MIN_FIRING_HZ,
+        min_session_accuracy: float = MIN_SESSION_ACCURACY,
         bin_ms: int = 50,
         max_sessions_per_dataset: Optional[int] = None,
     ):
         self.data_root = Path(data_root)
         self.bin_ms = bin_ms
         self.min_firing_hz = min_firing_hz
+        self.min_session_accuracy = min_session_accuracy
         self._sessions: dict[str, _SessionData] = {}
         self._trials_cache: Optional[pd.DataFrame] = None
         self._rate_cache: dict[tuple, np.ndarray] = {}  # (uid, epoch) -> [n_all_trials, n_bins], at self.bin_ms only
@@ -191,6 +210,8 @@ class DandiSternbergTierA:
                 wm_files = wm_files[:max_sessions_per_dataset]
             for f in wm_files:
                 sess = _load_session(f, ds)
+                if not self._session_passes_accuracy_qc(sess):
+                    continue
                 self._apply_firing_qc(sess)
                 if sess.unit_ids:
                     self._sessions[sess.session_id] = sess
@@ -200,6 +221,22 @@ class DandiSternbergTierA:
                 f"(is the external USB mounted at that path?)"
             )
         self._build_conditions()
+
+    def _session_passes_accuracy_qc(self, sess: _SessionData) -> bool:
+        """`min_session_accuracy` (default `MIN_SESSION_ACCURACY`=0.55,
+        Daume et al. 2024's 001187 STAR Methods threshold) is applied
+        uniformly across every dataset this adapter loads -- 001187 is the
+        only one of the three source papers with a literature-sourced
+        accuracy-exclusion number at all, so rather than invent a
+        different cutoff (or none) for 000469/000673, the one number that
+        does exist is used everywhere. Daume et al. exclude a patient
+        whose accuracy is below threshold in EITHER the WM or the LTM
+        task; this adapter never loads `intervals/LTM_trials` (see module
+        docstring), so only the WM-task half of that criterion is checked
+        here."""
+        if len(sess.trials) == 0:
+            return True
+        return sess.trials["correct"].mean() >= self.min_session_accuracy
 
     def _apply_firing_qc(self, sess: _SessionData) -> None:
         """Unit inclusion is bare firing rate only. The released `units`
@@ -214,7 +251,11 @@ class DandiSternbergTierA:
         cluster on its channel -- no second cluster to compute a
         Mahalanobis distance against -- not a quality flag; an earlier
         version of this function treated it as a QC failure, which was
-        wrong.)"""
+        wrong.) The rate threshold (`min_firing_hz`, default
+        `MIN_FIRING_HZ`=0.1, again Daume et al.'s 001187 number) is applied
+        uniformly across datasets for the same reason as the accuracy
+        threshold above -- one literature-sourced number, used everywhere,
+        rather than a per-dataset patchwork."""
         if len(sess.trials) == 0:
             sess.unit_ids = []
             return

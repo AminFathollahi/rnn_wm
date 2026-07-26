@@ -35,12 +35,12 @@ def _make_bank():
 # ---------------- context_vector (no ImageTokenBank needed) ----------------
 
 def test_context_vector_one_hot_consistency():
-    c = context_vector(epoch="encode", lure_flag=False, encoded_count=2)
+    c = context_vector(epoch="encode", encoded_count=2)
     assert len(c) == 10
     assert c[0] == 1.0 and c[1] == 0.0  # WM_family, aux_family
     assert c[2] == 0.0 and c[3] == 1.0 and c[4] == 0.0  # load1,load2,load3 one-hot -> 2nd item encoded
     assert c[5] == 1.0 and c[6] == 0.0 and c[7] == 0.0  # epoch_encode
-    assert c[8] == 0.0  # lure_flag only live at probe
+    assert c[8] == 0.0  # reserved (ex-lure_flag; see the leak guard below)
     assert c[9] == 0.0  # rule_flag reserved
 
 
@@ -48,25 +48,53 @@ def test_context_vector_load_zero_outside_encode():
     """v5.0 fix (comments.txt item 2): load one-hot must not leak into
     maintain/probe -- the network carries load in its own recurrent state
     instead of reading a live exogenous broadcast."""
-    c_maintain = context_vector(epoch="maintain", lure_flag=False, encoded_count=2)
+    c_maintain = context_vector(epoch="maintain", encoded_count=2)
     assert c_maintain[2:5] == [0.0, 0.0, 0.0]
-    c_probe = context_vector(epoch="probe", lure_flag=False, encoded_count=2)
+    c_probe = context_vector(epoch="probe", encoded_count=2)
     assert c_probe[2:5] == [0.0, 0.0, 0.0]
-
-
-def test_context_vector_lure_only_at_probe():
-    c_probe_lure = context_vector(epoch="probe", lure_flag=True, encoded_count=0)
-    assert c_probe_lure[8] == 1.0
-    c_maintain_lure = context_vector(epoch="maintain", lure_flag=True, encoded_count=0)
-    assert c_maintain_lure[8] == 0.0  # lure_flag not asserted outside probe
 
 
 def test_context_vector_aux_family_flag():
     """§9.4a identity-report catch trials (comments.txt item 6)."""
-    c = context_vector(epoch="encode", lure_flag=False, encoded_count=1, aux_family=True)
+    c = context_vector(epoch="encode", encoded_count=1, aux_family=True)
     assert c[1] == 1.0
-    c_off = context_vector(epoch="encode", lure_flag=False, encoded_count=1, aux_family=False)
+    c_off = context_vector(epoch="encode", encoded_count=1, aux_family=False)
     assert c_off[1] == 0.0
+
+
+@pytestmark_needs_stimuli
+def test_probe_context_vector_does_not_leak_the_answer():
+    """AUDIT 2026-07-26 regression guard. `c_t` is exogenous input; if any
+    of its dimensions is predictive of `in_set` at the probe, the network
+    can answer without remembering anything. The old `lure_flag` bit
+    (index 8) was exactly this: combined with a category match it scored a
+    perfect 1.000, which is why every cell in RUN_REPORT.md read
+    1.0/1.0/1.0. Guards the whole vector, not just index 8, so a future
+    cue added at the probe cannot reintroduce the same class of bug."""
+    bank = _make_bank()
+    gen = SternbergGenerator(FULL_CFG, bank)
+    n_trials = 400
+    probe_ctx, truth = [], []
+    for i in range(n_trials):
+        rng = np.random.RandomState(i)
+        steps = gen.generate_trial(
+            rng, loads=[1, 2, 3], lure_fraction=0.3, maintain_steps=5, trial_id=i
+        )
+        probe = next(s for s in steps if s.epoch == "probe")
+        probe_ctx.append(probe.c_t)
+        truth.append(bool(probe.in_set))
+    ctx = np.asarray(probe_ctx)          # [n_trials, C_DIM]
+    y = np.asarray(truth)
+    for dim in range(ctx.shape[1]):
+        col = ctx[:, dim]
+        if len(np.unique(col)) < 2:
+            continue  # constant at probe -> carries no information about in_set
+        # best single-threshold rule on this dimension, as a fraction correct
+        acc = max((col > 0.5) == y, (col <= 0.5) == y, key=lambda m: m.sum()).mean()
+        assert acc < 0.60, (
+            f"c_t[{dim}] predicts in_set at {acc:.3f} from the probe input alone "
+            f"-- exogenous label leak, the network need not use working memory"
+        )
 
 
 # ---------------- curriculum (no ImageTokenBank needed) ----------------

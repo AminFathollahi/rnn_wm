@@ -54,6 +54,10 @@ model:
   encoder: resnet18                        # frozen, ImageNet-pretrained
   feature_dim: 512
   task_vec_dim: 10
+  task_vec_dim_multitask: 13                # Phase 5 item 5.4: multi-task diet's own extended cue width
+                                             # (brainalign_wm.tasks.multitask.C_DIM_MULTITASK) -- separate
+                                             # from task_vec_dim, which stays 10 for the Sternberg-only
+                                             # pipeline (Phases 0-4 and every test depend on that exact width)
   bottleneck: 64                           # Phase 1 (A2/B2 param-budget fix, comments.txt §5): was 128;
                                             # FrontEnd goes 83,712 -> 37,760 params
   substrate: gru                           # {vanilla|gru}; vanilla is the Stage-1 substrate (§4), GRU is
@@ -113,6 +117,14 @@ task:                                      # image-Sternberg working-memory task
   identity_catch_fraction: 0.0              # §7.1/§9.4a: fraction of trials replacing the probe with an
                                              # identity-report query (position 1's category). 0.0 in Core;
                                              # 0.12 for the {M000, M111} identity-auxiliary sub-experiment.
+  multitask_diet: false                     # Phase 5 (comments.txt §5): "WM-only vs multi-task" Stage-1 diet
+                                             # factor (§4). false (Core default) = Sternberg only, zero change
+                                             # to any existing pipeline; true = interleave the 6-task NeuroGym
+                                             # diet (brainalign_wm/tasks/multitask.py), one task per training
+                                             # batch, uniform sampling.
+  multitask_max_ticks: 40                    # upper bound on a NeuroGym trial's rollout length (observed
+                                             # 1-32 ticks across the diet's 5 tasks); a trial that hasn't
+                                             # produced `new_trial`/terminated by then is truncated.
   fixation_steps: 3
   iti_steps: 2
   feedback_steps: 1

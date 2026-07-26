@@ -6,9 +6,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from brainalign_wm.models.flat_gru import FlatGRUCore
 from brainalign_wm.models.front_end import FrontEnd
-from brainalign_wm.models.gru_cell import make_locality_mask
+from brainalign_wm.models.gru_cell import MaskedGRUCell, make_locality_mask
 from brainalign_wm.models.heads import Heads, N_ACTIONS
 from brainalign_wm.models.hrl import HRLCore
 
@@ -33,7 +32,7 @@ def test_mask_is_symmetric_seedable_not_required_but_deterministic():
 
 
 def _build_flat():
-    return FlatGRUCore(CFG["bottleneck"], hidden_dim=CFG["flat_units"])
+    return MaskedGRUCell(CFG["bottleneck"], CFG["flat_units"], mask=None)
 
 
 def _build_hrl(reflective: bool):
@@ -51,10 +50,15 @@ def _build_hrl(reflective: bool):
 
 
 def test_param_budget_matched_within_tolerance():
+    """Phase 1 (A2 fix, comments.txt §5): compares EFFECTIVE (mask-aware)
+    synapse counts, not raw `.parameters()` numel -- the S=1 worker's
+    locality mask leaves ~10% of its dense `weight_hh` alive, so a raw
+    comparison is meaningless (that mismatch, undetected, was A2) and this
+    test would fail on the current config if it used raw counts."""
     flat = _build_flat()
     hrl = _build_hrl(reflective=False)
-    n_flat = sum(p.numel() for p in flat.parameters())
-    n_hrl = sum(p.numel() for p in hrl.parameters())
+    n_flat = flat.effective_param_count()
+    n_hrl = hrl.effective_param_count()
     rel_diff = abs(n_hrl - n_flat) / n_flat
     tol = CFG["param_budget_tol"]
     assert rel_diff <= tol, f"HRL core {n_hrl} vs flat core {n_flat}: {rel_diff:.3%} > tol {tol:.0%}"

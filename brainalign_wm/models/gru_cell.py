@@ -67,6 +67,19 @@ class MaskedGRUCell(nn.Module):
         h_t = (1 - u_t) * h_prev + u_t * n_t
         return h_t, u_t
 
+    def n_units(self) -> int:
+        return self.hidden_dim
+
+    def effective_param_count(self) -> int:
+        """Structural synapse count (Khona & Chandra 2023 node-vs-synapse
+        convention): `weight_ih` (dense, always) plus `weight_hh` counted
+        only at entries the `mask` leaves alive -- a masked-out entry is not
+        a physical connection and must not inflate the reported budget
+        (A2/B2). Biases are per-unit, not per-synapse, so excluded here;
+        they still appear in the model's raw `n_params_total`."""
+        n_hh = self.weight_hh.numel() if self.mask is None else int(self.mask.sum().item())
+        return self.weight_ih.numel() + n_hh
+
 
 class PlasticGRUCell(MaskedGRUCell):
     """`MaskedGRUCell` plus differentiable Hebbian fast weights (Miconi,
@@ -82,7 +95,13 @@ class PlasticGRUCell(MaskedGRUCell):
     candidate), like the locality mask -- there is no principled way to
     give a GRU a single "the" recurrent weight the way a plain RNN has one,
     so each gate's [hidden, hidden] block gets its own trace using the
-    same pre-synaptic (`h_prev`) and post-synaptic (`h_t`) signal."""
+    same pre-synaptic (`h_prev`) and post-synaptic (`h_t`) signal.
+
+    `effective_param_count()`/`n_units()` are inherited unchanged from
+    `MaskedGRUCell`: `alpha` is a per-synapse modulation coefficient on an
+    EXISTING `weight_hh` entry, not a new connection, so it does not add to
+    the structural synapse count (it does still count in the raw
+    `n_params_total` any caller computes via `.parameters()`)."""
 
     def __init__(
         self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None,
@@ -191,6 +210,14 @@ class PBWMManagerCell(nn.Module):
 
     def init_cell(self, batch_size: int, device=None) -> torch.Tensor:
         return torch.zeros(batch_size, self.hidden_dim, device=device)
+
+    def n_units(self) -> int:
+        return self.hidden_dim
+
+    def effective_param_count(self) -> int:
+        """Never masked (the manager is always dense), so this is just the
+        raw weight_ih/weight_hh synapse count."""
+        return self.weight_ih.numel() + self.weight_hh.numel()
 
     def forward(
         self, x_t: torch.Tensor, h_prev: torch.Tensor, c_prev: torch.Tensor, R_t: torch.Tensor,

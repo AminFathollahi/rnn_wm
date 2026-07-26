@@ -63,9 +63,9 @@ def _completed_run_ids() -> list[str]:
 
 
 def _core_components(core, S: int) -> dict[str, np.ndarray]:
-    """{"flat": weight_hh} for S=0 (`_GatedFlatCore.cell` or the plain
-    `FlatGRUCore.cell`, both expose `.weight_hh` directly), or
-    {"worker": ..., "manager": ...} for S=1 -- see `models/hrl.py`:
+    """{"flat": weight_hh} for S=0 (GRU substrate: `_GatedFlatCore.cell`
+    exposes `.weight_hh` directly), or {"worker": ..., "manager": ...} for
+    S=1 -- see `models/hrl.py`:
     `HRLCore.worker`/`.manager` are themselves `MaskedGRUCell`/
     `PlasticGRUCell`/`PBWMManagerCell` instances with `.weight_hh` directly
     (no further `.cell` nesting), unlike the S=0 wrapper."""

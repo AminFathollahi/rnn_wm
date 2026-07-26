@@ -1,0 +1,58 @@
+"""Vanilla tanh RNN cell -- the Stage 1 substrate (comments.txt §4, Phase 1
+item 1.4): the training-regime-mapping factorial runs on this cheap
+substrate before any compute goes into the GRU bio-plausibility battery.
+
+    h_t = tanh(W_ih x_t + W_hh_masked h_{t-1} + b)
+
+Same `mask`/`extra_update_bias` constructor and forward shape as
+`MaskedGRUCell` (single-gate, so `forward` returns just `h_t`, not a
+(h_t, u_t) pair) so `_step_core` can dispatch on `model.substrate` without a
+substrate-specific branch for the M=0,P=0 case.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+import torch
+import torch.nn as nn
+
+
+class VanillaRNNCell(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.weight_ih = nn.Parameter(torch.empty(hidden_dim, input_dim))
+        self.weight_hh = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self.bias = nn.Parameter(torch.zeros(hidden_dim))
+        self.reset_parameters()
+        if mask is not None:
+            if mask.shape != (hidden_dim, hidden_dim):
+                raise ValueError(f"mask must be [{hidden_dim},{hidden_dim}], got {tuple(mask.shape)}")
+            self.register_buffer("mask", mask)
+        else:
+            self.mask = None
+
+    def reset_parameters(self) -> None:
+        std = 1.0 / (self.hidden_dim ** 0.5)
+        nn.init.uniform_(self.weight_ih, -std, std)
+        nn.init.uniform_(self.weight_hh, -std, std)
+
+    def forward(
+        self, x_t: torch.Tensor, h_prev: torch.Tensor, extra_update_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        w_hh = self.weight_hh if self.mask is None else self.weight_hh * self.mask
+        pre = x_t @ self.weight_ih.t() + h_prev @ w_hh.t() + self.bias
+        if extra_update_bias is not None:
+            pre = pre + extra_update_bias
+        return torch.tanh(pre)
+
+    def n_units(self) -> int:
+        return self.hidden_dim
+
+    def effective_param_count(self) -> int:
+        """Structural synapse count, same convention as
+        `MaskedGRUCell.effective_param_count` (Khona & Chandra 2023):
+        `weight_ih` dense, `weight_hh` counted only at unmasked entries."""
+        n_hh = self.weight_hh.numel() if self.mask is None else int(self.mask.sum().item())
+        return self.weight_ih.numel() + n_hh

@@ -54,27 +54,39 @@ model:
   encoder: resnet18                        # frozen, ImageNet-pretrained
   feature_dim: 512
   task_vec_dim: 10
-  bottleneck: 128
+  bottleneck: 64                           # Phase 1 (A2/B2 param-budget fix, comments.txt §5): was 128;
+                                            # FrontEnd goes 83,712 -> 37,760 params
+  substrate: gru                           # {vanilla|gru}; vanilla is the Stage-1 substrate (§4), GRU is
+                                            # Stage 2's -- Core battery below is all GRU, so default stays gru
   input_noise_sigma: 0.05
   recurrent_noise_sigma: 0.0                # bio-plausible ablation battery §4.4 "+noise" (Core default: off)
   core_dropout_p: 0.0                       # performance-matched baseline "flat_gru_dropout" (Core default: off)
-  flat_units: 256                          # S=0 (flat GRU) hidden width
+  flat_units: 128                          # S=0 (flat GRU) hidden width -- from scripts/match_param_budget.py
+                                            # at param_budget_target_synapses_gru (74,000): solved H=128 (73,728 syn)
   worker_units: 196                        # S=1 worker population, 14x14 grid
   worker_grid: [14, 14]
-  worker_density: 0.04                     # spatial locality mask target density
-  manager_units: 64                        # tuned for parameter-budget match; see RESPONSES.md
+  worker_density: 0.10                     # B2 fix: was 0.04 (mean in-degree ~6); now ~14
+  manager_units: 24                        # Phase 1: from match_param_budget.py at the gru target given the
+                                            # smaller bottleneck/g_dim above (was 64) -- see PHASE_LOG.md for
+                                            # why this differs from the illustrative 48 comments.txt sketches:
+                                            # 48 under-shoots the 74,000-synapse target by ~17% with this
+                                            # worker_grid/density; the solver's 24 lands within 0.4% of S=0's
+                                            # 73,728, which is what A2 actually requires (S=0 ~= S=1).
   manager_period: 5                        # manager clock period (or event-gated when M=1)
   param_budget_tol: 0.05                   # flat vs. hierarchical core parameter match tolerance
   readout_scale: 1.0                       # neutral in the core design; swept in the oblique sub-experiment
   action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no}
-  g_dim: 128                               # top-down context g_t = W_g . h^m_t dimension
+  g_dim: 32                                # Phase 1: was 128, a rank-64 signal in a 128-d box
   worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t
-  flat_grid: [16, 16]                      # arm T on S=0 (§1.2): imposed 16x16 layout on the 256 flat units
+  flat_grid: [16, 8]                       # arm T on S=0 (§1.2): imposed layout on the flat_units, product
+                                            # must equal flat_units (128 = 16*8; was 16x16=256 pre-Phase-1)
                                             # (All-TNNs "topography without hierarchy" test) -- arbitrary unit
                                             # ordering is fine, the smoothness loss makes the map meaningful
                                             # over training; S=1's worker already has an intrinsic worker_grid.
   dale_ei_split: 0.8                       # arm D (§1.3): fraction of recurrent hidden units treated as
                                             # excitatory (Song et al. 2016 / Balwani 2025's 80/20 split)
+  param_budget_target_synapses_vanilla: 25000   # Phase 1 (§5): Stage-1 vanilla-substrate target, Masse 2019 anchor
+  param_budget_target_synapses_gru: 74000       # Phase 1 (§5): Stage-2 GRU-substrate target
 
 mechanisms:
   reflection_lambda: 0.9                   # R_t leak rate

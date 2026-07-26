@@ -127,15 +127,14 @@ def _load_full_config() -> dict:
 
 
 class _GatedFlatCore(torch.nn.Module):
-    """S=0 core for M=1 and/or P=1 (cells M010/M011/M001/M011/M101/M111 --
-    i.e. anything but the true M000/M100 baseline): the reflective gate
-    (M=1) and Hebbian fast weights (P=1, §6.2) both need hooks `nn.GRUCell`
-    doesn't provide. Uses the same `MaskedGRUCell`/`PlasticGRUCell`
-    machinery as the HRL manager/worker (mask=None, dense -- only the S=1
-    worker is spatially masked), with the reflective bias applied directly
-    to its own update gate (without this, M010/M011
-    would be silently identical to M000/M001). `FlatGRUCore` (plain
-    `nn.GRUCell`) remains the true M=0,P=0 baseline."""
+    """The S=0 (flat, GRU-substrate) core, for every M/P combination
+    (Phase 1, B1/1.5): uses `MaskedGRUCell`/`PlasticGRUCell` (mask=None --
+    only the S=1 worker is spatially masked) uniformly, including the true
+    M=0,P=0 baseline. Previously M=0,P=0 used a separate `FlatGRUCore`
+    wrapping plain `nn.GRUCell`, which inits its biases uniform where
+    `MaskedGRUCell` inits them to zero -- a free confound between M00000
+    and M01000 (B1). `extra_update_bias` defaults to None, so the M=0 case
+    is just this class called with no bias, not a different class."""
 
     def __init__(self, input_dim: int, hidden_dim: int, plastic: bool = False, hebb_kwargs: Optional[dict] = None):
         super().__init__()
@@ -159,12 +158,18 @@ class _GatedFlatCore(torch.nn.Module):
     def readout_state(self, h_t):
         return h_t
 
+    def n_units(self) -> int:
+        return self.cell.n_units()
+
+    def effective_param_count(self) -> int:
+        return self.cell.effective_param_count()
+
 
 def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool = False):
     from brainalign_wm.models.front_end import FrontEnd
-    from brainalign_wm.models.flat_gru import FlatGRUCore
     from brainalign_wm.models.hrl import HRLCore
     from brainalign_wm.models.heads import Heads
+    from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
 
     m, mech = full_cfg["model"], full_cfg["mechanisms"]
     hebb_kwargs = {
@@ -173,13 +178,24 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
         "hebb_clip": mech.get("hebb_clip", 2.0),
     }
     front_end = FrontEnd(m["feature_dim"], m["task_vec_dim"], m["bottleneck"], m["input_noise_sigma"]).to(device)
+    substrate = m.get("substrate", "gru")
     if S == 0:
-        core = (
-            _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs)
-            if (M or P) else FlatGRUCore(m["bottleneck"], hidden_dim=m["flat_units"])
-        ).to(device)
+        if substrate == "vanilla":
+            # Stage 1 (§4): vanilla has no reflective-gate/Hebbian hooks
+            # wired up yet -- M/P aren't in Stage 1's factorial, so this
+            # path only needs to exist, not gate/plasticize (add when a
+            # later stage needs M/P on the vanilla substrate).
+            core = VanillaRNNCell(m["bottleneck"], m["flat_units"], mask=None).to(device)
+        else:
+            core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs).to(device)
         h_star_dim = m["flat_units"]
     else:
+        if substrate == "vanilla":
+            raise NotImplementedError(
+                "HRLCore (S=1) has no vanilla-substrate variant yet -- its worker/manager are "
+                "MaskedGRUCell-based. Stage 1 needs this (§4); build it there rather than silently "
+                "training a GRU run under a vanilla label."
+            )
         core = HRLCore(
             input_dim=m["bottleneck"], worker_units=m["worker_units"], manager_units=m["manager_units"],
             grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
@@ -219,16 +235,19 @@ def _step_core(
     noise source and stays on at eval too). S=0 only: the baseline family
     is explicitly flat-GRU (no S=1 dropout path needed)."""
     if S == 0:
-        if M or P:
-            if P:
-                h_t, u_t, hebb_t = core(z_t, state["h"], state["hebb"], extra_update_bias=gate_bias)
-                new_state = {"h": h_t, "hebb": hebb_t}
-            else:
-                h_t, u_t = core(z_t, state["h"], extra_update_bias=gate_bias)
-                new_state = {"h": h_t}
-        else:
-            h_t = core(z_t, state["h"])
+        from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
+
+        if isinstance(core, VanillaRNNCell):
+            # Single-gate cell (Stage 1, §4): no update gate to report, and
+            # M/P aren't in Stage 1's factorial (see `_build_model`).
+            h_t = core(z_t, state["h"], extra_update_bias=gate_bias)
             u_t = None
+            new_state = {"h": h_t}
+        elif P:
+            h_t, u_t, hebb_t = core(z_t, state["h"], state["hebb"], extra_update_bias=gate_bias)
+            new_state = {"h": h_t, "hebb": hebb_t}
+        else:
+            h_t, u_t = core(z_t, state["h"], extra_update_bias=gate_bias)
             new_state = {"h": h_t}
         if recurrent_noise_sigma > 0:
             new_state["h"] = new_state["h"] + torch.randn_like(new_state["h"]) * recurrent_noise_sigma

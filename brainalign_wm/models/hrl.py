@@ -172,3 +172,16 @@ class HRLCore(nn.Module):
 
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+    def n_units(self) -> int:
+        return self.worker_units + self.manager_units
+
+    def effective_param_count(self) -> int:
+        """Sum of the worker's and manager's structural synapse counts
+        (mask-aware, A2/B2) plus the dense g_proj readback -- the whole
+        core's synapse budget, comparable to a flat core's."""
+        return (
+            self.worker.effective_param_count()
+            + self.manager.effective_param_count()
+            + self.g_proj.weight.numel()
+        )

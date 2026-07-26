@@ -70,27 +70,16 @@ def test_probe_context_vector_does_not_leak_the_answer():
     (index 8) was exactly this: combined with a category match it scored a
     perfect 1.000, which is why every cell in RUN_REPORT.md read
     1.0/1.0/1.0. Guards the whole vector, not just index 8, so a future
-    cue added at the probe cannot reintroduce the same class of bug."""
+    cue added at the probe cannot reintroduce the same class of bug.
+
+    Shares its dataset generation and per-dimension rule with
+    `scripts/leak_check.py` (Phase 0) so the leak logic lives in one place.
+    """
+    from scripts.leak_check import all_single_dim_accuracies, generate_probe_dataset
+
     bank = _make_bank()
-    gen = SternbergGenerator(FULL_CFG, bank)
-    n_trials = 400
-    probe_ctx, truth = [], []
-    for i in range(n_trials):
-        rng = np.random.RandomState(i)
-        steps = gen.generate_trial(
-            rng, loads=[1, 2, 3], lure_fraction=0.3, maintain_steps=5, trial_id=i
-        )
-        probe = next(s for s in steps if s.epoch == "probe")
-        probe_ctx.append(probe.c_t)
-        truth.append(bool(probe.in_set))
-    ctx = np.asarray(probe_ctx)          # [n_trials, C_DIM]
-    y = np.asarray(truth)
-    for dim in range(ctx.shape[1]):
-        col = ctx[:, dim]
-        if len(np.unique(col)) < 2:
-            continue  # constant at probe -> carries no information about in_set
-        # best single-threshold rule on this dimension, as a fraction correct
-        acc = max((col > 0.5) == y, (col <= 0.5) == y, key=lambda m: m.sum()).mean()
+    ctx, _category_match, truth = generate_probe_dataset(FULL_CFG, bank, n_trials=400)
+    for dim, acc in all_single_dim_accuracies(ctx, truth).items():
         assert acc < 0.60, (
             f"c_t[{dim}] predicts in_set at {acc:.3f} from the probe input alone "
             f"-- exogenous label leak, the network need not use working memory"

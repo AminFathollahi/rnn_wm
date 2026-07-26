@@ -728,3 +728,87 @@ $ python -m pytest
   comments.txt already asserts they're present in the 2.3.1 wheel and
   nothing in this phase needed them; only the 6-task DIET named in item
   5.2 was built.
+
+---
+
+## Phase 6 — N-back task (Stage 3 prerequisite)
+
+Much smaller and more contained than Phase 5: a standalone, model-internal
+task generator plus tests, no training-loop wiring (comments.txt: "Keep it
+model-internal: no brain alignment," §9.1) -- `training/train.py` and
+`run_grid.py` are untouched this phase.
+
+**Changed:**
+- `brainalign_wm/tasks/nback.py` (new): `NBackStep` dataclass
+  (`trial_id, t_in_trial, n, feature, image_id, category, is_match`,
+  structurally parallel to `sternberg.py::TrialStep`) and `NBackGenerator`
+  (mirrors `SternbergGenerator`'s `__init__(config, image_bank)` /
+  `.generate_trial(rng, ...) -> list[NBackStep]` shape). One generator
+  covers all 6 task variants (`n in {1,2,3} x feature in {identity,
+  category}`) via its `n`/`feature` parameters rather than 6 separate
+  classes. For position `i < n`: no valid n-back comparison exists yet,
+  `is_match=None`, not scored (mirrors Sternberg's non-probe epochs having
+  no in/out judgment). For `i >= n`: draws a match at the configured
+  `match_fraction`; identity-mode matches reuse the exact `image_id` from
+  position `i-n`, category-mode matches resample a DIFFERENT exemplar image
+  of the SAME category (so identity- and category-match trials aren't
+  pixel-identical); non-matches explicitly exclude the `i-n` image
+  (identity mode) or category (category mode) so they can't coincidentally
+  land on a match. `generate_trial` raises `ValueError` if
+  `sequence_length <= n` (no scoreable position would exist at all).
+- `configs/config.yaml`: new `nback:` block (`n_values: [1,2,3]`,
+  `features: [identity, category]`, `sequence_length: 20`,
+  `match_fraction: 0.4`) -- reuses `task.categories`, not duplicated.
+  Placed after `task:`'s full block (including its own `curriculum:`
+  sub-key) -- an earlier edit briefly mis-inserted it mid-`task:`, silently
+  ending the `task:` mapping early and dropping `task.curriculum`
+  entirely (33 test failures, `KeyError: 'curriculum'`); caught before
+  commit by re-running the full suite, not by the targeted
+  `test_nback.py`-only run that passed first.
+- `tests/test_nback.py` (new, 14 tests, mirrors `tests/test_tasks.py`'s
+  structure/`_make_bank()` helper/`pytestmark_needs_stimuli` skip pattern):
+  sequence length and per-position field consistency (parametrized over
+  `n x feature`, 6 combinations) including that `is_match` is recomputed
+  independently from `image_id`/`category` and agrees with the stored
+  flag; match-rate-in-aggregate over 150 generated sequences per
+  `n x feature` combination (`abs(observed - configured) < 0.08`, same
+  style as `test_lure_fraction_matches_config_in_aggregate`); determinism
+  under a repeated seed; the `sequence_length <= n` `ValueError`.
+
+**Design decisions beyond the brief:**
+- **No `c_t` field on `NBackStep`.** Forcing a Sternberg-shaped context
+  vector here would be guessed-at plumbing for an interface Phase 7
+  hasn't defined yet -- METARL (§5 Phase 7) withholds the task cue
+  entirely and instead feeds (previous action, previous reward), which is
+  a fundamentally different input contract than Sternberg's `c_t`. Adding
+  one now would likely need reshaping once Phase 7 specifies it for real.
+- **`i < n` positions are excluded from the match-rate aggregate** by
+  filtering on `is_match is None` before accumulating -- the same
+  exclusion `generate_trial` itself encodes structurally (only `i >= n`
+  steps ever get a non-`None` `is_match`), so the test's exclusion isn't a
+  separate policy, just reading the generator's own invariant back.
+- Category-mode matches deliberately resample a different exemplar image
+  of the same category rather than reusing the exact image (not stated
+  explicitly in the spec, but required for identity-mode and category-mode
+  trials to be distinguishable at all at the pixel level, per item 5's own
+  N x feature framing -- a category match with the identical image would
+  be indistinguishable from an identity match to any downstream analysis).
+
+**Acceptance -- actual output:**
+```
+$ python -m pytest tests/test_nback.py -v
+14 passed in 3.14s
+
+$ python -m pytest
+185 passed, 15 warnings in 276.64s
+```
+
+**Not done / deferred:**
+- No training-loop wiring (`train.py`/`run_grid.py` untouched) -- out of
+  scope per comments.txt's "keep it model-internal" framing and this
+  phase's acceptance criterion, which is purely about generator
+  correctness. Phase 7's METARL arm is what actually trains a model on
+  n-back sequences.
+- `c_t`/context-vector equivalent for n-back: deliberately not built (see
+  above); Phase 7 needs to define it alongside the (previous action,
+  previous reward) input contract.

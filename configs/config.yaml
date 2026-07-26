@@ -113,12 +113,19 @@ task:                                      # image-Sternberg working-memory task
   fixation_steps: 3
   iti_steps: 2
   feedback_steps: 1
-  # annealed curriculum: fraction-of-total-steps boundaries; each phase
-  # samples a progressively broader (load, delay, lure) distribution.
+  # annealed curriculum: ABSOLUTE-step boundaries (Phase 3, comments.txt
+  # §5 item 3.5) -- fractions of total_steps silently change meaning once
+  # a run's stopping point varies (train-to-criterion, §3), so the
+  # boundary is now a fixed step count. Calibrated to the `full` tier's
+  # 150,000-step budget (the old fractions' 0.2/0.6 at that length), so the
+  # curriculum SHAPE at the tier that matters is unchanged; a shorter tier
+  # (smoke/dev) now spends its whole budget inside warmup/ramp instead of
+  # a rescaled version of the same three phases -- that is the point of
+  # fixing these in absolute steps rather than proportionally.
   curriculum:
-    warmup_frac: 0.2      # loads=[1] only, short delay, no lures
-    ramp_frac: 0.6        # loads=[1,2,3], full delay, lure_fraction ramped 0 -> configured value
-    # target phase = remaining fraction: full distribution (all loads/delay/lures)
+    warmup_steps: 30000   # loads=[1] only, short delay, no lures
+    ramp_steps: 90000      # loads=[1,2,3], full delay, lure_fraction ramped 0 -> configured value
+    # target phase = remaining steps: full distribution (all loads/delay/lures)
 
 # Simulated spiking generator: plants ground-truth representational geometry
 # for the pipeline recovery gate, independent of the real NWB adapters.
@@ -152,7 +159,9 @@ train:
                                             # smoke run is unstable at this rate
   curriculum: [warmup, ramp, target]
   checkpoint_every: 200                    # steps between checkpoints
-  eval_trials_per_load: 40                 # trials per load for the final behavioral-gate evaluation
+  eval_trials_per_load: 200                # Phase 3 (A3, §3 MEASUREMENT): n>=200/load during training;
+                                            # CI half-width +/-0.042 at p=0.90, vs. +/-0.093 at the old n=40
+  final_eval_trials_per_load: 500          # Phase 3 (A3): n=500 for the final, once-per-run number (+/-0.026 CI)
   eval_batch_size: 8                       # batch width used only for evaluate_accuracy's own trial batches
   value_loss_weight: 0.5
   entropy_coef: 0.01                       # REINFORCE (L=0, ramp/target phases) entropy bonus; audit fix A1a
@@ -172,10 +181,23 @@ train:
   dale_penalty_weight_on: 0.01             # magnitude applied to cells with D=1; starting point, tune during
                                             # the Phase B dev-tier sanity check if training is unstable
 
-# Behavioral gates.
+# Behavioral gates -- ONE criterion, not two (Phase 3, comments.txt §3): a
+# run is "trained" once every load meets its human-derived criterion,
+# sustained across `consecutive_evals` consecutive evaluations. From real
+# human Sternberg performance in 000469 (the only dataset covering all
+# three loads) -- see scripts/human_behavior_gates.py, results/human_behavior.csv.
 gates:
-  load1_acc: 0.95
-  load3_acc: 0.80
+  criterion:
+    load1: 0.94    # median human session 0.9444
+    load2: 0.91    # median human session 0.9111
+    load3: 0.86    # median human session 0.8667
+  consecutive_evals: 3     # must hold across 3 consecutive evaluations
+  # <set in Phase 11 from the pilot's real steps_to_criterion numbers --
+  # comments.txt's §3 text says "Phase 7" but its own Phase 11 ("PILOT,
+  # THEN RUN", item 11.2) is what actually derives this; not invented here.
+  # Not a training stop condition: `cfg["steps"]` (tiers.<tier>.steps)
+  # still governs how many steps a run executes.
+  max_steps: null
 
 # Neural alignment: Tier A is the pooled 000469 + 000673 dataset.
 neural:

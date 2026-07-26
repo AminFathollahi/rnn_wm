@@ -44,9 +44,15 @@ def test_cell_smoke(cell):
             shutil.rmtree(ckpt_dir)
 
     assert result["status"] == "completed"
-    assert set(result["gates"].keys()) == {"load1>=0.95", "load3>=0.80"}
-    assert set(result["accuracy"].keys()) == {"load1", "load2", "load3"}
+    # Phase 3 (A3): gate keys/thresholds come from config.yaml's gates.criterion,
+    # not hardcoded, so this test doesn't silently drift from config again.
+    criterion = CFG["gates"]["criterion"]
+    assert set(result["gates"].keys()) == {f"{k}>={v}" for k, v in criterion.items()}
+    expected_acc_keys = {f"load{i}" for i in (1, 2, 3)} | {f"load{i}_ci_{b}" for i in (1, 2, 3) for b in ("lo", "hi")}
+    assert set(result["accuracy"].keys()) == expected_acc_keys
     assert result["rung"] == 0  # BPTT throughout; rung is local-learning-only
+    assert result["criterion_met"] is False  # 6-step smoke run cannot reach 3 consecutive passing evals
+    assert result["steps_to_criterion"] is None
 
 
 @pytest.mark.parametrize("cell", CFG["local_learning_cells"])

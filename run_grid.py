@@ -203,6 +203,26 @@ def git_commit() -> str:
         return "nogit"
 
 
+def _fmt(r: dict, key: str) -> str:
+    """`r.get(key, "-")`, but also renders an explicitly-`None` value (JSON
+    `null` -- e.g. `steps_to_criterion` when criterion was never met) as
+    "-" instead of the literal string "None". `False`/`0` are NOT missing
+    (e.g. `criterion_met: false`) and print as-is."""
+    v = r.get(key, "-")
+    return "-" if v is None else str(v)
+
+
+def _fmt_acc_ci(acc: dict, load: int) -> str:
+    """`0.941 [0.912,0.963]`, or just the point estimate / "-" if the CI
+    (or the accuracy itself) isn't present -- e.g. `--scaffold` mode's
+    synthetic accuracy dict has no `*_ci_lo`/`*_ci_hi` keys (Phase 3)."""
+    v = acc.get(f"load{load}")
+    if v is None:
+        return "-"
+    lo, hi = acc.get(f"load{load}_ci_lo"), acc.get(f"load{load}_ci_hi")
+    return f"{v} [{lo},{hi}]" if lo is not None and hi is not None else str(v)
+
+
 def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float) -> None:
     recs = load_all_records(manifest)
     by_status: dict[str, int] = {}
@@ -218,14 +238,22 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         "",
         "## Per-run",
         "",
-        "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | wall(s) |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        # Phase 3 (comments.txt §5 item 3.6): criterion_met/steps_to_criterion/
+        # trials_to_criterion/ms_per_step/joules_to_criterion added; final
+        # per-load accuracy now carries its Wilson CI; `wall(s)` renamed
+        # `wall_total_s` (still the run's total wall clock, unrelated to
+        # `wall_s_to_criterion` -- sample efficiency is reported as
+        # trials_to_criterion, not a step or wall-clock count, per 3.6).
+        "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | "
+        "criterion_met | steps_to_criterion | trials_to_criterion | ms_per_step | "
+        "joules_to_criterion | wall_total_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in sorted(recs, key=lambda x: x.get("run_id", "")):
         g = r.get("gates", {})
         gates = ",".join(f"{k}:{'P' if v else 'F'}" for k, v in g.items()) or "-"
         acc = r.get("accuracy", {})
-        accs = "/".join(str(acc.get(f"load{i}", "-")) for i in (1, 2, 3))
+        accs = "/".join(_fmt_acc_ci(acc, i) for i in (1, 2, 3))
         # Core cells carry "P" (BPTT throughout); the 4 local-learning
         # cells carry "L" instead -- show whichever is present. T/D (§1.2/
         # §1.3) are absent (shown "-") for local-learning and any
@@ -234,7 +262,10 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         lines.append(
             f"| {r.get('run_id','?')} | {r.get('S','-')} | {r.get('M','-')} | {p_or_l} | "
             f"{r.get('T','-')} | {r.get('D','-')} | "
-            f"{r.get('status','?')} | {gates} | {accs} | {r.get('rung','-')} | {r.get('wall_clock_s','-')} |"
+            f"{r.get('status','?')} | {gates} | {accs} | {r.get('rung','-')} | "
+            f"{_fmt(r, 'criterion_met')} | {_fmt(r, 'steps_to_criterion')} | "
+            f"{_fmt(r, 'trials_to_criterion')} | {_fmt(r, 'ms_per_step')} | "
+            f"{_fmt(r, 'joules_to_criterion')} | {r.get('wall_clock_s','-')} |"
         )
     errs = [r for r in recs if r.get("status") in ("error", "failed")]
     if errs:

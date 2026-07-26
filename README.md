@@ -1,4 +1,4 @@
-# brainalign_wm
+# RNN models of working memory with varying degrees of bioplausibility
 
 A factorial study of biologically-motivated inductive biases (hierarchical
 structure with spatial sparsity, neuromodulatory gating, and local

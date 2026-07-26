@@ -183,7 +183,7 @@ def replay_session(
                 if feat is not None
                 else torch.zeros(1, feature_dim, device=device)
             )
-            c_t = torch.tensor([context_vector(epoch, lure_flag=False, encoded_count=encoded_count)], dtype=torch.float32, device=device)
+            c_t = torch.tensor([context_vector(epoch, encoded_count=encoded_count)], dtype=torch.float32, device=device)
 
             gate_bias = None
             delta_t = None

@@ -1,5 +1,12 @@
 """Single-run training entrypoint, called by `run_grid.py`.
 
+Audit addition (2026-07-13): periodic training-metrics CSV logging.
+Every `eval_every` steps, the current training loss and a full
+`evaluate_accuracy` call are recorded to `results/metrics/{run_id}.csv`.
+This enables convergence analysis, step-count optimization, and
+diagnosis of training instability -- all impossible with only the
+final checkpoint.
+
 Contract:
     train_one(run: dict, cfg: dict) -> dict
       run = {"run_id", "model_id", "S", "M", "seed", "P"} for the 8 Core
@@ -75,6 +82,7 @@ procedure:
 """
 from __future__ import annotations
 
+import csv
 import time
 from pathlib import Path
 from typing import Optional
@@ -85,6 +93,33 @@ import torch.nn.functional as F
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class _MetricsLogger:
+    """Lightweight CSV writer for per-step training metrics.
+
+    Writes header + one row per log call; flushed periodically.
+    Created per-run in `results/metrics/{run_id}.csv`.
+    """
+
+    FIELDNAMES = [
+        "step", "phase", "train_loss", "train_acc_load1", "train_acc_load2", "train_acc_load3",
+        "grad_norm", "wall_s",
+    ]
+
+    def __init__(self, run_id: str):
+        self.path = ROOT / "results" / "metrics" / f"{run_id}.csv"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "w", newline="")
+        self._writer = csv.DictWriter(self._fh, fieldnames=self.FIELDNAMES)
+        self._writer.writeheader()
+
+    def log(self, row: dict) -> None:
+        self._writer.writerow({k: row.get(k, "") for k in self.FIELDNAMES})
+        self._fh.flush()
+
+    def close(self) -> None:
+        self._fh.close()
 
 
 def _load_full_config() -> dict:
@@ -220,13 +255,28 @@ def _dale_penalty(core, S: int, ei_split: float) -> torch.Tensor:
     OUTGOING weights) excitatory and the rest inhibitory, and penalize sign
     violations. A soft penalty (not a hard clamp) is used deliberately --
     hard-clamping weight signs fights the optimizer / the `MaskedGRUCell`
-    layout (§1.3)."""
-    mats = [core.cell.weight_hh] if S == 0 else [core.worker.weight_hh, core.manager.weight_hh]
-    total = torch.zeros((), device=mats[0].device)
-    for w in mats:
+    layout (§1.3).
+
+    AUDIT 2026-07-26: the penalty is now taken over the MASKED (effective)
+    recurrent weights. The S=1 worker's locality mask leaves ~4.1% of
+    `weight_hh` alive (4,755 of 115,248 entries); the previous unmasked
+    version spent ~96% of arm D's gradient on synapses that are multiplied
+    by zero in the forward pass and therefore do not exist, which both
+    diluted the mean by ~24x and made D substantially weaker on S=1 than
+    on S=0 -- an S x D confound in a battery whose whole point is to
+    separate the two arms."""
+    cells = [core.cell] if S == 0 else [core.worker, core.manager]
+    total = torch.zeros((), device=cells[0].weight_hh.device)
+    for cell in cells:
+        w = cell.weight_hh
+        mask = getattr(cell, "mask", None)  # [3H, H] or None (nn.GRUCell / dense manager)
         H = w.shape[1]
         n_e = int(round(ei_split * H))
-        total = total + F.relu(-w[:, :n_e]).mean() + F.relu(w[:, n_e:]).mean()
+        viol = torch.cat([F.relu(-w[:, :n_e]), F.relu(w[:, n_e:])], dim=1)
+        if mask is None:
+            total = total + viol.mean()
+        else:
+            total = total + viol.mul(mask).sum() / mask.sum().clamp_min(1.0)
     return total
 
 
@@ -489,18 +539,30 @@ def _perturbed_gru_step(cell, x_t, h_prev, xi_pre, extra_update_bias=None):
     `hidden`): an earlier version did that and failed, because the traced
     weight matrices have `3*hidden` output rows (one per reset/update/
     candidate gate unit), not `hidden`.
+
+    AUDIT 2026-07-26: `xi_pre` used to be added to BOTH `gi` and `gh`, so
+    each gate actually received a perturbation of 2*xi (and the candidate
+    gate received `(1 + r_t) * xi_n`, i.e. a *state-dependent* magnitude)
+    while `NodePerturbationLearner.trace_step` traced plain `xi`. Node
+    perturbation estimates the gradient from the correlation between the
+    perturbation it applied and the reward it got, so tracing a different
+    vector than the one applied miscalibrates every recurrent update, by a
+    factor that drifts with r_t for one of the three gates. It is now added
+    exactly once, to each gate's own pre-activation -- the quantity the
+    trace actually claims to have perturbed.
     """
     w_hh_eff = cell.weight_hh if getattr(cell, "mask", None) is None else cell.weight_hh * cell.mask
-    gi = x_t @ cell.weight_ih.t() + cell.bias_ih + xi_pre
-    gh = h_prev @ w_hh_eff.t() + cell.bias_hh + xi_pre
+    gi = x_t @ cell.weight_ih.t() + cell.bias_ih
+    gh = h_prev @ w_hh_eff.t() + cell.bias_hh
     i_r, i_u, i_n = gi.chunk(3, dim=-1)
     h_r, h_u, h_n = gh.chunk(3, dim=-1)
-    r_t = torch.sigmoid(i_r + h_r)
-    u_pre = i_u + h_u
+    xi_r, xi_u, xi_n = xi_pre.chunk(3, dim=-1)
+    r_t = torch.sigmoid(i_r + h_r + xi_r)
+    u_pre = i_u + h_u + xi_u
     if extra_update_bias is not None:
         u_pre = u_pre + extra_update_bias
     u_t = torch.sigmoid(u_pre)
-    n_t = torch.tanh(i_n + r_t * h_n)
+    n_t = torch.tanh(i_n + r_t * h_n + xi_n)
     h_t = (1 - u_t) * h_prev + u_t * n_t
     return h_t, u_t
 
@@ -892,6 +954,11 @@ def train_one(run: dict, cfg: dict) -> dict:
         rung = ck.get("rung", 1)
 
     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed) if L == 1 else None
+
+    # Audit addition: periodic metrics logging
+    eval_every = int(t_cfg.get("eval_every", max(500, total_steps // 30)))
+    metrics_logger = _MetricsLogger(run_id)
+
     rung_check_step = int(t_cfg["rung_check_frac"] * total_steps)
     # Second gate check, rung 2 -> 3 (e-prop): same
     # pattern as rung 1 -> 2, at a later checkpoint so rung 2 gets its own
@@ -901,6 +968,8 @@ def train_one(run: dict, cfg: dict) -> dict:
     checked_rung_2 = rung >= 3
 
     t0 = time.time()
+    running_loss = 0.0
+    loss_count = 0
     for step in range(start_step, total_steps):
         params = task_gen.curriculum_params(step, total_steps)
         phase = params["phase"]
@@ -918,24 +987,21 @@ def train_one(run: dict, cfg: dict) -> dict:
                 core_dropout_p=core_dropout_p, categories=full_cfg["task"]["categories"],
             )
             if l1_weight > 0:
-                # Performance-matched baseline "flat_gru_l1" (§4.1): L1 on
-                # the core's own weight matrices (not biases), a parameter-
-                # space regularizer rather than an activation-space one like
-                # `energy_cost_weight` -- added once per step here rather
-                # than threaded through `_run_trial`, since it doesn't
-                # depend on the trial batch or tick trajectory at all.
                 l1_term = sum(p.abs().mean() for n, p in core.named_parameters() if "weight" in n)
                 loss = loss + l1_weight * l1_term
             if dale_penalty_weight > 0:
-                # Arm D (§1.3): same "once per step, weight-space, doesn't
-                # depend on the trial batch" reasoning as the L1 term above.
                 loss = loss + dale_penalty_weight * _dale_penalty(core, S, dale_ei_split)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(front_end.parameters()) + list(core.parameters()) + list(heads.parameters()), 5.0
             )
             optimizer.step()
+            # Track training metrics
+            if loss is not None:
+                running_loss += loss.item()
+                loss_count += 1
         else:
+            grad_norm = 0.0
             dense_reward = phase == "warmup"
             correct, reward = _run_trial_local(
                 front_end, core, heads, reflective_gate, S, learners, trial_batch, image_bank,
@@ -955,6 +1021,28 @@ def train_one(run: dict, cfg: dict) -> dict:
                     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed + 200)
                 checked_rung_2 = True
 
+        # Periodic metrics logging (audit addition)
+        if (step + 1) % eval_every == 0 or step == total_steps - 1:
+            avg_loss = running_loss / max(loss_count, 1)
+            acc = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
+            metrics_logger.log({
+                "step": step + 1,
+                "phase": phase,
+                "train_loss": f"{avg_loss:.6f}",
+                "train_acc_load1": acc.get("load1", ""),
+                "train_acc_load2": acc.get("load2", ""),
+                "train_acc_load3": acc.get("load3", ""),
+                "grad_norm": f"{grad_norm:.6f}" if isinstance(grad_norm, float) else f"{grad_norm.item():.6f}",
+                "wall_s": f"{time.time() - t0:.1f}",
+            })
+            running_loss = 0.0
+            loss_count = 0
+
+            # Early stopping: all 3 loads at 1.0
+            if all(acc.get(f"load{i}", 0.0) >= 0.999 for i in (1, 2, 3)):
+                print(f"[train] early stop at step {step+1}: all loads >= 0.999", flush=True)
+                break
+
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
             torch.save(
                 {
@@ -965,6 +1053,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                 ckpt_path,
             )
 
+    metrics_logger.close()
     accuracy = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
     gates = {
         "load1>=0.95": accuracy.get("load1", 0.0) >= full_cfg["gates"]["load1_acc"],

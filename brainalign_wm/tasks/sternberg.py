@@ -20,7 +20,9 @@ import numpy as np
 
 from brainalign_wm.tasks.image_token_bank import ImageTokenBank
 
-# [WM_family, aux_family, load1, load2, load3, epoch_encode, epoch_maintain, epoch_probe, lure_flag, rule_flag]
+# [WM_family, aux_family, load1, load2, load3, epoch_encode, epoch_maintain, epoch_probe, reserved, rule_flag]
+# Index 8 was `lure_flag` until the 2026-07-26 audit and is now permanently
+# zero -- see `context_vector` for why (it leaked the answer).
 C_DIM = 10
 
 
@@ -42,7 +44,7 @@ class TrialStep:
     identity_catch_category: Optional[str] = None  # target category for the aux head, catch trials only
 
 
-def context_vector(epoch: str, lure_flag: bool, encoded_count: int = 0, aux_family: bool = False) -> list[float]:
+def context_vector(epoch: str, encoded_count: int = 0, aux_family: bool = False) -> list[float]:
     """`encoded_count` is how many items have been shown so far (1-indexed,
     incrementing as each item is presented) -- fires the load1/2/3 one-hot
     only during `encode`. Zero at every other epoch: the network must carry
@@ -51,7 +53,19 @@ def context_vector(epoch: str, lure_flag: bool, encoded_count: int = 0, aux_fami
     set for every tick of an identity-report catch trial -- the trial-
     level task-family cue, analogous to `WM_family` (which stays 1
     regardless; the trial is still fundamentally a WM trial, just with an
-    auxiliary identity readout at the query point)."""
+    auxiliary identity readout at the query point).
+
+    AUDIT 2026-07-26 -- index 8 used to broadcast `lure_flag` at the probe
+    and is now permanently zero. A lure is by construction a not-in-set
+    probe, so the cue was a hard label leak: `c[8]==1` implied "no", and
+    `c[8]==0` plus a category match implied "yes". Measured over 3000
+    generated trials, "answer NO if c[8] else YES iff probe category is in
+    the held set" scores **1.000** -- perfect accuracy with no memory of
+    item identity whatsoever, which is what produced the 1.0/1.0/1.0
+    accuracies in RUN_REPORT.md. The network is never told a probe is a
+    lure; that is the whole point of a lure. Nothing replaces the slot,
+    so C_DIM and every checkpoint shape are unchanged.
+    """
     c = [0.0] * C_DIM
     c[0] = 1.0  # WM_family (only family in Core)
     c[1] = 1.0 if aux_family else 0.0  # aux_family: identity-report catch trial (§9.4a)
@@ -60,7 +74,7 @@ def context_vector(epoch: str, lure_flag: bool, encoded_count: int = 0, aux_fami
     c[5] = 1.0 if epoch == "encode" else 0.0
     c[6] = 1.0 if epoch == "maintain" else 0.0
     c[7] = 1.0 if epoch == "probe" else 0.0
-    c[8] = 1.0 if (epoch == "probe" and lure_flag) else 0.0
+    c[8] = 0.0  # reserved (was lure_flag -- removed as a label leak, see above)
     c[9] = 0.0  # rule_flag (reserved, Extended/Stretch)
     return c
 
@@ -150,7 +164,7 @@ class SternbergGenerator:
                         in_set=(in_set if epoch in ("probe", "feedback") else None) if not is_catch else None,
                         lure_flag=is_lure,
                         image_id=image_id,
-                        c_t=context_vector(epoch, is_lure, encoded_count, aux_family=is_catch),
+                        c_t=context_vector(epoch, encoded_count, aux_family=is_catch),
                         is_identity_catch=is_catch,
                         identity_catch_category=identity_catch_category,
                     )

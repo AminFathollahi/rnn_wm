@@ -170,3 +170,127 @@ $ python -m pytest -q
   scope (matching `n_units`'s existing scope) rather than shrinking
   `flat_units` to force compliance, which would have undone the S0~S1
   parity match above.
+
+---
+
+## Phase 2 — Throughput (fixes B3)
+
+**Changed:**
+- `brainalign_wm/training/train.py::_run_trial`/`_run_trial_local`: removed
+  every `.item()` from inside the tick loop (item 2.1). `true_in_set` is
+  read once (constant per trial, per comments.txt) from the first probe
+  tick as a GPU tensor; `last_probe_action` stays a tensor through the
+  whole loop and is converted to Python exactly once, after the loop
+  (`.tolist()`), instead of via `int(action[b].item())` in a per-`b` loop
+  (B syncs/probe-tick -> 0 in-loop syncs). The one exception: the
+  feedback-tick reward, which the reflective gate's causal R_t chain needs
+  *during* the loop (drives the iti epoch) -- computed as a pure tensor
+  comparison (`(last_probe_action_t == 1) == true_in_set_t`), so still zero
+  host syncs. `_run_trial_local`'s `n_probe_matched`/`n_probe_total`
+  (dense-reward path) vectorized the same way; `n_probe_total` turned out to
+  be a scalar (identical across `b`, since the batch shares one epoch
+  schedule), not a per-`b` accumulator, once traced through.
+  Identity-catch-trial `.item()` calls (2 lines, aggregate sums, O(1) not
+  O(B) per tick, inert in Core since `identity_catch_fraction=0`) left
+  alone per the phase's own scoping.
+- New `_image_features_all_ticks` (item 2.2): builds the whole
+  `[T, B, feature_dim]` tensor once per trial batch (one host->device
+  transfer) instead of once per tick; both `_run_trial` and
+  `_run_trial_local` call it before their tick loop and index `all_v[i]`
+  inside it.
+- `configs/config.yaml`: `train.batch_size` 16 -> 128 (item 2.3,
+  [BASHIVAN24] uses 256); `train.lr` 3e-4 -> 1e-3, with the fallback-to-3e-4
+  condition noted here for Phase 3 to check against its smoke run.
+- New `brainalign_wm/training/train.py::_analytic_flops_per_tick` and
+  `_MetricsLogger.FIELDNAMES` additions (item 2.4): `ms_per_step` (median
+  over a trailing 200-step window, excluding the first 100 steps),
+  `flops_per_step` (analytic: `2*rows*cols` per 2D weight matrix in
+  front_end/core/heads, x ticks/trial x batch_size -- deterministic, not
+  measured), `peak_mem_mb` (`torch.cuda.max_memory_allocated`, peak since
+  process start, not reset per interval), `joules_cumulative` (mJ via
+  `pynvml.nvmlDeviceGetTotalEnergyConsumption`, delta from a baseline
+  captured once at run start; `pynvml` is not installed in this env, so
+  every run logs `"[train] energy: unavailable"` once and writes `""`).
+- **New per-call `cfg["batch_size"]` override** in `train_one` (not in the
+  original 2.1-2.4 list, added to resolve the OOM below): same mechanism
+  `cfg["steps"]` already uses, documented in the module's Contract
+  docstring.
+- `tests/test_training.py`: `test_cell_smoke` passes `cfg["batch_size"]=16`
+  for the two P=1 core cells (M11111, M00100); the six
+  `test_run_dict_overrides_bio_plausible_and_identity_catch` variants (base
+  cell M11111, P=1) do the same. New
+  `test_cfg_batch_size_override_takes_effect`: runs the same cell at two
+  `cfg["batch_size"]` values and asserts the logged `flops_per_step` (linear
+  in batch_size) scales exactly 2x -- an observable witness that the
+  override reaches the training loop, not just that nothing crashed.
+
+**A REAL FINDING, not a workaround: global batch_size=128 OOMs arm P.**
+`PlasticGRUCell` retains a `[B, 3H, H]` Hebbian-trace tensor through the
+*entire* BPTT unroll (~60 ticks) for every P=1 cell (M11111, M00100 in the
+Core battery). At batch_size=128 this OOMs on the 12GB RTX 5070 Ti Laptop
+GPU (confirmed reproducible in complete isolation, single fresh process,
+`test_cell_smoke[M11111]`, `torch.OutOfMemoryError`, ~10.9 GiB allocated for
+a 6-step run) -- independent of total step count, since it's a peak-memory-
+per-batch issue, not a leak. batch_size=64 fits (confirmed, full suite
+green). This is a real hardware constraint surfaced by 2.3's own mandated
+change, not something to quietly design around: **NOT silently reverted**
+the global batch_size, since 64 alone does not clear this phase's own
+acceptance threshold (see below) -- instead added the `cfg["batch_size"]`
+override above so P=1 cells can run at a safe batch (verified at 16 for
+smoke; Phase 11's real Stage 1/2 grid enumeration will need to apply a
+similar override, e.g. 64, when it builds P=1 run dicts -- flagged here so
+it isn't rediscovered by surprise as a crash mid-grid).
+
+**Acceptance — actual output.** Methodology note: an initial benchmarking
+pass reused the same `run_id` across repeated invocations, which let
+`train_one` silently RESUME from a prior invocation's checkpoint instead of
+training from scratch, and separately ran two cells sequentially in one
+process, letting the second benefit from the first's warmed cudnn/image-
+feature-cache state -- both discovered via a sanity re-check and fixed
+(`scripts/bench_throughput.py` now removes any stale checkpoint for the
+run_id before every invocation, and every measurement is a fresh Python
+process). All numbers below are from the corrected protocol: a clean
+500-step run of `M00000` (S=0) and `M10000` (S=1), fresh process per
+measurement, `torch.cuda.synchronize()` before stopping the wall clock.
+
+```
+BEFORE (HEAD 029477f, global batch_size=16):
+  S=0 (M00000): 500 steps, wall_s=29.836  -> trials/s = 268.1
+  S=1 (M10000): 500 steps, wall_s=34.998  -> trials/s = 228.6
+
+AFTER, this phase's code, global batch_size=64 (fits arm P):
+  S=0 (M00000): 500 steps, wall_s=49.664  -> trials/s = 644.3  (2.40x)
+  S=1 (M10000): 500 steps, wall_s=54.872  -> trials/s = 583.4  (2.55x)
+
+AFTER, this phase's code, global batch_size=128 (matches comments.txt 2.3
+exactly; arm P needs the cfg override above at this setting):
+  S=0 (M00000): 500 steps, wall_s=76.304  -> trials/s = 838.8  (3.13x)
+  S=1 (M10000): 500 steps, wall_s=84.980  -> trials/s = 753.1  (3.29x)
+```
+
+At batch_size=128 (the literal value comments.txt 2.3 specifies), BOTH
+cells clear the >=3x target (3.13x, 3.29x). At batch_size=64 (the value
+that fits arm P without the override), neither does (2.40x, 2.55x) --
+profiled reason: removing the per-tick device syncs saves a roughly FIXED
+wall-clock cost per run, independent of batch size, while the actual
+compute (matmul cost) scales with batch_size; a 4x batch bump (16->64)
+adds enough real compute that it dilutes the fixed-overhead saving's
+relative contribution below 3x, whereas an 8x bump (16->128) still leaves
+the sync-removal saving large enough to clear it. Kept the global config at
+128 (matching the phase's own acceptance criterion and comments.txt's
+explicit instruction) and used the `cfg["batch_size"]` override, not a
+lower global default, to keep arm P running -- config.yaml's global value
+IS what was benchmarked above as meeting acceptance.
+
+```
+$ python -m pytest
+157 passed, 5 warnings in 70.66s
+```
+
+**Not done / deferred:**
+- Arm-P cells' *real* (non-smoke) training runs will need
+  `cfg["batch_size"]` set below 128 when Phase 11 builds their run dicts;
+  64 is confirmed to fit and is the natural default to reuse there.
+- `lr: 1.0e-3` is unverified for training stability at the new batch size
+  -- comments.txt 2.3 says to fall back to 3e-4 "if the Phase 3 smoke run
+  is unstable"; Phase 3 owns checking this.

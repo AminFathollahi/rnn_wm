@@ -11,21 +11,25 @@ network (an LM-RNN, following Khona & Chandra 2023).
         h^m_t = GRU(s_t, h^m_{t-1})                     -- manager ticks only
         g_t = W_g . h^m_t                               -- top-down context
 
-Manager update timing (modulation factor M; the resolution of this design
-choice below):
-  M=0 (no reflective gate): a hard periodic clock. The manager GRU runs
-      only every `manager_period` steps; on other steps h^m_t = h^m_{t-1}
-      exactly (state held, with no gradient path through a no-op step).
-  M=1 (reflective gate): the manager runs its GRU cell on every step, but
-      its update-gate pre-activation receives an additive `beta*R_t` bias
-      from `mechanisms.reflective_gate.ReflectiveGate`. This makes the
-      effective update rate continuous and reflection-driven rather than a
-      fixed clock: a low R_t keeps u_t near 0 (state held, soft
-      persistence), while a run of surprising events (high load, a lure, or
-      an error) raises R_t, driving u_t toward 1 so the manager overwrites
-      its state and propagates a new top-down signal g_t to the worker.
-      This gives the manager an event-gated update rule without requiring a
-      separate discrete tick/no-tick decision.
+Manager update timing (modulation factor M; Phase 4/A4 fix, comments.txt
+§5): the manager ticks on the SAME hard clock (`t % manager_period == 0`)
+regardless of M, so M never changes the manager's update RATE -- only what
+happens ON a tick:
+  M=0: on a tick, the manager GRU runs with no bias term.
+  M=1 (reflective gate): on a tick, the manager's update-gate
+      pre-activation receives an additive `beta*R_t` bias from
+      `mechanisms.reflective_gate.ReflectiveGate`, biasing u_t toward 1
+      (overwrite) under a run of surprising events (high load, a lure, an
+      error) and leaving it near its unbiased value otherwise.
+  Off-tick, for BOTH M=0 and M=1: h^m_t = h^m_{t-1} exactly (state held, no
+      gradient path through a no-op step).
+Before this fix, M=1 ran the manager GRU every step (no clock at all) while
+M=0 used the `manager_period` clock -- a 5x update-rate confound stacked on
+top of the reflection-bias manipulation, making any M effect
+uninterpretable (which of the two caused it?). `manager_every_tick: true`
+(config `model.manager_every_tick`) restores the old always-every-step
+behavior as an explicit, opt-in supplementary arm -- never the definition
+of M itself.
 """
 from __future__ import annotations
 
@@ -55,6 +59,7 @@ class HRLCore(nn.Module):
         pbwm_gate: bool = False,
         reflection_beta: float = 1.0,
         mask_seed: int = 0,
+        manager_every_tick: bool = False,
     ):
         super().__init__()
         gh, gw = grid
@@ -71,6 +76,10 @@ class HRLCore(nn.Module):
         self.reflective = reflective
         self.plastic = plastic
         self.pbwm_gate = pbwm_gate
+        # Phase 4 (A4 fix): supplementary arm restoring the pre-fix
+        # every-step manager update, for both M=0 and M=1 -- never the
+        # definition of M (see module docstring).
+        self.manager_every_tick = manager_every_tick
 
         mask = make_locality_mask(grid, density, seed=mask_seed)
         self.register_buffer("worker_mask", mask)
@@ -145,17 +154,28 @@ class HRLCore(nn.Module):
             h_w_t, _ = self.worker(worker_in, h_w_prev)
 
         s_t = self.pool_worker(h_w_t)
+        # Phase 4 (A4 fix): ONE tick decision shared by every manager
+        # variant -- M only changes what happens ON a tick (a bias term),
+        # never whether/how often a tick happens.
+        is_tick = self.manager_every_tick or (t % self.manager_period == 0)
         if self.pbwm_gate:
             if R_t is None:
                 raise ValueError("pbwm_gate=True requires R_t (raw reflection signal) every step")
-            h_m_t, c_m_t, u_t = self.manager(s_t, h_m_prev, state["c_manager"], R_t)
+            if is_tick:
+                h_m_t, c_m_t, u_t = self.manager(s_t, h_m_prev, state["c_manager"], R_t)
+            else:
+                h_m_t, c_m_t = h_m_prev, state["c_manager"]
+                u_t = torch.zeros(h_m_prev.shape[0], self.manager_units, device=h_m_prev.device)
             new_state["c_manager"] = c_m_t
         elif self.reflective:
             if gate_bias is None:
                 raise ValueError("reflective=True requires gate_bias (beta*R_t) every step")
-            h_m_t, u_t = self.manager(s_t, h_m_prev, extra_update_bias=gate_bias)
+            if is_tick:
+                h_m_t, u_t = self.manager(s_t, h_m_prev, extra_update_bias=gate_bias)
+            else:
+                h_m_t = h_m_prev
+                u_t = torch.zeros(h_m_prev.shape[0], self.manager_units, device=h_m_prev.device)
         else:
-            is_tick = (t % self.manager_period) == 0
             if is_tick:
                 h_m_t, u_t = self.manager(s_t, h_m_prev)
             else:

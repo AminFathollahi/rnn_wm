@@ -228,6 +228,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
             grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
             g_dim=m["g_dim"], pool_block=m["worker_pool_block"], reflective=bool(M), plastic=bool(P),
             hebb_kwargs=hebb_kwargs, pbwm_gate=pbwm_gate, reflection_beta=mech["reflection_beta"],
+            manager_every_tick=bool(m.get("manager_every_tick", False)),
         ).to(device)
         h_star_dim = m["worker_units"] + m["manager_units"]
     identity_catch_fraction = float(full_cfg["task"].get("identity_catch_fraction", 0.0))
@@ -767,16 +768,21 @@ def _run_trial_local(
                     h_w_t, _ = _perturbed_gru_step(core.worker, worker_in, h_w_prev, xi_w)
 
                 s_t = core.pool_worker(h_w_t)
+                # Phase 4 (A4 fix): same unified tick gate as HRLCore.forward
+                # -- the manager clock is identical for M=0/M=1, only the
+                # on-tick bias differs. Previously this branch ran the
+                # manager every step whenever `reflective_gate is not None`
+                # (M=1), ignoring `manager_period` entirely.
+                is_tick = core.manager_every_tick or (i % core.manager_period == 0)
                 if is_eprop:
-                    if reflective_gate is not None:
-                        h_m_t, _, pd_m = _eprop_gru_step(core.manager, s_t, h_m_prev, extra_update_bias=gate_bias)
-                    else:
-                        is_tick = (i % core.manager_period) == 0
-                        if is_tick:
-                            h_m_t, _, pd_m = _eprop_gru_step(core.manager, s_t, h_m_prev)
+                    if is_tick:
+                        if reflective_gate is not None:
+                            h_m_t, _, pd_m = _eprop_gru_step(core.manager, s_t, h_m_prev, extra_update_bias=gate_bias)
                         else:
-                            h_m_t = h_m_prev
-                            pd_m = torch.zeros(B, 3 * core.manager_units, device=device)
+                            h_m_t, _, pd_m = _eprop_gru_step(core.manager, s_t, h_m_prev)
+                    else:
+                        h_m_t = h_m_prev
+                        pd_m = torch.zeros(B, 3 * core.manager_units, device=device)
                     if "manager" in learners:
                         learners["manager"].trace_step(pd_m, h_prev=h_m_prev, x_t=s_t)
                 else:
@@ -784,14 +790,13 @@ def _run_trial_local(
                         xi_m = learners["manager"].sample_perturbation((B, 3 * core.manager_units), device=device)
                     else:
                         xi_m = torch.zeros(B, 3 * core.manager_units, device=device)
-                    if reflective_gate is not None:
-                        h_m_t, _ = _perturbed_gru_step(core.manager, s_t, h_m_prev, xi_m, extra_update_bias=gate_bias)
-                    else:
-                        is_tick = (i % core.manager_period) == 0
-                        if is_tick:
-                            h_m_t, _ = _perturbed_gru_step(core.manager, s_t, h_m_prev, xi_m)
+                    if is_tick:
+                        if reflective_gate is not None:
+                            h_m_t, _ = _perturbed_gru_step(core.manager, s_t, h_m_prev, xi_m, extra_update_bias=gate_bias)
                         else:
-                            h_m_t = h_m_prev
+                            h_m_t, _ = _perturbed_gru_step(core.manager, s_t, h_m_prev, xi_m)
+                    else:
+                        h_m_t = h_m_prev
                     if "manager" in learners:
                         learners["manager"].trace_step(xi_m, h_prev=h_m_prev, x_t=s_t)
                 g_t = core.g_proj(h_m_t)

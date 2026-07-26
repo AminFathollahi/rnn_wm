@@ -22,9 +22,15 @@ Contract:
              from configs/config.yaml, since `run_grid.py` only threads the
              tier subset through.
       returns {"status": "completed"|"failed",
-               "gates": {"load1>=0.95": bool, "load3>=0.80": bool},
-               "accuracy": {"load1": float, "load2": float, "load3": float},
-               "rung": int}
+               "gates": {"load1>=0.94": bool, "load2>=0.91": bool, "load3>=0.86": bool},  # final-eval snapshot
+               "accuracy": {"load1": float, "load1_ci_lo": float, "load1_ci_hi": float, ...},  # final_evaluation, n=500
+               "rung": int,
+               # Phase 3 (A3, §3): train-to-criterion. All four are None until the
+               # criterion holds for `gates.consecutive_evals` consecutive periodic
+               # evals; never substituted afterward if it's never met.
+               "criterion_met": bool, "steps_to_criterion": int | None,
+               "trials_to_criterion": int | None, "wall_s_to_criterion": float | None,
+               "joules_to_criterion": float | None, "ms_per_step": float | None}
 
 Design decisions made to resolve underspecified aspects of the training
 procedure:
@@ -33,7 +39,7 @@ procedure:
     `phase` field ("warmup"/"ramp"/"target") gives both a comparable
     reward density, since comparing credit-assignment mechanisms is only
     meaningful if both train on the same signal:
-      * **warmup** (first `task.curriculum.warmup_frac` of steps): BPTT
+      * **warmup** (first `task.curriculum.warmup_steps` steps): BPTT
         cells use dense per-tick cross-entropy (imitation of the ideal
         policy; tractability warmup, not part of the controlled
         comparison). Local-learning cells keep their normal per-trial
@@ -87,6 +93,7 @@ from __future__ import annotations
 
 import csv
 import statistics
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -98,6 +105,16 @@ import torch.nn.functional as F
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+# `scripts/` has no __init__.py (namespace package) and is only on sys.path
+# when the interpreter's own entry point lives at the repo root (e.g. `python
+# run_grid.py`, or pytest's rootdir insertion) -- NOT when a script inside
+# scripts/ itself is the entry point (`python scripts/bench_throughput.py`
+# puts `scripts/`, not ROOT, at sys.path[0]). Ensure it unconditionally so
+# `from scripts.human_behavior_gates import wilson_ci` below works from
+# every caller of this module.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.human_behavior_gates import wilson_ci  # noqa: E402
 
 
 class _MetricsLogger:
@@ -866,31 +883,43 @@ def _make_local_learners(core, heads, S: int, mech_cfg: dict, rung: int, seed: i
     return learners
 
 
-def evaluate_accuracy(front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device) -> dict:
-    """Match/non-match accuracy per load, plus `acc["identity_catch"]`
-    (§9.4a identity-report accuracy over catch trials, present only when
+def evaluate_accuracy(
+    front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device,
+    n_trials: int, eval_seed: int,
+) -> dict:
+    """Match/non-match accuracy per load, with a Wilson 95% CI (Phase 3,
+    comments.txt §3 MEASUREMENT), plus `acc["identity_catch"]` (§9.4a
+    identity-report accuracy over catch trials, present only when
     `heads.identity_aux is not None`). Catch trials carry no real in/out
     judgment (`_run_trial`'s `correct` entry for them is a meaningless
     always-"incorrect" placeholder), so they are excluded from the
-    match/non-match denominator here to keep `load{N}` gates meaningful."""
+    match/non-match denominator here to keep `load{N}` gates meaningful.
+
+    `eval_seed` must come from a stream disjoint from training (a fresh
+    value every call -- e.g. an incrementing per-run counter) so trials are
+    not the same fixed set on every evaluation forever (the A3 bug this
+    replaces: `hash((load, k, 999))` drew the identical 120 trials on every
+    call, in every run, letting training accuracy be gamed by memorizing the
+    eval set). One `np.random.RandomState(eval_seed)` derives every trial's
+    seed for this call, deterministically from `eval_seed` alone and without
+    touching `task_gen`'s own RNG (used for training batches)."""
     m = cfg["model"]
     eval_batch_size = int(cfg["train"].get("eval_batch_size", 8))
     identity_catch_fraction = float(cfg["task"].get("identity_catch_fraction", 0.0))
     categories = cfg["task"]["categories"] if heads.identity_aux is not None else None
+    master_rng = np.random.RandomState(eval_seed)
     acc = {}
     id_correct_total, id_total_total = 0, 0
     for load in cfg["task"]["loads"]:
-        n_trials = cfg["train"]["eval_trials_per_load"]
         n_correct = 0
         n_non_catch = 0
         n_done = 0
         while n_done < n_trials:
             bsz = min(eval_batch_size, n_trials - n_done)
             batch = []
-            for k in range(bsz):
-                from brainalign_wm.tasks.sternberg import SternbergGenerator  # noqa: F401 (imported for parity with prior behavior)
-
-                rng = np.random.RandomState(hash((load, n_done + k, 999)) & 0xFFFFFFFF)
+            for _ in range(bsz):
+                trial_seed = int(master_rng.randint(0, 2**31 - 1))
+                rng = np.random.RandomState(trial_seed)
                 steps = task_gen.sternberg.generate_trial(
                     rng, loads=[load], lure_fraction=cfg["task"]["lure_fraction"],
                     maintain_steps=cfg["task"]["maintain_steps"], trial_id=-1, split="test",
@@ -912,9 +941,27 @@ def evaluate_accuracy(front_end, core, heads, S: int, P: int, reflective_gate, t
                 id_total_total += identity_catch["total"]
             n_done += bsz
         acc[f"load{load}"] = round(n_correct / n_non_catch, 4) if n_non_catch else 0.0
+        ci_lo, ci_hi = wilson_ci(n_correct, n_non_catch)
+        acc[f"load{load}_ci_lo"] = round(ci_lo, 4)
+        acc[f"load{load}_ci_hi"] = round(ci_hi, 4)
     if categories is not None:
         acc["identity_catch"] = round(id_correct_total / id_total_total, 4) if id_total_total else 0.0
     return acc
+
+
+def final_evaluation(front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device, seed: int) -> dict:
+    """The once-per-run, report-worthy final number (Phase 3 item 3.2):
+    n=`train.final_eval_trials_per_load` (500) per load, at a fixed
+    `eval_seed` derived from the run's own seed with a large offset that no
+    periodic-eval counter (incrementing from 0 during training) will ever
+    reach, so this evaluation's trials are guaranteed disjoint from every
+    periodic eval_seed used earlier in the same run."""
+    n_trials = int(cfg["train"]["final_eval_trials_per_load"])
+    eval_seed = 900_000_000 + seed
+    return evaluate_accuracy(
+        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, cfg, device,
+        n_trials=n_trials, eval_seed=eval_seed,
+    )
 
 
 def train_one(run: dict, cfg: dict) -> dict:
@@ -997,8 +1044,11 @@ def train_one(run: dict, cfg: dict) -> dict:
 
     stimuli_root = ROOT / full_cfg["paths"]["stimuli"]
     if not stimuli_root.exists():
+        _crit = full_cfg["gates"]["criterion"]
         return {"status": "failed", "error": f"stimuli pool missing at {stimuli_root}; run scripts/build_stimuli_pool.py",
-                "gates": {"load1>=0.95": False, "load3>=0.80": False}, "accuracy": {}, "rung": 0}
+                "gates": {f"{k}>={v}": False for k, v in _crit.items()}, "accuracy": {}, "rung": 0,
+                "criterion_met": False, "steps_to_criterion": None, "trials_to_criterion": None,
+                "wall_s_to_criterion": None, "joules_to_criterion": None, "ms_per_step": None}
 
     image_bank = ImageTokenBank(
         stimuli_root=stimuli_root, categories=full_cfg["task"]["categories"],
@@ -1061,6 +1111,30 @@ def train_one(run: dict, cfg: dict) -> dict:
     rung_check_step_2 = int(t_cfg.get("rung_check_frac_2", 0.75) * total_steps)
     checked_rung_1 = rung >= 2
     checked_rung_2 = rung >= 3
+    eval_trials_per_load = int(t_cfg["eval_trials_per_load"])
+    criterion = full_cfg["gates"]["criterion"]
+    consecutive_evals_required = int(full_cfg["gates"]["consecutive_evals"])
+    task_loads = full_cfg["task"]["loads"]
+
+    # Phase 3 (A3): every `evaluate_accuracy` call in this run (rung checks,
+    # periodic logging) gets a fresh eval_seed from an incrementing counter
+    # scoped to `seed` -- disjoint from `final_evaluation`'s fixed
+    # `900_000_000 + seed` and, for any of this study's actual seeds (0-4),
+    # nowhere near it even at the max ~300 periodic calls a 150k-step run
+    # makes at eval_every>=500.
+    eval_call_counter = 0
+    # Train-to-criterion (§3): a streak of `consecutive_evals_required`
+    # periodic evaluations all meeting `criterion`. Recorded once, at the
+    # step of the CONFIRMING (last-in-streak) evaluation -- the first eval
+    # in a streak isn't yet distinguishable from a fluke a later eval could
+    # refute -- and never overwritten afterward. Training still runs to
+    # `total_steps` regardless (no early stop).
+    consecutive_criterion_evals = 0
+    criterion_met = False
+    steps_to_criterion = None
+    trials_to_criterion = None
+    wall_s_to_criterion = None
+    joules_to_criterion = None
 
     t0 = time.time()
     running_loss = 0.0
@@ -1105,14 +1179,22 @@ def train_one(run: dict, cfg: dict) -> dict:
                 dense_reward=dense_reward,
             )
             if not checked_rung_1 and step >= rung_check_step:
-                interim = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
-                if interim.get("load1", 0.0) < full_cfg["gates"]["load1_acc"]:
+                eval_call_counter += 1
+                interim = evaluate_accuracy(
+                    front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device,
+                    n_trials=eval_trials_per_load, eval_seed=seed * 1_000_000 + eval_call_counter,
+                )
+                if interim.get("load1", 0.0) < criterion["load1"]:
                     rung = 2
                     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed + 100)
                 checked_rung_1 = True
             elif checked_rung_1 and not checked_rung_2 and rung == 2 and step >= rung_check_step_2:
-                interim = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
-                if interim.get("load1", 0.0) < full_cfg["gates"]["load1_acc"]:
+                eval_call_counter += 1
+                interim = evaluate_accuracy(
+                    front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device,
+                    n_trials=eval_trials_per_load, eval_seed=seed * 1_000_000 + eval_call_counter,
+                )
+                if interim.get("load1", 0.0) < criterion["load1"]:
                     rung = 3
                     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed + 200)
                 checked_rung_2 = True
@@ -1125,7 +1207,11 @@ def train_one(run: dict, cfg: dict) -> dict:
         # Periodic metrics logging (audit addition)
         if (step + 1) % eval_every == 0 or step == total_steps - 1:
             avg_loss = running_loss / max(loss_count, 1)
-            acc = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
+            eval_call_counter += 1
+            acc = evaluate_accuracy(
+                front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device,
+                n_trials=eval_trials_per_load, eval_seed=seed * 1_000_000 + eval_call_counter,
+            )
             if _nvml_handle is not None:
                 joules_cumulative = pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
             else:
@@ -1147,10 +1233,26 @@ def train_one(run: dict, cfg: dict) -> dict:
             running_loss = 0.0
             loss_count = 0
 
-            # Early stopping: all 3 loads at 1.0
-            if all(acc.get(f"load{i}", 0.0) >= 0.999 for i in (1, 2, 3)):
-                print(f"[train] early stop at step {step+1}: all loads >= 0.999", flush=True)
-                break
+            # Train-to-criterion (§3, Phase 3 item 3.4): NO early stop --
+            # training always continues to total_steps. Track the
+            # consecutive-pass streak and record the sample-efficiency
+            # numbers exactly once, at the confirming (3rd-in-a-row) eval.
+            if not criterion_met:
+                if all(acc.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads):
+                    consecutive_criterion_evals += 1
+                else:
+                    consecutive_criterion_evals = 0
+                if consecutive_criterion_evals >= consecutive_evals_required:
+                    criterion_met = True
+                    steps_to_criterion = step + 1
+                    trials_to_criterion = steps_to_criterion * batch_size
+                    wall_s_to_criterion = round(time.time() - t0, 1)
+                    joules_to_criterion = (
+                        pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
+                        if _nvml_handle is not None else None
+                    )
+                    print(f"[train] criterion met at step {steps_to_criterion} "
+                          f"({consecutive_evals_required} consecutive evals); continuing to {total_steps}.", flush=True)
 
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
             torch.save(
@@ -1163,12 +1265,19 @@ def train_one(run: dict, cfg: dict) -> dict:
             )
 
     metrics_logger.close()
-    accuracy = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
-    gates = {
-        "load1>=0.95": accuracy.get("load1", 0.0) >= full_cfg["gates"]["load1_acc"],
-        "load3>=0.80": accuracy.get("load3", 0.0) >= full_cfg["gates"]["load3_acc"],
-    }
+    accuracy = final_evaluation(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed)
+    # Redundant-but-harmless snapshot of the FINAL evaluation against the
+    # same per-load thresholds (kept since run_grid.py's report already
+    # renders it); `criterion_met` above is the authoritative sustained-
+    # performance measure this phase adds.
+    gates = {f"load{i}>={criterion[f'load{i}']}": accuracy.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads}
     return {
         "status": "completed", "gates": gates, "accuracy": accuracy,
         "rung": rung if L == 1 else 0, "wall_clock_train_s": round(time.time() - t0, 1),
+        "criterion_met": criterion_met,
+        "steps_to_criterion": steps_to_criterion,
+        "trials_to_criterion": trials_to_criterion,
+        "wall_s_to_criterion": wall_s_to_criterion,
+        "joules_to_criterion": joules_to_criterion,
+        "ms_per_step": round(1000 * statistics.median(step_durations), 3) if step_durations else None,
     }

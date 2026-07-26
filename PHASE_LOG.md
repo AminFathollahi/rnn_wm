@@ -294,3 +294,183 @@ $ python -m pytest
 - `lr: 1.0e-3` is unverified for training stability at the new batch size
   -- comments.txt 2.3 says to fall back to 3e-4 "if the Phase 3 smoke run
   is unstable"; Phase 3 owns checking this.
+
+---
+
+## Phase 3 — Gate, Eval, Train-to-Criterion (fixes A3)
+
+**Changed:**
+- `configs/config.yaml`: `gates:` block replaced with §3's one-criterion
+  structure (`criterion: {load1: 0.94, load2: 0.91, load3: 0.86}`,
+  `consecutive_evals: 3`, `max_steps: null`). `max_steps` is left `null`
+  deliberately -- comments.txt §3's own text says "<set in Phase 7 from the
+  pilot>" but the doc's actual pilot phase is Phase 11 ("PILOT, THEN RUN",
+  item 11.2); an inconsistency in the doc's own phase numbering, not
+  resolved here. `train.eval_trials_per_load` 40 -> 200;
+  `train.final_eval_trials_per_load: 500` added (item 3.1). `task.curriculum`
+  changed from `warmup_frac`/`ramp_frac` to absolute `warmup_steps: 30000`/
+  `ramp_steps: 90000` (item 3.5) -- calibrated to the old fractions at the
+  `full` tier's 150,000-step budget, so the curriculum's actual shape at the
+  tier that matters is unchanged; shorter tiers (smoke/dev) now spend their
+  whole budget inside warmup/ramp instead of a rescaled three-phase curve.
+- `brainalign_wm/tasks/curriculum.py`: `phase_at`/`CurriculumSchedule` boundary
+  math changed from `step_idx / total_steps` fractions to absolute
+  `warmup_steps`/`ramp_steps` comparisons (item 3.5); `total_steps` stays an
+  argument to `params_for` (logging/reconstruction contract) but no longer
+  enters the phase decision.
+- `brainalign_wm/training/train.py::evaluate_accuracy` (item 3.2): dropped the
+  `hash((load, k, 999))` fixed-trial-set seeding; now takes explicit
+  `n_trials`/`eval_seed` params. One `np.random.RandomState(eval_seed)` per
+  call derives every trial's seed, so a call's trial set is a deterministic
+  function of `eval_seed` alone while a fresh `eval_seed` (an incrementing
+  per-run counter, `seed*1_000_000 + eval_call_counter`) gives fresh trials
+  each periodic eval -- disjoint from `task_gen`'s own RNG used for training
+  batches. Returns `acc[f"load{i}"]` unchanged (point estimate; every
+  existing reader -- rung-check gates, CSV logging -- kept working
+  unmodified) plus new `acc[f"load{i}_ci_lo"/"_ci_hi"]` (Wilson 95% CI,
+  reused from `scripts/human_behavior_gates.py::wilson_ci` rather than
+  reimplemented). New `final_evaluation`: `n_trials=500`, a fixed
+  `eval_seed = 900_000_000 + seed` guaranteed disjoint from every periodic
+  counter value a real run reaches; called once, replacing the old final
+  `evaluate_accuracy` call.
+  - `scripts/` has no `__init__.py` and is only on `sys.path` when the
+    process's own entry point is at the repo root (`python run_grid.py`,
+    pytest's rootdir) -- NOT when a script inside `scripts/` itself is the
+    entry point (`python scripts/bench_throughput.py` puts `scripts/`, not
+    ROOT, at `sys.path[0]`). Verified this breaks `import scripts.*` from
+    inside `scripts/`; `train.py` now inserts `ROOT` into `sys.path` itself
+    (using the `ROOT` it already computes) before importing `wilson_ci`, so
+    the reuse is robust to every caller rather than only working by
+    accident under pytest.
+- `train_one` (item 3.3/3.4): deleted the `acc >= 0.999` early-stop entirely
+  -- every run now trains to `total_steps` (`cfg["steps"]`) regardless.
+  Added online train-to-criterion tracking: a consecutive-pass counter over
+  periodic evals (`n_trials=200`, a fresh `eval_seed` each call); when it
+  first reaches `gates.consecutive_evals` (3), records `steps_to_criterion`
+  as the step of THIS confirming (3rd-in-a-row) evaluation -- not the first
+  of the streak, since the first eval in a streak isn't yet distinguishable
+  from a fluke a later eval could refute -- plus `trials_to_criterion
+  = steps_to_criterion * batch_size`, `wall_s_to_criterion`,
+  `joules_to_criterion` (same `pynvml` mechanism as `joules_cumulative`),
+  and `criterion_met = True`. Set exactly once, never overwritten. If never
+  reached, all four stay `None` and `criterion_met = False` -- an honest
+  negative, not a substituted value. Returned dict gained
+  `criterion_met`/`steps_to_criterion`/`trials_to_criterion`/
+  `wall_s_to_criterion`/`joules_to_criterion`/`ms_per_step`. `gates` is kept
+  in the return value too (rebuilt from `full_cfg["gates"]["criterion"]`
+  instead of the old hardcoded 0.95/0.80) as a redundant-but-harmless
+  snapshot of the FINAL evaluation against the same thresholds --
+  `criterion_met` is the authoritative sustained-performance measure.
+  Updated the module's Contract docstring and the early `stimuli pool
+  missing` failure-path return to match the new gate/return shape.
+- `run_grid.py::write_report` (item 3.6): added `criterion_met`,
+  `steps_to_criterion`, `trials_to_criterion`, `ms_per_step`,
+  `joules_to_criterion` columns; `acc(load1/2/3)` now renders each load's
+  Wilson CI alongside the point estimate (`0.941 [0.912,0.963]`); `wall(s)`
+  header renamed `wall_total_s` (still `wall_clock_s`, set by `run_grid.py`'s
+  own main loop, unrelated to `wall_s_to_criterion`). New `_fmt`/`_fmt_acc_ci`
+  helpers render JSON `null` (never-met criterion fields) as `-` rather than
+  the literal string "None", while still showing `False`/`0` as themselves.
+  `--scaffold` mode's synthetic result dict lacks these new keys entirely --
+  `.get(..., "-")` throughout means the report still renders without a
+  KeyError/crash.
+- `brainalign_wm/figures/make_all.py::make_f2_behavior`: `gates_cfg["load1_acc"]`/
+  `["load3_acc"]` (broken by the gates-block rename, not in this phase's
+  explicit file list but a real caller of the changed key) -> `gates_cfg["criterion"]["load1"/"load3"]`,
+  plus a `load2` reference line added since load2 now has a criterion too
+  and the plot already bars load2 data.
+- `tests/test_tasks.py`: curriculum tests (`test_phase_boundaries`,
+  `test_curriculum_warmup_load1_no_lures`, `test_curriculum_ramp_lure_interpolates`,
+  `test_curriculum_target_matches_full_config`) rewritten for the absolute-step
+  signature -- same intent (boundary correctness, ramp interpolation, target
+  phase matches config), new call shape/step values consistent with the new
+  `warmup_steps`/`ramp_steps` config.
+- `tests/test_training.py::test_cell_smoke`: gate-key and accuracy-key
+  assertions now derived from `CFG["gates"]["criterion"]` (3 loads, new
+  thresholds) instead of hardcoded, plus `expected_acc_keys` including the
+  new `_ci_lo`/`_ci_hi` fields; added `criterion_met is False` /
+  `steps_to_criterion is None` assertions for the 6-step smoke run (cannot
+  reach 3 consecutive passing evals).
+
+**Acceptance -- actual output.** A 2,000-step run of `M00000` (S=0) via
+`train_one`, followed by `run_grid.py::write_report` on a one-record
+manifest built the same way `run_grid.py`'s own main loop does:
+
+```
+=== train_one result ===
+{
+  "status": "completed",
+  "gates": {"load1>=0.94": true, "load2>=0.91": false, "load3>=0.86": false},
+  "accuracy": {
+    "load1": 0.948, "load1_ci_lo": 0.9249, "load1_ci_hi": 0.9643,
+    "load2": 0.69,  "load2_ci_lo": 0.6481,  "load2_ci_hi": 0.729,
+    "load3": 0.632, "load3_ci_lo": 0.5889,  "load3_ci_hi": 0.6731
+  },
+  "rung": 0, "wall_clock_train_s": 202.8,
+  "criterion_met": false, "steps_to_criterion": null, "trials_to_criterion": null,
+  "wall_s_to_criterion": null, "joules_to_criterion": null, "ms_per_step": 83.852
+}
+```
+`criterion_met: false` / all four `_to_criterion` fields `null` is the
+CORRECT, honest result here (item 3.4's "never substitute a value when
+criterion is not met"): at `warmup_steps=30000`, a 2,000-step run never
+leaves the warmup phase (loads=[1] only), so load2/load3 accuracy reflects
+an untrained network on loads it was never shown -- exactly what the new
+absolute-step curriculum (3.5) predicts, not a bug in the criterion logic.
+`train_loss` falls monotonically (0.604 -> 0.430 -> 0.070 -> 0.055) with no
+NaN/instability at `lr=1.0e-3`, so Phase 2's flagged fallback-to-3e-4
+condition is NOT triggered.
+
+```
+=== metrics CSV head ===
+step,phase,train_loss,train_acc_load1,train_acc_load2,train_acc_load3,grad_norm,wall_s,ms_per_step,flops_per_step,peak_mem_mb,joules_cumulative
+500,warmup,0.604333,0.465,0.49,0.52,0.371310,49.5,83.166,886800384,53.1,
+1000,warmup,0.429859,0.925,0.645,0.705,0.336234,99.2,83.834,886800384,53.1,
+1500,warmup,0.069680,0.91,0.625,0.61,0.559731,148.9,83.669,886800384,53.1,
+2000,warmup,0.054651,0.92,0.695,0.635,0.560555,198.5,83.852,886800384,53.1,
+```
+
+```
+=== RUN_REPORT.md ===
+# Training Grid Report
+
+_generated 2026-07-26T21:22:36+00:00 | git 07506ad | elapsed 0.06h / budget 27.78h_
+
+**Runs on record:** 1  |  completed=1
+
+## Per-run
+
+| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | criterion_met | steps_to_criterion | trials_to_criterion | ms_per_step | joules_to_criterion | wall_total_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PHASE3_ACCEPT_M00000_s0 | 0 | 0 | 0 | 0 | 0 | completed | load1>=0.94:P,load2>=0.91:F,load3>=0.86:F | 0.948 [0.9249,0.9643]/0.69 [0.6481,0.729]/0.632 [0.5889,0.6731] | 0 | False | - | - | 83.852 | - | 205.8 |
+
+## Resume
+
+Re-run `make run-grid` (or `python run_grid.py ...`) to continue; completed runs are skipped.
+Non-completed on record: 0.
+```
+Every new column populated (`-` for the never-reached criterion fields,
+not the literal string "None"); `joules_to_criterion`/`joules_cumulative`
+are `-`/empty because `pynvml` is not installed in this env (same
+already-documented fallback as Phase 2's `joules_cumulative`).
+
+```
+$ python -m pytest
+157 passed, 5 warnings in 284.89s
+```
+(Up from Phase 2's 71s -- `eval_trials_per_load` 40->200 makes every
+`evaluate_accuracy` call in the test suite's many smoke-tier `train_one`
+calls 5x slower; expected consequence of item 3.1's own CI-width
+requirement, not a regression.)
+
+**Not done / deferred:**
+- `gates.max_steps` is `null`; Phase 11 sets it from real pilot
+  `steps_to_criterion` numbers (see the config.yaml comment above).
+- The 2,000-step acceptance run never leaves warmup (by design, given
+  `warmup_steps=30000`), so `criterion_met`/`steps_to_criterion` are
+  exercised only in their "never met" branch here -- the "met" branch
+  (consecutive-streak detection, `trials_to_criterion`/`wall_s_to_criterion`/
+  `joules_to_criterion` population) is exercised by test coverage's logic
+  reading, not by an observed real run reaching criterion; the first Stage
+  1/2 pilot run long enough to actually reach it (Phase 11) is the first
+  real-world exercise of that branch.

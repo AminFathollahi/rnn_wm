@@ -87,17 +87,21 @@ def test_probe_context_vector_does_not_leak_the_answer():
 
 
 # ---------------- curriculum (no ImageTokenBank needed) ----------------
+# Phase 3 (comments.txt §5 item 3.5): boundaries are absolute step counts,
+# not fractions of total_steps -- `total_steps` no longer enters the phase
+# decision (kept only as a pass-through field on the returned dict).
 
 def test_phase_boundaries():
-    assert phase_at(0, 1000, warmup_frac=0.2, ramp_frac=0.6) == "warmup"
-    assert phase_at(199, 1000, warmup_frac=0.2, ramp_frac=0.6) == "warmup"
-    assert phase_at(500, 1000, warmup_frac=0.2, ramp_frac=0.6) == "ramp"
-    assert phase_at(999, 1000, warmup_frac=0.2, ramp_frac=0.6) == "target"
+    assert phase_at(0, warmup_steps=200, ramp_steps=600) == "warmup"
+    assert phase_at(199, warmup_steps=200, ramp_steps=600) == "warmup"
+    assert phase_at(200, warmup_steps=200, ramp_steps=600) == "ramp"
+    assert phase_at(799, warmup_steps=200, ramp_steps=600) == "ramp"
+    assert phase_at(800, warmup_steps=200, ramp_steps=600) == "target"
 
 
 def test_curriculum_warmup_load1_no_lures():
     sched = CurriculumSchedule.from_config(FULL_CFG)
-    p = sched.params_for(0, 1000)
+    p = sched.params_for(0, sched.warmup_steps + sched.ramp_steps + 1000)
     assert p["phase"] == "warmup"
     assert p["loads"] == [1]
     assert p["lure_fraction"] == 0.0
@@ -106,9 +110,9 @@ def test_curriculum_warmup_load1_no_lures():
 
 def test_curriculum_ramp_lure_interpolates():
     sched = CurriculumSchedule.from_config(FULL_CFG)
-    total = 1000
-    warmup_end = int(sched.warmup_frac * total)
-    ramp_end = int((sched.warmup_frac + sched.ramp_frac) * total)
+    warmup_end = sched.warmup_steps
+    ramp_end = sched.warmup_steps + sched.ramp_steps
+    total = ramp_end + 1000
     p_start = sched.params_for(warmup_end + 1, total)
     p_end = sched.params_for(ramp_end - 1, total)
     assert p_start["lure_fraction"] < 0.1 * sched.full_lure_fraction
@@ -118,7 +122,8 @@ def test_curriculum_ramp_lure_interpolates():
 
 def test_curriculum_target_matches_full_config():
     sched = CurriculumSchedule.from_config(FULL_CFG)
-    p = sched.params_for(999, 1000)
+    total = sched.warmup_steps + sched.ramp_steps + 1000
+    p = sched.params_for(total - 1, total)
     assert p["phase"] == "target"
     assert p["lure_fraction"] == FULL_CFG["task"]["lure_fraction"]
     assert p["maintain_steps"] == FULL_CFG["task"]["maintain_steps"]

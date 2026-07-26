@@ -77,8 +77,11 @@ def make_f2_behavior(manifest_df: pd.DataFrame, out_path: Path, gates_cfg: dict)
     width = 0.25
     for i, load in enumerate(("load1", "load2", "load3")):
         ax.bar([xi + (i - 1) * width for xi in x], agg[load], width=width, label=load)
-    ax.axhline(gates_cfg["load1_acc"], color="C0", linestyle="--", linewidth=1, alpha=0.6)
-    ax.axhline(gates_cfg["load3_acc"], color="C2", linestyle="--", linewidth=1, alpha=0.6)
+    # Phase 3 (A3): one criterion, all three loads (comments.txt §3).
+    criterion = gates_cfg["criterion"]
+    ax.axhline(criterion["load1"], color="C0", linestyle="--", linewidth=1, alpha=0.6)
+    ax.axhline(criterion["load2"], color="C1", linestyle="--", linewidth=1, alpha=0.6)
+    ax.axhline(criterion["load3"], color="C2", linestyle="--", linewidth=1, alpha=0.6)
     ax.set_xticks(list(x))
     ax.set_xticklabels(agg.index, rotation=0)
     ax.set_ylabel("accuracy")

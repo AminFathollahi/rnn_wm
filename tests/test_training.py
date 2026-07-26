@@ -29,8 +29,16 @@ def test_cell_smoke(cell):
     ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
+    # Phase 2 (comments.txt §5): global batch_size=128 OOMs arm P
+    # (PlasticGRUCell's per-trial Hebbian trace retained across the full
+    # BPTT unroll) on this 12GB GPU -- see PHASE_LOG.md. A smoke test's
+    # 6-step run doesn't need production batch fidelity, so it overrides
+    # down via `cfg["batch_size"]` rather than shrinking the global default.
+    cfg = {"steps": 6, "scaffold_sleep_s": 0}
+    if P:
+        cfg["batch_size"] = 16
     try:
-        result = train_one(run, {"steps": 6, "scaffold_sleep_s": 0})
+        result = train_one(run, cfg)
     finally:
         if ckpt_dir.exists():
             shutil.rmtree(ckpt_dir)
@@ -91,7 +99,8 @@ def test_run_dict_overrides_bio_plausible_and_identity_catch(extra):
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
     try:
-        result = train_one(run, {"steps": 6, "scaffold_sleep_s": 0})
+        # M11111 has P=1 -- see the batch_size override note in test_cell_smoke.
+        result = train_one(run, {"steps": 6, "scaffold_sleep_s": 0, "batch_size": 16})
     finally:
         if ckpt_dir.exists():
             shutil.rmtree(ckpt_dir)
@@ -102,6 +111,43 @@ def test_run_dict_overrides_bio_plausible_and_identity_catch(extra):
         assert 0.0 <= result["accuracy"]["identity_catch"] <= 1.0
     else:
         assert "identity_catch" not in result["accuracy"]
+
+
+def test_cfg_batch_size_override_takes_effect():
+    """Phase 2 (comments.txt §5 item 2.3/PHASE_LOG.md): `cfg["batch_size"]`
+    must override `configs/config.yaml`'s global `train.batch_size` -- added
+    so arm-P cells (which OOM at the global default on this GPU) can run at
+    a smaller batch without touching every other cell's throughput.
+    `flops_per_step` (item 2.4) is exactly linear in batch_size, so its
+    logged value is an observable witness that the override actually
+    reached the training loop, not just that train_one didn't crash."""
+    import csv
+    import shutil
+
+    from brainalign_wm.training.train import ROOT as TRAIN_ROOT
+    from brainalign_wm.training.train import train_one
+
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_batch_override"}
+    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    metrics_path = TRAIN_ROOT / "results" / "metrics" / f"{run['run_id']}.csv"
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    try:
+        train_one(run, {"steps": 1, "scaffold_sleep_s": 0, "batch_size": 4})
+        with open(metrics_path) as fh:
+            flops_at_4 = int(next(csv.DictReader(fh))["flops_per_step"])
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+        train_one(run, {"steps": 1, "scaffold_sleep_s": 0, "batch_size": 8})
+        with open(metrics_path) as fh:
+            flops_at_8 = int(next(csv.DictReader(fh))["flops_per_step"])
+    finally:
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+        if metrics_path.exists():
+            metrics_path.unlink()
+
+    assert flops_at_8 == 2 * flops_at_4
 
 
 @pytest.mark.parametrize(

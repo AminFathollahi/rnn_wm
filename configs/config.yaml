@@ -147,7 +147,9 @@ analysis:
 train:
   bptt_unroll: 200
   optimizer: adam
-  lr: 3.0e-4
+  lr: 1.0e-3                               # Phase 2 (comments.txt §5 item 2.3): was 3e-4, scaled up for the
+                                            # batch_size 16->128 bump below; fall back to 3e-4 if Phase 3's
+                                            # smoke run is unstable at this rate
   curriculum: [warmup, ramp, target]
   checkpoint_every: 200                    # steps between checkpoints
   eval_trials_per_load: 40                 # trials per load for the final behavioral-gate evaluation
@@ -156,7 +158,9 @@ train:
   entropy_coef: 0.01                       # REINFORCE (L=0, ramp/target phases) entropy bonus; audit fix A1a
   rung_check_frac: 0.5                     # fraction of budget before checking the rung-1 gate (local-learning fallback)
   rung_check_frac_2: 0.75                  # fraction of budget before checking the rung-2 gate -> escalate to e-prop (rung 3)
-  batch_size: 16                           # trials per training step, all sharing one drawn load; audit fix A1c
+  batch_size: 128                          # trials per training step, all sharing one drawn load; audit fix A1c.
+                                            # Phase 2 (B3): was 16 -- [BASHIVAN24] uses 256; 128 chosen given
+                                            # the removed per-tick device syncs make it affordable
   energy_cost_weight: 0.0                  # bio-plausible ablation battery §4.4 "+energy cost" (Core default: off)
   l1_weight_penalty: 0.0                   # performance-matched baseline "flat_gru_l1" (Core default: off)
   topo_loss_weight: 0.0                    # arm T (§1.2): spatial-smoothness penalty on the recurrent

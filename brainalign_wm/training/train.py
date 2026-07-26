@@ -14,7 +14,10 @@ Contract:
             instead of "P" for the four Extended local-learning cells
             (M00L/M01L/M10L/M11L, node-perturbation/e-prop, §6.3)
       cfg  = the tier-merged dict `run_grid.py` builds (containing "steps",
-             among other tier parameters); the full project configuration
+             among other tier parameters, and optionally "batch_size" to
+             override `configs/config.yaml`'s `train.batch_size` -- see
+             Phase 2/PHASE_LOG.md, needed for arm-P cells at the global
+             batch_size=128 default); the full project configuration
              (model/mechanisms/task/train sections) is loaded here directly
              from configs/config.yaml, since `run_grid.py` only threads the
              tier subset through.
@@ -83,7 +86,9 @@ procedure:
 from __future__ import annotations
 
 import csv
+import statistics
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -105,6 +110,11 @@ class _MetricsLogger:
     FIELDNAMES = [
         "step", "phase", "train_loss", "train_acc_load1", "train_acc_load2", "train_acc_load3",
         "grad_norm", "wall_s",
+        # Phase 2 (comments.txt §5 item 2.4):
+        "ms_per_step",       # median wall-clock ms/step over a trailing window, excluding the first 100 steps
+        "flops_per_step",    # analytic (param shapes x ticks/trial x batch), not measured -- deterministic
+        "peak_mem_mb",       # torch.cuda.max_memory_allocated() since process start, not reset per interval
+        "joules_cumulative",  # mJ since training start (pynvml); "" if pynvml/GPU energy counter unavailable
     ]
 
     def __init__(self, run_id: str):
@@ -267,6 +277,19 @@ def _gate_width(S: int, m: dict) -> int:
     return m["flat_units"] if S == 0 else m["manager_units"]
 
 
+def _analytic_flops_per_tick(front_end, core, heads) -> int:
+    """2*rows*cols (standard 2-FLOPs-per-MAC convention) summed over every
+    2D weight matrix in front_end/core/heads -- one tick's forward-pass
+    FLOP count. Phase 2 item 2.4: deterministic and reproducible from
+    parameter shapes, unlike a measured wall-clock number."""
+    total = 0
+    for module in (front_end, core, heads):
+        for p in module.parameters():
+            if p.dim() == 2:
+                total += 2 * p.shape[0] * p.shape[1]
+    return total
+
+
 def _dale_penalty(core, S: int, ei_split: float) -> torch.Tensor:
     """Arm D (§1.3, soft Dale's-law penalty): over each recurrent
     `weight_hh` [3*H, H] (flat cell for S=0; worker AND manager for S=1),
@@ -315,6 +338,20 @@ def _image_features_batch(image_bank, image_ids: list, feature_dim: int, device)
     for b, image_id in enumerate(image_ids):
         if image_id is not None:
             feats[b] = np.asarray(image_bank.feature_of(image_id), dtype=np.float32)
+    return torch.as_tensor(feats, dtype=torch.float32, device=device)
+
+
+def _image_features_all_ticks(image_bank, trial_steps_batch: list, feature_dim: int, device) -> torch.Tensor:
+    """[T, B, feature_dim], one host->device transfer for the whole trial
+    batch instead of one per tick (Phase 2 item 2.2, comments.txt B3)."""
+    T = len(trial_steps_batch[0])
+    B = len(trial_steps_batch)
+    feats = np.zeros((T, B, feature_dim), dtype=np.float32)
+    for t in range(T):
+        for b in range(B):
+            image_id = trial_steps_batch[b][t].image_id
+            if image_id is not None:
+                feats[t, b] = np.asarray(image_bank.feature_of(image_id), dtype=np.float32)
     return torch.as_tensor(feats, dtype=torch.float32, device=device)
 
 
@@ -385,13 +422,23 @@ def _run_trial(
     identity_aux_terms: list[torch.Tensor] = []  # §9.4a auxiliary identity-report CE loss, catch trials only
     identity_catch = {"correct": 0, "total": 0} if heads.identity_aux is not None else None
 
-    last_probe_action = [None] * B
-    true_in_set = [None] * B
+    # Phase 2 (B3): `true_in_set` is constant per trial (only EXPOSED at
+    # probe/feedback epochs) -- read it once from the first probe tick
+    # instead of rebuilding it every probe tick. `last_probe_action` stays a
+    # GPU tensor for the whole loop (no per-b `.item()` sync); it, and every
+    # tick's use of it below, are converted to Python exactly once, after
+    # the loop.
+    probe_i = next(i for i, s in enumerate(trial_steps_batch[0]) if s.epoch == "probe")
+    true_in_set_t = torch.tensor(
+        [bool(trial_steps_batch[b][probe_i].in_set) for b in range(B)], device=device
+    )
+    last_probe_action_t = torch.full((B,), -1, dtype=torch.long, device=device)
+    all_v = _image_features_all_ticks(image_bank, trial_steps_batch, feature_dim, device)
 
     for i in range(T):
         ts_list = [trial_steps_batch[b][i] for b in range(B)]
         epoch = ts_list[0].epoch  # shared across the batch: same load => same schedule
-        v_t = _image_features_batch(image_bank, [ts.image_id for ts in ts_list], feature_dim, device)
+        v_t = all_v[i]
         c_t = torch.tensor([ts.c_t for ts in ts_list], dtype=torch.float32, device=device)
 
         gate_bias = None
@@ -473,9 +520,7 @@ def _run_trial(
             identity_catch["total"] += int(catch_mask.sum().item())
 
         if epoch == "probe":
-            for b in range(B):
-                last_probe_action[b] = int(action[b].item())
-                true_in_set[b] = ts_list[b].in_set
+            last_probe_action_t = action
 
         prev_policy = policy.detach()
         prev_value = value.detach().unsqueeze(-1)
@@ -485,33 +530,30 @@ def _run_trial(
         state = new_state
 
         if epoch == "feedback":
+            # Pure tensor op, no host sync -- `correct_now_t` feeds the
+            # reflective gate's causal R_t chain for the remaining ticks
+            # (iti), so it must be available mid-loop, not deferred.
+            correct_now_t = (last_probe_action_t == 1) == true_in_set_t
             if mode == "bptt" and signal == "ce":
-                correct_now = [(last_probe_action[b] == 1) == bool(true_in_set[b]) for b in range(B)]
-                value_target = torch.tensor([1.0 if c else 0.0 for c in correct_now], device=device)
+                value_target = correct_now_t.float()
                 total_loss = total_loss + value_weight * F.mse_loss(value, value_target)
                 prev_reward = value_target.unsqueeze(-1)
-            elif mode == "bptt" and signal == "reinforce":
-                value_only_terms.append((value, non_catch))  # target added post-loop once reward is final
-                prev_reward = torch.tensor(
-                    [1.0 if (last_probe_action[b] == 1) == bool(true_in_set[b]) else 0.0 for b in range(B)],
-                    device=device,
-                ).unsqueeze(-1)
             else:
-                prev_reward = torch.tensor(
-                    [1.0 if (last_probe_action[b] == 1) == bool(true_in_set[b]) else 0.0 for b in range(B)],
-                    device=device,
-                ).unsqueeze(-1)
+                prev_reward = correct_now_t.float().unsqueeze(-1)
+                if mode == "bptt" and signal == "reinforce":
+                    value_only_terms.append((value, non_catch))  # target added post-loop once reward is final
 
-    # NOTE (§9.4a): for an identity-catch trial, `true_in_set[b]` is None
-    # (no real in/out judgment was made), so its `correct`/`reward` entry
-    # below is not a meaningful match/non-match outcome -- harmless in Core
-    # (no catch trials ever occur there); catch-trial performance is
+    # NOTE (§9.4a): for an identity-catch trial, `true_in_set` at `probe_i`
+    # is None (no real in/out judgment was made), so its `correct`/`reward`
+    # entry below is not a meaningful match/non-match outcome -- harmless in
+    # Core (no catch trials ever occur there); catch-trial performance is
     # reported separately via `identity_catch` above.
-    correct = [
-        (last_probe_action[b] == 1) == bool(true_in_set[b]) if last_probe_action[b] is not None else False
-        for b in range(B)
-    ]
-    reward = [1.0 if c else 0.0 for c in correct]
+    # Phase 2 (B3): a single sync (`.tolist()`) after the loop, not B*T
+    # `.item()` calls inside it.
+    has_probed = last_probe_action_t != -1
+    correct_t = ((last_probe_action_t == 1) == true_in_set_t) & has_probed
+    correct = correct_t.tolist()
+    reward = correct_t.float().tolist()
 
     if mode == "bptt" and signal == "reinforce":
         reward_t = torch.tensor(reward, device=device)
@@ -642,10 +684,21 @@ def _run_trial_local(
         prev_action_logp = torch.log(prev_policy0.clamp_min(1e-8)).unsqueeze(-1)
         prev_is_feedback = torch.zeros(B, 1, device=device)
         prev_reward = torch.zeros(B, 1, device=device)
-        last_probe_action = [None] * B
-        true_in_set = [None] * B
-        n_probe_matched = [0] * B
-        n_probe_total = [0] * B
+        # Phase 2 (B3): same vectorization as `_run_trial` -- `true_in_set`
+        # read once from the first probe tick; `last_probe_action` and the
+        # probe-match counters stay GPU tensors through the whole loop, only
+        # converted to Python once, after it.
+        probe_i = next(i for i, s in enumerate(trial_steps_batch[0]) if s.epoch == "probe")
+        n_probe_total = sum(1 for s in trial_steps_batch[0] if s.epoch == "probe")
+        true_in_set_t = torch.tensor(
+            [bool(trial_steps_batch[b][probe_i].in_set) for b in range(B)], device=device
+        )
+        target_action_probe_t = torch.where(
+            true_in_set_t, torch.ones(B, dtype=torch.long, device=device), torch.full((B,), 2, dtype=torch.long, device=device)
+        )
+        last_probe_action_t = torch.full((B,), -1, dtype=torch.long, device=device)
+        n_probe_matched_t = torch.zeros(B, device=device)
+        all_v = _image_features_all_ticks(image_bank, trial_steps_batch, feature_dim, device)
 
         for lrn in learners.values():
             lrn.reset_traces()
@@ -653,7 +706,7 @@ def _run_trial_local(
         for i in range(T):
             ts_list = [trial_steps_batch[b][i] for b in range(B)]
             epoch = ts_list[0].epoch
-            v_t = _image_features_batch(image_bank, [ts.image_id for ts in ts_list], feature_dim, device)
+            v_t = all_v[i]
             c_t = torch.tensor([ts.c_t for ts in ts_list], dtype=torch.float32, device=device)
 
             gate_bias = None
@@ -757,32 +810,29 @@ def _run_trial_local(
             action = torch.argmax(policy, dim=-1)
 
             if epoch == "probe":
-                for b in range(B):
-                    last_probe_action[b] = int(action[b].item())
-                    true_in_set[b] = ts_list[b].in_set
-                    n_probe_total[b] += 1
-                    if _target_action(ts_list[b].epoch, ts_list[b].in_set) == int(action[b].item()):
-                        n_probe_matched[b] += 1
+                last_probe_action_t = action
+                n_probe_matched_t = n_probe_matched_t + (action == target_action_probe_t).float()
 
             prev_value = value.unsqueeze(-1)
             prev_action_logp = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8)).unsqueeze(-1)
             prev_is_feedback = torch.full((B, 1), 1.0 if epoch == "feedback" else 0.0, device=device)
 
             if epoch == "feedback":
-                correct_now = [(last_probe_action[b] == 1) == bool(true_in_set[b]) for b in range(B)]
-                prev_reward = torch.tensor([1.0 if c else 0.0 for c in correct_now], device=device).unsqueeze(-1)
+                # Pure tensor op, no host sync -- feeds the reflective
+                # gate's causal R_t chain for the remaining (iti) ticks.
+                prev_reward = ((last_probe_action_t == 1) == true_in_set_t).float().unsqueeze(-1)
 
-        correct = [
-            (last_probe_action[b] == 1) == bool(true_in_set[b]) if last_probe_action[b] is not None else False
-            for b in range(B)
-        ]
+        # Phase 2 (B3): a single sync (`.tolist()`) after the loop, not B*T
+        # `.item()` calls inside it.
+        has_probed = last_probe_action_t != -1
+        correct_t = ((last_probe_action_t == 1) == true_in_set_t) & has_probed
+        correct = correct_t.tolist()
         if dense_reward:
-            reward = [
-                (n_probe_matched[b] / n_probe_total[b]) if n_probe_total[b] > 0 else 0.0
-                for b in range(B)
-            ]
+            reward = (
+                (n_probe_matched_t / n_probe_total).tolist() if n_probe_total > 0 else [0.0] * B
+            )
         else:
-            reward = [1.0 if c else 0.0 for c in correct]
+            reward = correct_t.float().tolist()
         for lrn in learners.values():
             lrn.apply_update(reward)
         return correct, reward
@@ -935,7 +985,15 @@ def train_one(run: dict, cfg: dict) -> dict:
     # M7 fix: the per-run override key now matches the config key
     # (`l1_weight_penalty`) instead of the old ad hoc `l1_weight` shortname.
     l1_weight = float(run.get("l1_weight_penalty", t_cfg.get("l1_weight_penalty", 0.0)))
-    batch_size = int(t_cfg.get("batch_size", 1))
+    # Phase 2 (comments.txt §5): `cfg["batch_size"]` overrides the global
+    # config default, same per-call mechanism `cfg["steps"]` already uses.
+    # Needed because global batch_size=128 (the value that clears this
+    # phase's >=3x throughput acceptance for the non-plastic cells) OOMs
+    # arm P (`PlasticGRUCell`'s per-trial Hebbian trace, retained across the
+    # full ~60-tick BPTT unroll) on this 12GB GPU -- see PHASE_LOG.md. Smoke
+    # tests and any future P=1 run in the real grid pass a smaller value here
+    # instead of shrinking the default for every cell.
+    batch_size = int(cfg.get("batch_size", t_cfg.get("batch_size", 1)))
 
     stimuli_root = ROOT / full_cfg["paths"]["stimuli"]
     if not stimuli_root.exists():
@@ -978,6 +1036,24 @@ def train_one(run: dict, cfg: dict) -> dict:
     eval_every = int(t_cfg.get("eval_every", max(500, total_steps // 30)))
     metrics_logger = _MetricsLogger(run_id)
 
+    # Phase 2 item 2.4: GPU energy via pynvml, if available. Init once (not
+    # per log call) and print the unavailable-fallback message once, not on
+    # every logging tick.
+    _nvml_handle = None
+    _energy_baseline_mj = None
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        _energy_baseline_mj = pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle)
+    except Exception:
+        print("[train] energy: unavailable", flush=True)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    flops_per_tick = _analytic_flops_per_tick(front_end, core, heads)
+    step_durations: deque = deque(maxlen=200)  # trailing window for median ms_per_step
+
     rung_check_step = int(t_cfg["rung_check_frac"] * total_steps)
     # Second gate check, rung 2 -> 3 (e-prop): same
     # pattern as rung 1 -> 2, at a later checkpoint so rung 2 gets its own
@@ -990,6 +1066,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     running_loss = 0.0
     loss_count = 0
     for step in range(start_step, total_steps):
+        step_wall_t0 = time.time()
         params = task_gen.curriculum_params(step, total_steps)
         phase = params["phase"]
         trial_batch = task_gen.sample_batch(step, total_steps, batch_size)
@@ -1040,10 +1117,19 @@ def train_one(run: dict, cfg: dict) -> dict:
                     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed + 200)
                 checked_rung_2 = True
 
+        # Phase 2 item 2.4: trailing-window step timing, excluding the
+        # first 100 steps (warmup/compilation noise).
+        if step >= 100:
+            step_durations.append(time.time() - step_wall_t0)
+
         # Periodic metrics logging (audit addition)
         if (step + 1) % eval_every == 0 or step == total_steps - 1:
             avg_loss = running_loss / max(loss_count, 1)
             acc = evaluate_accuracy(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device)
+            if _nvml_handle is not None:
+                joules_cumulative = pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
+            else:
+                joules_cumulative = ""
             metrics_logger.log({
                 "step": step + 1,
                 "phase": phase,
@@ -1053,6 +1139,10 @@ def train_one(run: dict, cfg: dict) -> dict:
                 "train_acc_load3": acc.get("load3", ""),
                 "grad_norm": f"{grad_norm:.6f}" if isinstance(grad_norm, float) else f"{grad_norm.item():.6f}",
                 "wall_s": f"{time.time() - t0:.1f}",
+                "ms_per_step": f"{1000 * statistics.median(step_durations):.3f}" if step_durations else "",
+                "flops_per_step": flops_per_tick * len(trial_batch[0]) * batch_size,
+                "peak_mem_mb": f"{torch.cuda.max_memory_allocated(device) / (1024**2):.1f}" if device.type == "cuda" else "",
+                "joules_cumulative": joules_cumulative,
             })
             running_loss = 0.0
             loss_count = 0

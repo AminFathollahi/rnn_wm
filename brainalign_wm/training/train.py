@@ -607,6 +607,98 @@ def _run_trial(
     return loss, correct, reward, identity_catch
 
 
+def run_multitask_neurogym_trial(
+    adapter, core, heads, S: int, M: int, P: int, task_name: str, batch_env, B: int, max_ticks: int,
+    device, mode: str = "bptt", value_weight: float = 0.5,
+) -> tuple[Optional[torch.Tensor], list[float]]:
+    """Phase 5 (comments.txt §5): the multi-task-diet analog of `_run_trial`,
+    for one of the 5 NeuroGym tasks (`multitask.py::NeuroGymBatchEnv`).
+    Unlike `_run_trial`, this interleaves rollout and forward pass in the
+    SAME loop -- a NeuroGym trial's length and content depend on the
+    model's own actions (see `multitask.py`'s module docstring), so there
+    is no pre-generated batch to unroll over.
+
+    Training signal per task (item 5's Phase-5-scoped simplification --
+    the full SUP-vs-RL supervision-arm factorial is Phase 7's job): tasks
+    that provide a `gt` (DelayMatchSample, GoNogo, ContextDecisionMaking)
+    train via per-tick cross-entropy against it; tasks with no `gt`
+    (Bandit, DawTwoStep -- bandit-style, reward-only) train via per-tick
+    REINFORCE with a value baseline, using the env's own native reward.
+    Both accumulate only over `active` (not-yet-`done`) ticks.
+
+    Returns `(loss_or_None, reward_per_trial: list[float] len B)` --
+    `reward_per_trial` is each trial's total native-env reward, the
+    per-task "accuracy" proxy reported in PHASE_LOG.md (uniform across
+    gt-having and gt-less tasks alike, unlike a bespoke match rule)."""
+    from brainalign_wm.tasks.multitask import HAS_GT, task_context_vector
+
+    has_gt = HAS_GT[task_name]
+    c_t = torch.tensor([task_context_vector(task_name)] * B, dtype=torch.float32, device=device)
+    state = _init_state(core, S, P, B, device)
+    done = torch.zeros(B, dtype=torch.bool, device=device)
+    reward_per_trial = torch.zeros(B, device=device)
+
+    ce_terms: list[torch.Tensor] = []
+    policy_terms: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []  # (logp_a, value, active_mask)
+    value_only_terms: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []  # (value, reward_t, active_mask)
+    entropy_terms: list[torch.Tensor] = []
+
+    for t in range(max_ticks):
+        if bool(done.all()):
+            break
+        active = (~done).float()
+        obs_t = torch.as_tensor(batch_env.obs, dtype=torch.float32, device=device)
+        z_t = adapter(obs_t, c_t)
+        h_star, new_state, _u_t = _step_core(core, S, M, P, z_t, state, t=t, gate_bias=None, training=(mode == "bptt"))
+        policy, value, logits = heads(h_star)
+
+        if mode == "eval":
+            action = torch.argmax(policy, dim=-1)
+        else:
+            action = torch.multinomial(policy.detach(), 1).squeeze(-1)
+
+        obs_np, reward_np, gt_head_np, newly_done_np = batch_env.step(action.cpu().numpy())
+        reward_t = torch.as_tensor(reward_np, dtype=torch.float32, device=device) * active
+        reward_per_trial = reward_per_trial + reward_t
+
+        if mode == "bptt":
+            if has_gt:
+                gt_t = torch.as_tensor(gt_head_np, dtype=torch.long, device=device)
+                ce_per_sample = F.cross_entropy(logits, gt_t, reduction="none")
+                # Routine "hold fixation" (gt==0) ticks vastly outnumber the
+                # rare decision tick within a trial (e.g. GoNogo's ~10
+                # fixation/stimulus/delay ticks vs 1 decision tick) --
+                # unweighted CE optimizes almost entirely for predicting 0
+                # and never learns the actual decision (same imbalance
+                # `_run_trial`'s own `tick_weight` guards against for
+                # Sternberg's fixation-heavy schedule; verified empirically
+                # here too -- see PHASE_LOG.md).
+                per_sample_weight = torch.where(gt_t != 0, 1.0, 0.1) * active
+                ce_terms.append((ce_per_sample * per_sample_weight).sum() / per_sample_weight.sum().clamp_min(1e-8))
+            else:
+                logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))
+                advantage = reward_t - value.detach()
+                policy_terms.append((logp_a, advantage, active))
+                value_only_terms.append((value, reward_t, active))
+                probs = policy.clamp_min(1e-8)
+                entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
+
+        done = done | torch.as_tensor(newly_done_np, dtype=torch.bool, device=device)
+        state = new_state
+
+    loss = None
+    if mode == "bptt":
+        loss = torch.zeros((), device=device)
+        if ce_terms:
+            loss = loss + torch.stack(ce_terms).mean()
+        if policy_terms:
+            policy_loss = sum((-logp_a * adv * mask).sum() / mask.sum().clamp_min(1.0) for logp_a, adv, mask in policy_terms) / len(policy_terms)
+            value_loss = sum(((v - r).pow(2) * mask).sum() / mask.sum().clamp_min(1.0) for v, r, mask in value_only_terms) / len(value_only_terms)
+            mean_entropy = torch.stack(entropy_terms).mean()
+            loss = loss + policy_loss + value_weight * value_loss - 0.01 * mean_entropy
+    return loss, reward_per_trial.detach().cpu().tolist()
+
+
 def _perturbed_gru_step(cell, x_t, h_prev, xi_pre, extra_update_bias=None):
     """Manually replicates the GRU math (identical for `nn.GRUCell` and
     `gru_cell.MaskedGRUCell` -- both expose `weight_ih`/`weight_hh`/

@@ -35,6 +35,7 @@ analysis = [
     # "dPCA",        # demixed PCA (optional; add if the PyPI build installs cleanly)
 ]
 nwb = ["pynwb", "dandi"]   # optional convenience; h5py path is the default
+multitask = ["neurogym==2.3.1"]   # Phase 5 (comments.txt §5): the 6-task NeuroGym diet arm only
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]

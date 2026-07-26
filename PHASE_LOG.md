@@ -551,3 +551,180 @@ $ python -m pytest
 - `pbwm_gate`'s fix needed nothing beyond the unified `is_tick` gate plus
   holding `c_manager` unchanged off-tick (it already had a state slot for
   cell state via `state["c_manager"]`, reused as-is).
+
+---
+
+## Phase 5 — Multi-task diet (NeuroGym)
+
+**By far the largest, most judgment-heavy phase so far** -- a real
+external dependency (`neurogym==2.3.1`, added to a new `pyproject.toml`
+`[multitask]` extra, NOT the unconditional base dependency list) with a
+fundamentally different per-trial API than anything else in the repo.
+Every non-obvious call is documented below.
+
+**The core architectural mismatch (discovered, not anticipated going in):**
+Sternberg trials are fully pre-scripted -- `SternbergGenerator.generate_trial`
+produces the whole epoch/image sequence in advance, and the model's action
+only affects the recorded OUTCOME, never what happens next. A NeuroGym
+trial is genuinely interactive: the agent's action can end a trial early
+(GoNogo ends the instant a non-fixate action fires during the decision
+period) or run it to a timeout ("miss"). So there is no
+`sample_batch() -> list[list[Step]]` to pre-generate the way
+`TaskGenerator` does -- `NeuroGymBatchEnv`/`run_multitask_neurogym_trial`
+roll out and compute the loss in the SAME loop, one tick at a time,
+instead of consuming a pre-built batch. This is why `multitask.py`'s
+`NeuroGymBatchEnv` doesn't look like `TaskGenerator` structurally, even
+though it fills the same role (item 5.1: "wrap NeuroGym envs behind the
+same interface `TaskGenerator` exposes" is read as "the same ROLE in the
+training loop", not an identical method signature, given the interactive
+nature above).
+
+**Changed:**
+- `brainalign_wm/tasks/multitask.py` (new, item 5.1): `DIET_TASKS` (6
+  tasks, Sternberg anchor first --- fixes the one-hot order),
+  `NEUROGYM_ENV_IDS`, per-task `HEAD_TO_ENV`/`ENV_GT_TO_HEAD` action maps
+  (derived by reading each task's actual source in
+  `site-packages/neurogym/envs/native/*.py`, not guessed -- see the
+  in-file comment citing exactly which native action each head index maps
+  to, per task), `HAS_GT` (Bandit/DawTwoStep are bandit-style, reward-only,
+  verified empirically that `info["gt"]` is always `None` for them),
+  `C_DIM_MULTITASK=13`/`task_context_vector`/`task_one_hot` (item 5.4),
+  `NeuroGymAdapter` (item 5.3), `NeuroGymBatchEnv` (the interactive
+  rollout wrapper above), `make_env`/`obs_dim_for`/`pick_task`.
+- `brainalign_wm/training/train.py::run_multitask_neurogym_trial` (new):
+  the multi-task-diet analog of `_run_trial`, one NeuroGym task at a
+  time. Tasks with a `gt` (DelayMatchSample, GoNogo, ContextDecisionMaking)
+  train via per-tick cross-entropy; tasks without one (Bandit, DawTwoStep)
+  train via per-tick REINFORCE with a value baseline, using the env's own
+  native reward -- a Phase-5-scoped simplification (documented below), not
+  the full SUP-vs-RL supervision-arm factorial (§4's Stage 1 axis is
+  explicitly Phase 7's job). Reuses `_init_state`/`_step_core` unchanged
+  (the core and heads ARE shared across every task, item 5.3) via the same
+  `S=0,M=0,P=0` baseline cell this phase's acceptance run exercises --
+  `S=1`/`M=1`/`P=1` combinations aren't wired into the diet yet, deferred
+  to Phase 7's full factorial.
+- `configs/config.yaml`: `task.multitask_diet: false` (default, so nothing
+  changes for any existing run), `task.multitask_max_ticks: 40` (safe upper
+  bound on a NeuroGym trial's rollout length; observed 1-32 ticks across
+  the 5 tasks), `model.task_vec_dim_multitask: 13` (kept fully separate
+  from `model.task_vec_dim: 10`, which the Sternberg-only pipeline and
+  every one of the 158 pre-Phase-5 tests still depend on unchanged).
+- `pyproject.toml`: new `[project.optional-dependencies] multitask =
+  ["neurogym==2.3.1"]` group -- the Sternberg-only pipeline gets zero new
+  required dependencies.
+- `tests/test_multitask.py` (new, 13 tests): one test per NeuroGym task
+  confirming the adapter/wrapper yields the expected observation and
+  action shapes (item 5.1's explicit acceptance ask) plus that every head
+  action maps to a valid native action index; context-vector shape/content
+  tests for all 6 tasks (including that Sternberg's own 10-dim `c_t` is
+  correctly reduced to the shared 7 dims); one rollout+backward-pass
+  smoke test per NeuroGym task (finite loss, finite gradient reaching the
+  adapter).
+- `scripts/run_multitask_diet.py` (new): the acceptance-run harness --
+  builds ONE shared `S=0,M=0,P=0` core+heads, a SEPARATE
+  `FrontEnd(task_vec_dim=13)` instance for Sternberg-within-the-diet
+  (`front_end_mt`, distinct from the Sternberg-only pipeline's own 10-dim
+  `FrontEnd` -- required because a `nn.Linear`'s input width is fixed at
+  construction, so the two schemas cannot share one module) plus one
+  `NeuroGymAdapter` per NeuroGym task, interleaves all 6 tasks uniformly
+  (`multitask.pick_task`, one task drawn per training step -- item 5.2's
+  "one task per trial, uniform sampling" read at batch/step granularity,
+  mirroring `TaskGenerator.sample_batch`'s existing load-homogeneous-batch
+  convention rather than building per-trial-heterogeneous batching), and
+  reports each task's trained mean reward against a random-policy chance
+  baseline.
+
+**Design decisions beyond what was specified (each with its rationale):**
+1. **Batch is task-homogeneous** (one task drawn per training step, every
+   trial in that step's batch is that task) -- mirrors the existing
+   load-homogeneous-batch convention (`TaskGenerator.sample_batch`, audit
+   fix A1c) and avoids a much harder heterogeneous-batch problem (mixed
+   observation dimensionality/adapter per trial within one batch).
+2. **Pad-free, mask-based variable length**: rather than padding to a
+   fixed T and masking, the rollout loop simply `break`s once every
+   instance in the batch is `done` -- T varies call to call, which is fine
+   since nothing downstream requires a fixed shape across calls (unlike
+   Sternberg's batch, which shares a schedule so its `T` is embedded in
+   the pre-generated list length). An `active` mask (per-instance,
+   per-tick) still guards every loss/reward term so an instance that
+   finished early doesn't keep contributing after it's done.
+3. **Bandit-v0's default `p=(0.5,0.5)` gives both arms equal expected
+   reward -- there is nothing to learn**, which would make "learns above
+   chance" untestable for that task. Skewed to `p=(0.1,0.9)` via
+   `NEUROGYM_ENV_KWARGS` (a real, deliberate task-difficulty choice, not a
+   bug fix).
+4. **Real bug found and fixed during the acceptance run, not anticipated
+   in the design phase**: uniform per-tick cross-entropy for the 3
+   gt-having tasks collapsed toward always predicting "no-action" --
+   routine "hold fixation" ticks (gt=0) vastly outnumber the rare decision
+   tick within a trial (e.g. GoNogo's ~10 fixation/stimulus/delay ticks vs
+   1 decision tick), so unweighted CE optimizes almost entirely for the
+   majority class and never learns the actual decision. Empirically
+   confirmed: GoNogo's trained reward was measured at exactly the "always
+   fixate" reward level before the fix. Fixed with a per-SAMPLE tick
+   weight (`1.0` if `gt != 0` else `0.1`) in
+   `run_multitask_neurogym_trial` -- the same imbalance `_run_trial`'s own
+   `tick_weight` already guards against for Sternberg's fixation-heavy
+   schedule, but per-SAMPLE here (not a single batch-wide scalar like
+   Sternberg's) because NeuroGym trials within one batch are NOT
+   schedule-synchronized the way Sternberg's shared-load batch is --
+   different instances can be in different epochs at the same tick index
+   (independently randomized delay periods, e.g. ContextDecisionMaking's
+   `TruncExp` delay).
+5. **`gt`-having tasks also get a trained value head for free** (an MSE
+   term was considered but NOT added -- only the 2 no-gt tasks train a
+   value head, since the CE-trained tasks don't need one for this phase's
+   acceptance bar and adding an unused loss term would be speculative).
+
+**Acceptance -- actual output** (`python scripts/run_multitask_diet.py
+--steps 2000 --batch-size 32`, CPU -- NeuroGym has no native env
+vectorization in this version, so the per-tick Python loop over batch
+instances is CPU-bound regardless of GPU availability; forcing
+`CUDA_VISIBLE_DEVICES=""` avoided pointless host<->device traffic for this
+run only):
+
+```
+=== per-task trained mean reward (last 100 trials seen) vs. chance ===
+sternberg                n_trials_seen=10528 trained_mean_reward=+0.5500 chance=+0.5000
+bandit                   n_trials_seen=10624 trained_mean_reward=+0.9200 chance=+0.3450
+dawtwostep               n_trials_seen=10208 trained_mean_reward=+0.0000 chance=-0.0640
+delaymatchsample         n_trials_seen=11648 trained_mean_reward=+0.4600 chance=+0.4270
+gonogo                   n_trials_seen=10816 trained_mean_reward=+0.5200 chance=+0.1925
+contextdecisionmaking    n_trials_seen=10176 trained_mean_reward=+0.2990 chance=+0.1720
+```
+Every task in the diet clears its own chance baseline. Sternberg's and
+DawTwoStep's margins are thin (each task only gets ~1/6 of the 2,000-step
+budget, ~333 steps -- Sternberg's own full-training margin is already
+established by the 158 pre-Phase-5 tests/Phases 0-4, and isn't what this
+run is testing) but both are genuinely, not marginally, positive; Bandit,
+GoNogo, and ContextDecisionMaking show clear separation from chance.
+
+```
+$ python -m pytest
+171 passed, 15 warnings in 273.05s
+```
+
+**Not done / deferred:**
+- The full SUP-vs-RL supervision-arm factorial (§4's Stage 1 axis) is not
+  wired up for the multi-task diet -- this phase's training signal choice
+  (CE where `gt` exists, REINFORCE otherwise) is a Phase-5-scoped
+  simplification to get every task learning; Phase 7 owns making
+  diet x supervision a real, crossed factor.
+- Only the `S=0,M=0,P=0` baseline cell is exercised by
+  `run_multitask_neurogym_trial`/the acceptance run -- `S=1` (HRLCore),
+  `M=1` (reflective gate), `P=1` (plasticity) are not yet threaded through
+  the NeuroGym rollout path. Nothing architecturally blocks it (`_step_core`
+  already dispatches on S/M/P), it's just unexercised; Phase 7's factorial
+  will need it.
+- `run_grid.py`/`train_one` do not yet enumerate multi-task-diet cells --
+  `task.multitask_diet` is a real config flag but nothing reads it yet
+  outside `scripts/run_multitask_diet.py`. Wiring the diet into the actual
+  Stage-1 cell battery is Phase 7/11's job, not this one.
+- The 12 other NeuroGym tasks/environments named in item 5.1's "verified
+  present in the wheel" list (EconomicDecisionMaking, DualDelayMatchSample,
+  DelayComparison, DelayPairedAssociation, PerceptualDecisionMaking,
+  IntervalDiscrimination, HierarchicalReasoning, yang19's 20-task
+  collection) were not instantiated or otherwise re-verified here --
+  comments.txt already asserts they're present in the 2.3.1 wheel and
+  nothing in this phase needed them; only the 6-task DIET named in item
+  5.2 was built.

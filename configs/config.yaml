@@ -72,7 +72,10 @@ model:
                                             # 48 under-shoots the 74,000-synapse target by ~17% with this
                                             # worker_grid/density; the solver's 24 lands within 0.4% of S=0's
                                             # 73,728, which is what A2 actually requires (S=0 ~= S=1).
-  manager_period: 5                        # manager clock period (or event-gated when M=1)
+  manager_period: 5                        # manager clock period, SAME for M=0 and M=1 (Phase 4/A4 fix:
+                                            # M no longer changes update rate, only the on-tick bias)
+  manager_every_tick: false                # Phase 4 item 4.2: true restores the pre-fix every-step manager
+                                            # update as an explicit supplementary arm -- never the definition of M
   param_budget_tol: 0.05                   # flat vs. hierarchical core parameter match tolerance
   readout_scale: 1.0                       # neutral in the core design; swept in the oblique sub-experiment
   action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no}

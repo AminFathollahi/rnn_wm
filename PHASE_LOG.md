@@ -474,3 +474,80 @@ requirement, not a regression.)
   reading, not by an observed real run reaching criterion; the first Stage
   1/2 pilot run long enough to actually reach it (Phase 11) is the first
   real-world exercise of that branch.
+
+---
+
+## Phase 4 — Manager Clock (fixes A4)
+
+**Changed:**
+- `models/hrl.py::HRLCore`: new `manager_every_tick: bool = False` param
+  (item 4.2), stored as `self.manager_every_tick`. `forward` now computes
+  ONE `is_tick = self.manager_every_tick or (t % self.manager_period == 0)`
+  shared by all three manager variants (plain GRU, reflective GRU,
+  `pbwm_gate`'s 3-gate cell) -- previously the reflective (M=1) and
+  `pbwm_gate` branches ran the manager on EVERY step unconditionally, never
+  consulting `manager_period` at all, while M=0 used the periodic clock: a
+  5x update-rate confound stacked on top of the reflection-bias
+  manipulation (A4). Off-tick, all three variants now hold state
+  identically (`h_m_t = h_m_prev`; `pbwm_gate` also holds `c_manager`
+  unchanged; `u_t`/`o_t` a zero tensor, matching the pre-existing M=0
+  off-tick pattern). Rewrote the module's top-of-file docstring describing
+  manager update timing to match.
+- `configs/config.yaml`: added `model.manager_every_tick: false` next to
+  `manager_period`, documented as the opt-in supplementary arm restoring
+  the pre-fix every-step behavior (item 4.2) -- never the definition of M.
+- `training/train.py::_build_model`: threads `manager_every_tick` from
+  config into `HRLCore(...)`.
+- `training/train.py::_run_trial_local` (node-perturbation/e-prop local-
+  learning path, §6.3): this function hand-rolls the SAME manager-tick
+  decision a second time in both its e-prop and node-perturbation branches
+  (it needs pre-activations `HRLCore.forward` doesn't expose, so it can't
+  just call `core(...)`) -- found carrying the identical A4 bug
+  (`if reflective_gate is not None: <every tick>` with no `manager_period`
+  check at all). Not named in comments.txt's 4.1-4.3 item list (scoped to
+  `models/hrl.py::forward`), but left unfixed here the Extended
+  local-learning study would still have the exact confound this phase
+  claims to close. Applied the identical unified `is_tick` gate to both
+  branches; xi_m/pd_m sampling-then-conditionally-applying pattern
+  preserved unchanged (only which values get consumed on a tick changed).
+- `tests/test_models.py`: `_build_hrl` now forwards `**kwargs` (needed to
+  pass `reflection_beta`/other HRLCore kwargs from the new test without
+  bloating its signature). New
+  `test_hrl_manager_m0_m1_identical_trajectory_with_zero_bias` (item 4.3):
+  two `HRLCore`s built with identical weights (`torch.manual_seed(0)`
+  immediately before each construction -- `mask_seed` defaults to 0 and is
+  independent of the global RNG, so this makes both cores' worker/manager/
+  g_proj weights identical), `reflective=False` vs `reflective=True,
+  reflection_beta=0.0` with an explicit zero-tensor `gate_bias` passed
+  every tick (forcing the bias term to exactly 0 regardless of `beta`),
+  driven by the same 10-tick `z_t` sequence (crossing `manager_period=5`
+  twice). Asserts `torch.equal` (exact, not `allclose`) on `h_manager` at
+  every tick -- adding a zero tensor is exact in IEEE 754 for finite
+  values, and it held: no tolerance was needed.
+- `test_hrl_manager_hard_clock_when_not_reflective` (pre-existing, M=0
+  tick/off-tick behavior) required no change -- `manager_every_tick`
+  defaults `False`, so its assertions are unaffected.
+
+**Acceptance -- actual output:**
+```
+$ python -m pytest tests/test_models.py -v
+19 passed in 0.94s
+```
+(new test included, all pre-existing HRL tests still pass)
+
+```
+$ python -m pytest
+158 passed, 5 warnings in 273.81s
+```
+
+**Not done / deferred:**
+- Grepped the whole repo for `manager_period`/`manager_every_tick` after
+  the fix: only `hrl.py` (definition + the one `is_tick` line) and
+  `train.py` (`_build_model`'s threading + `_run_trial_local`'s one
+  `is_tick` line) construct or consult the tick decision; `tests/
+  test_param_budget.py` and `tests/test_models.py` only pass
+  `manager_period` through as a constructor kwarg, never reimplement the
+  decision. No third copy of the bug found.
+- `pbwm_gate`'s fix needed nothing beyond the unified `is_tick` gate plus
+  holding `c_manager` unchanged off-tick (it already had a state slot for
+  cell state via `state["c_manager"]`, reused as-is).

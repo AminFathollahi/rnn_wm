@@ -35,7 +35,7 @@ def _build_flat():
     return MaskedGRUCell(CFG["bottleneck"], CFG["flat_units"], mask=None)
 
 
-def _build_hrl(reflective: bool):
+def _build_hrl(reflective: bool, **kwargs):
     return HRLCore(
         input_dim=CFG["bottleneck"],
         worker_units=CFG["worker_units"],
@@ -46,6 +46,7 @@ def _build_hrl(reflective: bool):
         g_dim=CFG["g_dim"],
         pool_block=CFG["worker_pool_block"],
         reflective=reflective,
+        **kwargs,
     )
 
 
@@ -106,6 +107,31 @@ def test_hrl_manager_hard_clock_when_not_reflective():
     assert torch.equal(state1["h_manager"], state["h_manager"]), "manager should hold state off-tick"
     state5, u5 = core(z_t, state, t=0)  # t=0 IS a tick (0 % period == 0)
     assert not torch.equal(state5["h_manager"], state["h_manager"]), "manager should update on-tick"
+
+
+def test_hrl_manager_m0_m1_identical_trajectory_with_zero_bias():
+    """Phase 4 item 4.3 (A4 fix): with `manager_every_tick=False` (the
+    default) and the M=1 bias forced to exactly zero every tick, M=0 and
+    M=1 must be mechanistically identical -- same clock, same manager
+    weights, zero-valued difference term. If M still diverged here, the
+    tick unification would be broken (M=1 silently still ticking on its
+    own schedule) since a zero bias can't explain a state difference."""
+    torch.manual_seed(0)
+    core_m0 = _build_hrl(reflective=False)
+    torch.manual_seed(0)
+    core_m1 = _build_hrl(reflective=True, reflection_beta=0.0)
+
+    state0 = core_m0.init_state(BATCH)
+    state1 = core_m1.init_state(BATCH)
+    torch.manual_seed(1)
+    z_seq = [torch.randn(BATCH, CFG["bottleneck"]) for _ in range(10)]  # crosses manager_period=5 twice
+    zero_bias = torch.zeros(BATCH, CFG["manager_units"])
+
+    for t, z_t in enumerate(z_seq):
+        state0, _ = core_m0(z_t, state0, t=t)
+        state1, _ = core_m1(z_t, state1, t=t, gate_bias=zero_bias)
+        assert torch.equal(state0["h_manager"], state1["h_manager"]), f"manager state diverged at t={t}"
+        assert torch.equal(state0["h_worker"], state1["h_worker"]), f"worker state diverged at t={t}"
 
 
 def test_hrl_reflective_requires_gate_bias():

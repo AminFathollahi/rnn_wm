@@ -21,6 +21,12 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+try:
+    import scipy.linalg as _sla
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
 
 # ---------------- participation ratio (item 8.2, mirrors companion) ----------------
 
@@ -204,4 +210,162 @@ def libby_stable_switching_units(
         "stable_frac": float(is_stable.sum() / n) if n else 0.0,
         "switching_frac": float((~is_stable).sum() / n) if n else 0.0,
         "is_stable": is_stable,
+    }
+
+
+# ---------------- DMD ensemble fit (item 8.4a, mirrors companion's ensemble_dmd) ----------------
+
+def _dmd_from_pairs(X1: np.ndarray, X2: np.ndarray, r: int) -> tuple[np.ndarray, np.ndarray]:
+    """Exact-DMD operator fit from explicit snapshot pairs (not necessarily
+    contiguous -- pairs may be pooled across trials). Mirrors
+    `wm_dynamics/src/dynamics.py::_dmd_from_pairs` exactly. `X1, X2`:
+    `[d, M]`. Returns `(A: [d,d] real, eigenvalues: [r] complex)`."""
+    U, s, Vt = np.linalg.svd(X1, full_matrices=False)
+    r = min(r, len(s))
+    U, s, Vt = U[:, :r], s[:r], Vt[:r]
+    S_inv = np.diag(1.0 / s)
+    Atilde = U.T @ X2 @ Vt.T @ S_inv
+    lam, W = np.linalg.eig(Atilde)
+    Phi = X2 @ Vt.T @ S_inv @ W
+    A = np.real(Phi @ np.diag(lam) @ np.linalg.pinv(Phi))
+    return A, lam
+
+
+def dmd_ensemble_fit(
+    Z_trials: np.ndarray, r: int, dt: float = 1.0, n_splits: int = 5, n_null: int = 50,
+    rng: np.random.Generator | None = None,
+) -> dict:
+    """DMD fit on POOLED single-trial transition pairs (item 8.4a, C3):
+    mirrors `wm_dynamics/src/dynamics.py::ensemble_dmd` exactly -- fitting
+    DMD to a trial-AVERAGED mean trajectory hits near-perfect R^2 by
+    construction and is confounded by the trial-averaging contraction this
+    module's docstring warns about, so this stacks every trial's
+    `(x_t -> x_{t+1})` pairs into one snapshot-pair regression, fits ONE
+    operator `A` on the ensemble, and validates it out-of-sample (trial-wise
+    CV) plus a circular-shift null (destroys true pairing, preserves each
+    trial's marginal statistics -- an operator fit to the null should show
+    near-chance one-step R^2).
+
+    `Z_trials`: `[n_trials, n_timebins, n_units]` (single-trial, per C3).
+    Returns `{"A", "eigenvalues", "div_scalar", "r2_insample", "r2_cv",
+    "r2_cv_std", "r2_null", "r2_null_std", "n_trials"}`."""
+    if rng is None:
+        rng = np.random.default_rng(0)
+    N, T, d = Z_trials.shape
+    r_use = min(r, d, N * (T - 1) - 1)
+
+    def _pairs(Z_sub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        X1 = Z_sub[:, :-1, :].reshape(-1, d).T
+        X2 = Z_sub[:, 1:, :].reshape(-1, d).T
+        return X1, X2
+
+    def _r2(A: np.ndarray, X1: np.ndarray, X2: np.ndarray) -> float:
+        pred = A @ X1
+        ss_res = np.sum((X2 - pred) ** 2)
+        ss_tot = np.sum((X2 - X2.mean(axis=1, keepdims=True)) ** 2)
+        return float(1.0 - ss_res / (ss_tot + 1e-10))
+
+    X1_all, X2_all = _pairs(Z_trials)
+    A_all, lam_all = _dmd_from_pairs(X1_all, X2_all, r_use)
+    div_scalar = float(np.sum(np.log(np.abs(lam_all) + 1e-300))) / dt
+    r2_insample = _r2(A_all, X1_all, X2_all)
+
+    trial_idx = rng.permutation(N)
+    folds = np.array_split(trial_idx, min(n_splits, N))
+    r2_cv_list = []
+    for k in range(len(folds)):
+        te = folds[k]
+        tr = np.concatenate([folds[j] for j in range(len(folds)) if j != k])
+        if len(tr) < 2 or len(te) < 1:
+            continue
+        X1_tr, X2_tr = _pairs(Z_trials[tr])
+        X1_te, X2_te = _pairs(Z_trials[te])
+        A_tr, _ = _dmd_from_pairs(X1_tr, X2_tr, r_use)
+        r2_cv_list.append(_r2(A_tr, X1_te, X2_te))
+    r2_cv = float(np.mean(r2_cv_list)) if r2_cv_list else float("nan")
+    r2_cv_std = float(np.std(r2_cv_list)) if r2_cv_list else float("nan")
+
+    r2_null_list = []
+    for _ in range(n_null):
+        Z_shift = np.empty_like(Z_trials)
+        for i in range(N):
+            shift = int(rng.integers(1, max(T - 1, 2)))
+            Z_shift[i] = np.roll(Z_trials[i], shift, axis=0)
+        X1_s, X2_s = _pairs(Z_shift)
+        A_s, _ = _dmd_from_pairs(X1_s, X2_s, r_use)
+        r2_null_list.append(_r2(A_s, X1_s, X2_s))
+    r2_null = float(np.mean(r2_null_list))
+    r2_null_std = float(np.std(r2_null_list))
+
+    return {
+        "A": A_all, "eigenvalues": lam_all, "div_scalar": div_scalar,
+        "r2_insample": r2_insample, "r2_cv": r2_cv, "r2_cv_std": r2_cv_std,
+        "r2_null": r2_null, "r2_null_std": r2_null_std, "n_trials": int(N),
+    }
+
+
+# ---------------- dominant direction + LQR gain (item 8.4b/8.4d, mirrors companion) ----------------
+
+def canonicalize_eigenvector_phase(v: np.ndarray) -> np.ndarray:
+    """Deterministic real direction from a (possibly complex) eigenvector --
+    mirrors `wm_dynamics/src/control.py::canonicalize_eigenvector_phase`
+    exactly. `numpy.linalg.eig` fixes eigenvectors only up to an arbitrary
+    phase; this rotates by the phase that makes the largest-magnitude entry
+    real and positive, then takes the real part, so repeated fits of the
+    SAME physical mode give the SAME sign/direction."""
+    idx = int(np.argmax(np.abs(v)))
+    phase = np.angle(v[idx])
+    v_rot = v * np.exp(-1j * phase)
+    real_part = v_rot.real
+    return real_part / (np.linalg.norm(real_part) + 1e-12)
+
+
+def unstable_eigenvector(A: np.ndarray) -> tuple[np.ndarray, float]:
+    """Item 8.4b: the slowest-decaying (or fastest-growing) direction --
+    eigenvector of `A`'s eigenvalue with the largest real part. Mirrors
+    `wm_dynamics/src/control.py::unstable_eigenvector` exactly. Returns
+    `(v_star: [n] real unit-norm phase-canonicalized, max_re_eig: float)`."""
+    eigs, vecs = np.linalg.eig(A)
+    idx = int(np.argmax(eigs.real))
+    v_star = canonicalize_eigenvector_phase(vecs[:, idx])
+    return v_star, float(eigs[idx].real)
+
+
+def dare_solve(A: np.ndarray, B: np.ndarray, Q: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Discrete Algebraic Riccati Equation solve. Mirrors
+    `wm_dynamics/src/control.py::dare_solve` exactly (scipy if available,
+    value-iteration fallback otherwise). Returns `(P, K)`, `K` the LQR gain
+    (`u = -K x`)."""
+    if _HAS_SCIPY:
+        P = _sla.solve_discrete_are(A, B, Q, R)
+    else:
+        P = Q.copy().astype(float)
+        for _ in range(10000):
+            P_new = (
+                A.T @ P @ A - A.T @ P @ B @ np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A) + Q
+            )
+            if np.max(np.abs(P_new - P)) < 1e-10:
+                P = P_new
+                break
+            P = P_new
+    K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+    return P, K
+
+
+def lqr_gain(A: np.ndarray, B: np.ndarray, q_state: float = 1.0, r_control: float = 1.0) -> dict:
+    """Design an LQR controller with identity-scaled cost matrices
+    (`Q = q_state*I`, `R = r_control*I`). Mirrors
+    `wm_dynamics/src/control.py::lqr_design` exactly. Returns `{"P", "K",
+    "closed_loop_A", "is_stable", "closed_loop_eigenvalues", "q_state",
+    "r_control"}`."""
+    n, m = A.shape[0], B.shape[1]
+    Q_mat = q_state * np.eye(n)
+    R_mat = r_control * np.eye(m)
+    P, K = dare_solve(A, B, Q_mat, R_mat)
+    A_cl = A - B @ K
+    eigs = np.linalg.eigvals(A_cl)
+    return {
+        "P": P, "K": K, "closed_loop_A": A_cl,
+        "is_stable": bool(np.all(np.abs(eigs) < 1.0)),
+        "closed_loop_eigenvalues": eigs, "q_state": q_state, "r_control": r_control,
     }

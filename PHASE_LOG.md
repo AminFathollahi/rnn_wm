@@ -1144,3 +1144,185 @@ $ python -m pytest
   8.10, sub-phase 8c) -- every function here is exercised only by
   synthetic-data tests in this commit, not yet run on an actual trained
   model's activity log.
+
+---
+
+## Phase 8b — Analysis Suite, part 2/3
+
+Covers items 8.4 (dominant mode + causal perturbation + LQR control), 8.5
+(correct vs incorrect trial split), 8.6 (cross-temporal generalization of
+memorandum identity, reusing this repo's own `cross_temporal.py`). Items
+8.7-8.10 remain for sub-phase 8c.
+
+**Changed:**
+- `brainalign_wm/analysis/geometry.py` gains the array-in-array-out pieces
+  (pure math on `Z`/operator matrices, same category as the rest of the
+  module): `_dmd_from_pairs`/`dmd_ensemble_fit` (item 8.4a) mirror
+  `wm_dynamics/src/dynamics.py::_dmd_from_pairs`/`ensemble_dmd` exactly --
+  DMD fit on POOLED single-trial `(x_t -> x_{t+1})` transition pairs (not
+  a trial-averaged mean, per C3), with trial-wise cross-validated one-step
+  R^2 and a circular-shift null. `canonicalize_eigenvector_phase`/
+  `unstable_eigenvector` (item 8.4b) mirror `wm_dynamics/src/control.py`'s
+  functions of the same name exactly -- the eigenvector of the fitted
+  operator's largest-real-part eigenvalue, phase-fixed so repeated fits of
+  the same physical mode agree in sign. `dare_solve`/`lqr_gain` mirror
+  `wm_dynamics/src/control.py::dare_solve`/`lqr_design` exactly (uses
+  `scipy.linalg.solve_discrete_are`, confirmed installed in `wm_dynamics`,
+  same value-iteration fallback the companion has if scipy is absent).
+- New `brainalign_wm/analysis/twin.py` (first sub-phase to create it --
+  the "digital twin" orchestration layer, for pieces that need to DO
+  something interventional rather than analyze a static array):
+  - `perturb_and_measure_decodability` (item 8.4c): rolls a batch of
+    single-trial states forward through a `step_fn` (a live model's
+    forward step in later phases; a synthetic linear/GRU-style system in
+    this sub-phase's tests), perturbs at a fixed tick along {v_star, N
+    random directions, a context direction}, continues rolling, and
+    measures the CAUSAL drop in a content decoder's accuracy (fit on the
+    UNPERTURBED trajectory) relative to each condition's own baseline --
+    "do what cannot be done in patients: perturb ... and measure the
+    causal effect on decodability."
+  - `on_demand_lqr_control` (item 8.4d): comments.txt explicitly asks for
+    an ON-DEMAND controller ("perturbs only when a decoded read-out says
+    the memorandum is slipping"), NOT the companion's `lqr_simulate`
+    (always-on, `u=-K(x-x_ref)` every tick). Gain design reuses
+    `geometry.lqr_gain` exactly; the gate fires only when a caller-supplied
+    `decode_confidence_fn(x)` drops below `threshold`. Trigger convention
+    chosen: DECODE CONFIDENCE (the literal spec wording, "decoded
+    read-out"), not the companion's alternative `stimulation_trigger_window`
+    flow-divergence trigger -- a documented choice, not the only valid one.
+    Added an optional `process_noise_sigma` (default 0): with a
+    deterministic unstable linear system, a SINGLE correction fully
+    re-stabilizes it and the controller never fires again (`duty_cycle`
+    collapses toward 0 despite genuinely working) -- nonzero noise gives
+    the realistic repeated re-triggering regime item 8.4's "duty cycle"
+    metric is actually asking about (a real RNN's hidden state is never
+    noise-free). The SAME noise draw is replayed for the gated/ungated
+    comparison so it isn't confounded by which one got luckier noise.
+    Reports `drift_reduction` (baseline minus controlled mean state-cost
+    `||x-x_ref||^2`, the companion's `Q=q_state*I` convention),
+    `decodability_lift`, `duty_cycle` -- item 8.4's three explicit asks.
+  - `correct_vs_incorrect_geometry` (item 8.5): re-runs `mean_speed`
+    (drift), `content_context_rotation` (rotation), and
+    `pca_participation_ratio` (manifold spread) from `geometry.py`
+    SEPARATELY on the `correct=True`/`correct=False` trial subsets of the
+    same `Z`, reporting both and their difference.
+  - `cross_temporal_by_position` (item 8.6): a thin wrapper calling THIS
+    REPO's own `cross_temporal.cross_temporal_decoding`/`stability_index`
+    once per serial position -- "mostly wiring over existing code", per
+    the spec. Deliberately a DIFFERENT decoder convention from item 8.1's
+    `geometry.cross_temporal_generalization_auc` (LinearSVC+AUC, mirrors
+    the companion) -- item 8.6 explicitly names reusing this repo's own
+    LogisticRegression+accuracy convention instead.
+- `tests/test_twin.py` (new, 6 tests), each with a KNOWN planted answer,
+  numerically verified by hand before being written (same discipline 8a's
+  fork used after catching its own vacuous test) -- see Acceptance below.
+
+**Acceptance -- actual output** (`pytest tests/test_twin.py -v -s`):
+
+```
+r2_insample 0.9973  r2_cv 0.9968  r2_null 0.7881
+eigenvector alignment 0.99999976  max_re_eig 0.9506 (planted 0.95)
+```
+Planted: a symmetric 3x3 system with a KNOWN dominant eigenvector
+(eigenvalue 0.95, vs. 0.5/0.2 for the other two modes), fit from a
+150-trial/20-tick single-trial ensemble (random ICs, small process noise).
+Recovered eigenvector alignment 0.99999976 (near-perfect); recovered
+dominant eigenvalue 0.9506 vs planted 0.95. `r2_cv` (0.9968) nearly equals
+`r2_insample` (0.9973) -- genuine out-of-sample generalization, not
+in-sample overfitting. **Notable, worth flagging rather than hiding**:
+`r2_null` (0.7881) is clearly, reproducibly lower than `r2_cv` (a ~0.21 gap,
+std ~5e-4 across 50 null resamples -- highly significant, not noise) but is
+NOT "near chance" the way a naive reading of "null" might suggest. Traced
+the reason: the companion's circular-PER-TRIAL-shift null (`np.roll`)
+corrupts only the single wrap-around pair per trial (position T-1 -> 0);
+the other ~(T-2)/(T-1) ~= 95% of pairs remain genuine `(x_t, x_{t+1})`
+transitions, merely relabeled with a different starting index -- for a
+purely AUTONOMOUS, time-invariant system (this synthetic test's system,
+and arguably DMD's own modeling assumption), that leaves most of the
+signal intact. The null's full discriminative power is against
+NON-stationary, task-locked real data (its actual intended real use in
+Phase 8c/11's driver script, where trial alignment to a shared task clock
+matters) -- documented in the test itself, not silently accepted as "it
+must be fine because the number went down some."
+
+```
+perturbation result: {'baseline_acc': 1.0, 'vstar_drop': 0.467,
+                       'context_drop': 0.0, 'random_drop_mean': 0.151}
+```
+Planted: content encoded along a known direction v_star; a known
+orthogonal direction v_context carries none. Perturbing along v_star drops
+decode accuracy by 0.467; a random direction (mostly, but not perfectly,
+orthogonal to v_star in 4-D) by 0.151; the truly orthogonal context
+direction by 0.0 exactly. Ordering (v_star >> random >> context) matches
+item 8.4c's prediction structurally.
+
+```
+on-demand LQR result: {'drift_reduction': 3.575, 'decodability_lift': 0.487,
+                        'duty_cycle': 0.2, 'drift_baseline': 3.590,
+                        'drift_controlled': 0.015}
+```
+An unstable-but-controllable 2-D system (A=1.05*I, B=I) with process noise:
+the on-demand controller cuts mean state-cost by ~99.6% (3.590 -> 0.015)
+and lifts mean decode confidence by 0.487, firing on only 20% of ticks
+(`duty_cycle`=0.2 -- genuinely gated, confirmed by a second test asserting
+`duty_cycle == 0` exactly when the trigger threshold is unreachable).
+
+```
+correct:   {'drift_speed': 0.526, 'content_rotation_deg': 13.90, 'manifold_pr': 2.03}
+incorrect: {'drift_speed': 1.595, 'content_rotation_deg': 54.29, 'manifold_pr': 2.47}
+diff:      {'drift_speed': 1.069, 'content_rotation_deg': 40.39, 'manifold_pr': 0.434}
+```
+Planted: incorrect trials get 3x the noise sigma and 12x the content-axis
+rotation range of correct trials. Recovered: incorrect trials show more
+drift, more rotation, AND (unplanted, an emergent side effect of the
+larger noise) a larger manifold PR -- all three point the same direction
+item 8.5 asks about ("does the manifold differ on error trials... more
+drift... larger rotation").
+
+```
+stable stability_index: 1.0000  dynamic stability_index: 0.7097
+```
+FIRST-EVER correctness test of the pre-existing (previously zero test
+coverage) `cross_temporal.cross_temporal_decoding`/`stability_index`.
+Planted: position 1's decoding axis is fixed the whole trial (should
+generalize near-perfectly across time); position 2's axis alternates
+between two orthogonal directions every tick (narrow-diagonal, dynamic
+code). Recovered stability_index 1.0 vs 0.71 -- the pre-existing code
+correctly distinguishes stable from dynamic coding; no bug found.
+
+```
+$ python -m pytest
+211 passed, 15 warnings in 279.20s
+```
+(205 pre-Phase-8b + 6 new)
+
+**Design decisions/deviations, with rationale:**
+- Used LINEAR DMD (`dmd_ensemble_fit`) only, not the companion's
+  `koopman_edmd` nonlinear-observable extension -- item 8.4 says "DMD/
+  Koopman" (either/or framing) and a correctly-fit, correctly-tested
+  linear DMD satisfies the acceptance bar (recovering a planted linear
+  system's dominant mode) on its own; the extra complexity of a nonlinear
+  Koopman dictionary isn't exercised by anything this sub-phase's tests
+  actually need. Revisit if Phase 8c/11's real activity-log application
+  shows the linear approximation failing to generalize (`r2_cv` low).
+- On-demand trigger: decode-confidence-based (item 8.4d), not the
+  companion's flow-divergence `stimulation_trigger_window` -- the literal
+  spec wording ("decoded read-out") and reuse of the SAME decoder
+  machinery item 8.4c already builds, rather than introducing a second,
+  unrelated trigger signal.
+- `perturb_and_measure_decodability`'s `step_fn` is a plain per-trial-row
+  Python callable (`x_t -> x_{t+1}`), not batched/vectorized -- deliberately
+  simple for this sub-phase's synthetic tests; wiring it to a live trained
+  model's batched forward pass (item 8.10/Phase 11) may want a batched
+  variant then, not built speculatively here.
+
+**Not done / deferred (this sub-phase only):**
+- Items 8.7-8.10 (orthogonalization index, task-irrelevant decoding,
+  network topology + assortativity, the `M00001_bioinit` model arm, the
+  `scripts/run_geometry.py` driver) are sub-phase 8c's job.
+- None of `geometry.py`'s or `twin.py`'s functions (from either 8a or 8b)
+  have been run on a real trained model's activity log yet -- every test
+  so far is synthetic-only; that first real application is item 8.10
+  (sub-phase 8c) at the earliest, more likely Phase 11.
+- `koopman_edmd` (nonlinear Koopman extension) not built -- see rationale
+  above.

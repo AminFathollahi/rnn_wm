@@ -55,6 +55,20 @@ procedure:
         affects the reward). From this point on, the two arms differ only
         in credit assignment (global BPTT policy-gradient vs. local node
         perturbation) on an identical reward.
+  - **Supervision arms (Phase 7, comments.txt §5).** `train.supervision`
+    ({legacy|SUP|RL}, default `legacy`) selects `_run_trial`'s signal via
+    `_select_signal`: `legacy` preserves the two-phase warmup/target
+    behavior above exactly; `SUP` trains dense per-tick CE for the whole
+    run; `RL` trains REINFORCE-with-value-baseline for the whole run.
+    `METARL` (task cue withheld; the network receives (previous action,
+    previous reward) instead; trials run in fixed-`(n,feature)` BLOCKS of
+    K, policy gradient across a distribution of blocks) is NOT a
+    `train.supervision` value threaded through `_run_trial`/`train_one` at
+    all -- it operates on `tasks/nback.py`'s n-back generator, not
+    Sternberg, and needs recurrent state that persists across an entire
+    block rather than resetting per trial. See `MetaRLAdapter`/
+    `sample_metarl_block`/`run_metarl_block` and
+    `scripts/run_metarl_analysis.py`.
   - **Batching.** One training step runs a batch of `B` trials
     (`train.batch_size`) instead of a single trial. Since tick-count is
     fully determined by `load` (all other per-trial draws vary content,
@@ -101,6 +115,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
@@ -293,6 +308,21 @@ def _step_core(
 
 def _gate_width(S: int, m: dict) -> int:
     return m["flat_units"] if S == 0 else m["manager_units"]
+
+
+def _select_signal(supervision: str, phase: str) -> str:
+    """Phase 7 (comments.txt §5): SUP always trains on dense per-tick CE;
+    RL always trains on REINFORCE -- both run their fixed signal for the
+    WHOLE run, "throughout instead of for the first 20%" (SUP) / "run
+    throughout" (RL), decoupled from curriculum phase. "legacy" (the
+    default) preserves the exact pre-Phase-7 behavior every already-tested
+    Sternberg/multitask cell depends on: CE during curriculum warmup only,
+    REINFORCE after."""
+    if supervision == "SUP":
+        return "ce"
+    if supervision == "RL":
+        return "reinforce"
+    return "ce" if phase == "warmup" else "reinforce"
 
 
 def _analytic_flops_per_tick(front_end, core, heads) -> int:
@@ -699,6 +729,183 @@ def run_multitask_neurogym_trial(
     return loss, reward_per_trial.detach().cpu().tolist()
 
 
+class MetaRLAdapter(nn.Module):
+    """Phase 7 (comments.txt §5, METARL): the task cue is WITHHELD -- no
+    `c_t` at all -- so this adapter takes the stimulus feature PLUS
+    (previous action one-hot, previous reward scalar) straight to
+    bottleneck width, parallel to `FrontEnd`/`multitask.NeuroGymAdapter`
+    (frozen-ResNet+c_t / raw-obs+c_t / stimulus+prev-action-reward -- three
+    separate small input paths converging on the same shared core/heads).
+    [WANG16/WANG18]: the network must infer the latent task from the
+    reward stream, which is exactly why (prev_action, prev_reward) are
+    inputs here instead of a task identity cue."""
+
+    def __init__(self, feature_dim: int, n_actions: int, bottleneck_dim: int):
+        super().__init__()
+        self.w = nn.Linear(feature_dim + n_actions + 1, bottleneck_dim)
+
+    def forward(self, v_t: torch.Tensor, prev_action_onehot: torch.Tensor, prev_reward: torch.Tensor) -> torch.Tensor:
+        return self.w(torch.cat([v_t, prev_action_onehot, prev_reward], dim=-1))
+
+
+def sample_metarl_block(
+    nback_gen, cfg: dict, seed: int, step_idx: int, batch_size: int, block_size: int, split: str = "train",
+) -> tuple[list, list[int], list[str]]:
+    """Phase 7: `(n, feature)` is drawn INDEPENDENTLY per block instance
+    (unlike Sternberg's/multitask's shared-per-batch draw) -- item 7.1's
+    decoding analysis needs `(n, feature)` to vary ACROSS the blocks in one
+    batch, or there would be nothing to decode. Each instance then gets
+    `block_size` n-back sequences generated with that SAME fixed
+    `(n, feature)` (comments.txt: "BLOCKS of K=20 with a fixed but
+    unsignalled (n, feature)"), concatenated into one long per-instance
+    step list -- `nback.NBackGenerator`'s `sequence_length` doesn't depend
+    on `n`, so every instance's concatenated list is the same total length
+    (`block_size * sequence_length`), same no-padding-needed property
+    Sternberg's shared-load batching already relies on. Deterministic given
+    (seed, step_idx), same contract as `TaskGenerator.sample_batch`.
+
+    Returns (steps_batch: list[B][block_size*sequence_length], n_labels:
+    list[B], feature_labels: list[B])."""
+    n_values = cfg["nback"]["n_values"]
+    features = cfg["nback"]["features"]
+    sequence_length = int(cfg["nback"]["sequence_length"])
+    match_fraction = float(cfg["nback"]["match_fraction"])
+    steps_batch: list = []
+    n_labels: list[int] = []
+    feature_labels: list[str] = []
+    for b in range(batch_size):
+        seed_state = np.random.SeedSequence([seed, step_idx, b, 0x7E7A]).generate_state(4)
+        rng = np.random.RandomState(seed_state)
+        n = int(rng.choice(n_values))
+        feature = str(rng.choice(features))
+        steps: list = []
+        for k in range(block_size):
+            trial_id = (step_idx * batch_size + b) * block_size + k
+            steps.extend(
+                nback_gen.generate_trial(
+                    rng, n=n, feature=feature, sequence_length=sequence_length,
+                    match_fraction=match_fraction, trial_id=trial_id, split=split,
+                )
+            )
+        steps_batch.append(steps)
+        n_labels.append(n)
+        feature_labels.append(feature)
+    return steps_batch, n_labels, feature_labels
+
+
+def run_metarl_block(
+    adapter, core, heads, S: int, M: int, P: int, image_bank, trial_steps_batch: list,
+    sequence_length: int, feature_dim: int, n_actions: int, device,
+    mode: str = "bptt", value_weight: float = 0.5, entropy_coef: float = 0.01,
+) -> dict:
+    """Phase 7 (comments.txt §5): one METARL BLOCK. Unlike every other
+    rollout in this file, recurrent state persists across the WHOLE block
+    (`_init_state` called ONCE here, not once per n-back sequence) -- the
+    network's only way to infer the block's fixed-but-unsignalled `(n,
+    feature)` is through its own recurrent state carrying information
+    across sequence boundaries, since the task cue is withheld (item
+    7's whole point).
+
+    Training signal: REINFORCE + value baseline ONLY -- comments.txt says
+    "Policy gradient across a distribution of blocks" for METARL, unlike
+    SUP's CE. Feeding a CE target here would let the network learn from a
+    supervised label the trainer computes but METARL is specifically
+    designed to withhold; policy gradient on the env's own reward is
+    [WANG16]'s actual recipe. `i < n` positions (`ts.is_match is None`,
+    no valid n-back comparison yet) are simply never rewarded (reward 0
+    regardless of action) -- mirrors how Sternberg's non-probe epochs are
+    never scored either.
+
+    Also records a hidden-state snapshot at the LAST tick of each of the
+    K=`len(trial_steps_batch[0])/sequence_length` sequences within the
+    block (item 7.1/7.2's decoding analysis needs exactly K per-trial-
+    position snapshots, not one per raw tick -- most ticks within a
+    sequence have no well-defined "response" to probe). For S=1 cells,
+    `h_worker`/`h_manager` are ALSO snapshotted separately (item 7.2 needs
+    to decode from each independently, not just the concatenated
+    `h_star` `_step_core` normally returns).
+
+    Returns {"loss": Tensor|None, "h_star": [B,K,D] np.ndarray,
+    "h_worker": [B,K,Dw] np.ndarray|None, "h_manager": [B,K,Dm]
+    np.ndarray|None} -- `h_worker`/`h_manager` are `None` for S=0."""
+    B = len(trial_steps_batch)
+    T = len(trial_steps_batch[0])
+    all_v = _image_features_all_ticks(image_bank, trial_steps_batch, feature_dim, device)
+    state = _init_state(core, S, P, B, device)
+    prev_action = torch.zeros(B, dtype=torch.long, device=device)
+    prev_reward = torch.zeros(B, 1, device=device)
+
+    policy_terms: list[torch.Tensor] = []
+    advantage_terms: list[torch.Tensor] = []
+    value_terms: list[torch.Tensor] = []
+    reward_terms: list[torch.Tensor] = []
+    entropy_terms: list[torch.Tensor] = []
+    h_star_snapshots: list[list] = [[] for _ in range(B)]
+    h_worker_snapshots: Optional[list[list]] = [[] for _ in range(B)] if S == 1 else None
+    h_manager_snapshots: Optional[list[list]] = [[] for _ in range(B)] if S == 1 else None
+
+    for t in range(T):
+        ts_list = [trial_steps_batch[b][t] for b in range(B)]
+        v_t = all_v[t]
+        prev_action_onehot = F.one_hot(prev_action, num_classes=n_actions).float()
+        z_t = adapter(v_t, prev_action_onehot, prev_reward)
+        h_star, new_state, _u_t = _step_core(core, S, M, P, z_t, state, t=t, gate_bias=None, training=(mode == "bptt"))
+        policy, value, _logits = heads(h_star)
+
+        if mode == "eval":
+            action = torch.argmax(policy, dim=-1)
+        else:
+            action = torch.multinomial(policy.detach(), 1).squeeze(-1)
+
+        ideal = torch.tensor(
+            [0 if ts.is_match is None else (1 if ts.is_match else 2) for ts in ts_list], device=device,
+        )
+        scored = torch.tensor([ts.is_match is not None for ts in ts_list], device=device)
+        reward_t = ((action == ideal) & scored).float()
+
+        if mode == "bptt":
+            logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))
+            policy_terms.append(logp_a)
+            advantage_terms.append(reward_t - value.detach())
+            value_terms.append(value)
+            reward_terms.append(reward_t)
+            probs = policy.clamp_min(1e-8)
+            entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
+
+        if (t + 1) % sequence_length == 0:
+            h_star_np = h_star.detach().cpu().numpy()
+            for b in range(B):
+                h_star_snapshots[b].append(h_star_np[b])
+            if S == 1:
+                hw_np = new_state["h_worker"].detach().cpu().numpy()
+                hm_np = new_state["h_manager"].detach().cpu().numpy()
+                for b in range(B):
+                    h_worker_snapshots[b].append(hw_np[b])
+                    h_manager_snapshots[b].append(hm_np[b])
+
+        prev_action = action
+        prev_reward = reward_t.unsqueeze(-1)
+        state = new_state
+
+    loss = None
+    if mode == "bptt":
+        logps = torch.stack(policy_terms)      # [T, B]
+        advs = torch.stack(advantage_terms)    # [T, B]
+        values = torch.stack(value_terms)      # [T, B]
+        rewards = torch.stack(reward_terms)    # [T, B]
+        policy_loss = (-logps * advs).mean()
+        value_loss = (values - rewards).pow(2).mean()
+        mean_entropy = torch.stack(entropy_terms).mean()
+        loss = policy_loss + value_weight * value_loss - entropy_coef * mean_entropy
+
+    return {
+        "loss": loss,
+        "h_star": np.stack([np.stack(x) for x in h_star_snapshots]),
+        "h_worker": np.stack([np.stack(x) for x in h_worker_snapshots]) if S == 1 else None,
+        "h_manager": np.stack([np.stack(x) for x in h_manager_snapshots]) if S == 1 else None,
+    }
+
+
 def _perturbed_gru_step(cell, x_t, h_prev, xi_pre, extra_update_bias=None):
     """Manually replicates the GRU math (identical for `nn.GRUCell` and
     `gru_cell.MaskedGRUCell` -- both expose `weight_ih`/`weight_hh`/
@@ -1102,6 +1309,11 @@ def train_one(run: dict, cfg: dict) -> dict:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "flat_units": int(run["flat_units"])}}
 
     m, mech_cfg, t_cfg = full_cfg["model"], full_cfg["mechanisms"], full_cfg["train"]
+    # Phase 7 (comments.txt §5): SUP/RL run their fixed signal for the whole
+    # run, decoupled from curriculum phase; "legacy" (default) preserves the
+    # exact pre-Phase-7 behavior every already-tested cell depends on.
+    # METARL is not a `_run_trial` mode at all -- see `run_metarl_block`.
+    supervision = t_cfg.get("supervision", "legacy")
     value_weight = float(t_cfg["value_loss_weight"])
     entropy_coef = float(t_cfg.get("entropy_coef", 0.0))
     energy_cost_weight = float(run.get("energy_cost_weight", t_cfg.get("energy_cost_weight", 0.0)))
@@ -1244,7 +1456,7 @@ def train_one(run: dict, cfg: dict) -> dict:
 
         if L == 0:
             optimizer.zero_grad()
-            signal = "ce" if phase == "warmup" else "reinforce"
+            signal = _select_signal(supervision, phase)
             loss, correct, reward, _ = _run_trial(
                 front_end, core, heads, reflective_gate, S, M, P, trial_batch, image_bank,
                 m["feature_dim"], m["action_dim"], _gate_width(S, m), device, mode="bptt",

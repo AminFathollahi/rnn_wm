@@ -812,3 +812,191 @@ $ python -m pytest
 - `c_t`/context-vector equivalent for n-back: deliberately not built (see
   above); Phase 7 needs to define it alongside the (previous action,
   previous reward) input contract.
+
+---
+
+## Phase 7 — Supervision arms and HRL (SUP/RL/METARL)
+
+Another large phase: it finally wires Phase 6's `NBackGenerator` (built but
+deliberately not connected to training) into an actual training loop, and
+adds a genuinely new architectural capability -- recurrent state persisting
+across trial boundaries, previous-action/previous-reward as network input
+-- that nothing in Phases 0-6 needed.
+
+**Changed:**
+- `configs/config.yaml`: `train.supervision: legacy` (new key; `legacy`
+  preserves the exact pre-Phase-7 behavior -- CE during curriculum warmup,
+  REINFORCE after -- so every already-tested Sternberg/multitask cell is
+  unaffected), `train.metarl_block_size: 20` (K, comments.txt: "BLOCKS of
+  K=20 with a fixed but unsignalled (n, feature)").
+- `brainalign_wm/training/train.py`:
+  - New `_select_signal(supervision, phase) -> str` (small, unit-tested
+    helper, mirroring `_gate_width`'s style): `legacy` reproduces the
+    existing phase-dependent CE/REINFORCE switch exactly; `SUP` is always
+    `"ce"`; `RL` is always `"reinforce"` -- both run their fixed signal for
+    the whole run, decoupled from curriculum phase, per items "SUP...run
+    throughout instead of for the first 20%" / "RL...run throughout".
+    `train_one`'s inline `signal = "ce" if phase == "warmup" else
+    "reinforce"` now calls this helper -- a small, surgical change, not a
+    rewrite.
+  - New `MetaRLAdapter` (parallel to `FrontEnd`/`multitask.NeuroGymAdapter`
+    -- three separate small input paths converging on the same shared
+    core/heads): takes the stimulus feature PLUS (previous action one-hot,
+    previous reward scalar) straight to bottleneck width, no `c_t` at all
+    -- the task cue is WITHHELD by definition for METARL.
+  - New `sample_metarl_block`: draws `(n, feature)` INDEPENDENTLY per block
+    instance (unlike Sternberg's/multitask's shared-per-batch draw --
+    item 7.1's decoding analysis needs `(n, feature)` to vary ACROSS
+    blocks in one batch, or there is nothing to decode), then generates
+    `block_size` n-back sequences per instance with that instance's fixed
+    `(n, feature)`, concatenated into one long step list. `nback.py`'s
+    `sequence_length` doesn't depend on `n`, so every instance's
+    concatenated list is the same total length -- no padding needed, same
+    property Sternberg's shared-load batching already relies on.
+    Deterministic given (seed, step_idx), same contract as
+    `TaskGenerator.sample_batch`.
+  - New `run_metarl_block`: the METARL rollout. Recurrent state persists
+    across the WHOLE block (`_init_state` called ONCE per block, not once
+    per n-back sequence) -- the network's only way to infer the block's
+    withheld `(n, feature)` is by carrying information across sequence
+    boundaries in its own state. Training signal is REINFORCE + value
+    baseline ONLY (never CE) -- comments.txt says "Policy gradient across a
+    distribution of blocks" for METARL; feeding a CE target would let the
+    network learn from a supervised label the trainer computes but METARL
+    is specifically designed to withhold. `i < n` positions (no valid
+    n-back comparison yet) are never rewarded (reward 0 regardless of
+    action), mirroring how Sternberg's non-probe epochs are never scored.
+    Also records a hidden-state snapshot at the LAST tick of each of the K
+    sequences within the block (`h_star`, plus `h_worker`/`h_manager`
+    SEPARATELY for S=1 -- item 7.2 needs to decode from each
+    independently, not just the concatenated readout `_step_core` normally
+    returns) -- exactly K per-trial-position snapshots, which is what
+    "decoding accuracy...as a function of trial-index-within-block" needs.
+    Reuses `_build_model`/`_step_core`/`_init_state`/
+    `_image_features_all_ticks` completely unchanged (item 7.3: the
+    existing manager/worker core IS the HRL architecture -- no new
+    architecture built).
+- `scripts/run_metarl_analysis.py` (new): trains one S=0 METARL run (7.1),
+  decodes `n` and `feature` from `h_star` at each of the K=20
+  trial-index-within-block positions over many fresh eval blocks (reusing
+  `analysis/cross_temporal.py::cross_temporal_decoding`'s StratifiedKFold +
+  StandardScaler + LogisticRegression recipe, with block-position
+  substituted for its usual within-trial timebin axis and only the
+  diagonal kept -- no cross-position generalization needed here), plots
+  the result; then trains a separate S=1 METARL run (7.2) and decodes `n`
+  from `h_worker` and `h_manager` separately. `nback.sequence_length` is
+  overridden DOWN (20 -> 8, `--sequence-length`) for this run only -- see
+  "Not done / deferred" below for why -- `metarl_block_size` (K) is NOT
+  shortened, since that is the spec's actual parameter, not a free
+  efficiency knob.
+- `tests/test_metarl.py` (new, 10 tests): `_select_signal`'s three modes;
+  `MetaRLAdapter` shape; `sample_metarl_block`'s content length/label
+  validity/determinism/cross-block `(n,feature)` variation;
+  `run_metarl_block`'s finite loss+gradient for S=0 and S=1 and correct
+  snapshot shapes; and the mechanism the whole arm depends on --
+  `test_recurrent_state_persists_across_sequences_within_a_block` isolates
+  a block's second sequence and runs it alone (state reset) vs. as
+  sequence 2 of a real 2-sequence block (state carried from sequence 1),
+  with identical weights and greedy action selection, and asserts the two
+  give DIFFERENT `h_star` snapshots -- proof the carried-over state has a
+  causal effect, not just that a "state" argument is structurally present.
+
+**A real profiling finding, not part of the original plan:**
+`ImageTokenBank.sample`'s per-call linear scan over the stimuli pool
+(`[d for d in self._index if ...]`, 4,000 images) dominates METARL
+training wall-clock far more than the GPU forward/backward -- profiled a
+single training step at ~1.4s total, of which ~1.2s was
+`sample_metarl_block`'s stimulus sampling and only ~0.42s was
+`run_metarl_block`'s forward+backward. This is a real, pre-existing
+inefficiency (not introduced by this phase, and not this phase's fix --
+Phase 2's own throughput fix was explicitly scoped to the Sternberg
+`_run_trial` path only), but METARL's blocks are unusually long
+(`block_size x sequence_length` ticks, each needing its own stimulus
+sample) compared to a single Sternberg trial, so it bites harder here.
+Worked around for THIS acceptance run only by overriding
+`nback.sequence_length` down to 8 (from the global default 20) via
+`scripts/run_metarl_analysis.py --sequence-length`, cutting total sample
+calls proportionally -- the config default and every other n-back consumer
+(Phase 6's own tests) are untouched. Not fixed at the source: that is a
+`ImageTokenBank`-level optimization out of this phase's scope.
+
+**Acceptance -- actual output** (`python scripts/run_metarl_analysis.py
+--steps-s0 3000 --steps-s1 2000 --eval-blocks 300 --batch-size 16
+--sequence-length 8`, GPU, ~50 min total -- a demonstration run showing the
+mechanism, not a production Stage-1/2 grid run, per the phase's own
+framing: "one METARL run"):
+
+```
+=== 7.1: S=0 METARL run (3,000 steps) ===
+final training loss: 0.0220 (from 0.1204 at step 200 -- monotonic decrease
+with noise, no instability)
+
+n_decode (chance=0.33):       [0.867, 0.97, 0.99, 1.0, 1.0, 1.0, 1.0, 1.0,
+                                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                                1.0, 1.0, 1.0]
+feature_decode (chance=0.50): [0.53, 0.613, 0.547, 0.547, 0.597, 0.557,
+                                0.56, 0.557, 0.58, 0.58, 0.63, 0.587, 0.533,
+                                0.59, 0.643, 0.527, 0.637, 0.523, 0.56, 0.633]
+plot: results/figures/metarl_decoding_7_1.png
+```
+A clean, strong result: `n` is decodable at 86.7% from trial position 1
+alone and reaches ~100% by position 4, staying there -- a representation of
+`n` emerges, and it emerges FAST (within ~4 trials into a 20-trial block).
+`feature` (identity vs. category) stays only weakly above its 50% chance
+(53-64% across all 20 positions, no clear rise) -- the network infers WHICH
+n-back distance it's facing far more readily than which comparison rule it
+should use. Both are real, reportable findings, not a target to hit; the
+asymmetry itself is scientifically informative (§7.1's "does a
+representation of n emerge, and how fast" -- yes, fast; the analogous
+question for `feature` is answered "barely, at this budget").
+
+```
+=== 7.2: S=1 METARL run (2,000 steps) ===
+final training loss: 0.0154
+
+n_decode from h_star:    mean 0.981 (range 0.813-1.0, position1 low then near-ceiling by ~position 5)
+n_decode from h_worker:  mean 0.980
+n_decode from h_manager: mean 0.978
+```
+The pre-registered prediction (comments.txt §7.2: "the manager carries the
+inferred task variable, the worker carries the memoranda") does NOT hold in
+this run. Both `h_worker` and `h_manager` decode `n` almost perfectly
+(>=97% for 16 of 20 positions each), and the two curves are
+indistinguishable within noise -- worker's mean (0.980) is marginally
+HIGHER than manager's (0.978), the opposite direction of the prediction,
+though the 0.002 gap is far smaller than the run-to-run noise a single
+seed can be expected to have. Reported exactly as measured, not adjusted
+toward the prediction: at this architecture/training budget, `n` appears to
+be redundantly represented in both worker and manager populations rather
+than selectively routed to the manager. This is ONE run at a modest step
+budget, not the rigorous multi-seed test the prediction deserves (that is
+Phase 11's job, on the real grid) -- but as the first direct look, the data
+does not support the strong functional-division-of-labor claim.
+
+```
+$ python -m pytest
+195 passed, 15 warnings in 341.65s
+```
+
+**Not done / deferred:**
+- `ImageTokenBank.sample`'s linear-scan cost (see above) is a real,
+  pre-existing inefficiency this phase profiled but did not fix -- worth a
+  dedicated throughput pass (indexed-by-category lookup, O(1) instead of
+  O(pool size) per sample) before any large-scale METARL run in Phase 11.
+- METARL is not wired into `run_grid.py`/`train_one`'s cell battery at all
+  -- `scripts/run_metarl_analysis.py` is a standalone harness, matching
+  Phase 5's own precedent for the multi-task diet. Enumerating METARL cells
+  in the real Stage-1/3 grid is Phase 11's job.
+- `M`/`P` are not exercised on the METARL path (`run_metarl_block` always
+  calls `_step_core` with `gate_bias=None`, i.e. M=0) -- nothing
+  architecturally blocks it, it's just unexercised here, mirroring Phase
+  5's same scoping decision for the multi-task diet's S/M/P coverage.
+- 7.2's manager-vs-worker comparison is a single-seed demonstration, not a
+  reproducibility-checked result -- flagged above; multi-seed replication
+  belongs to Phase 11's real grid, not this phase's acceptance bar.
+- The `feature`-decoding curve's weak, non-rising signal (53-64% vs. 50%
+  chance) was not investigated further (e.g. whether a longer run, a
+  larger `feature_dim` contribution, or a different readout would sharpen
+  it) -- out of scope for a phase whose acceptance bar is "does a
+  representation emerge, and how fast," which item 7.1 already answers
+  (yes for `n`, weakly/inconclusively for `feature`).

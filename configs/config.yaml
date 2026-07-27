@@ -204,6 +204,17 @@ train:
                                             # matrices (off for cells with D=0)
   dale_penalty_weight_on: 0.01             # magnitude applied to cells with D=1; starting point, tune during
                                             # the Phase B dev-tier sanity check if training is unstable
+  supervision: legacy                      # Phase 7 (comments.txt §5): {legacy|SUP|RL|METARL}. "legacy"
+                                            # preserves the exact pre-Phase-7 behavior (signal = ce during
+                                            # curriculum warmup, reinforce after) for every already-tested
+                                            # Sternberg/multitask cell -- SUP/RL only affect `_run_trial`'s
+                                            # signal choice when explicitly selected. METARL is NOT threaded
+                                            # through `_run_trial`/`train_one` at all (task cue withheld,
+                                            # block-structured rollout over n-back -- see
+                                            # `run_metarl_block`/`scripts/run_metarl_analysis.py`).
+  metarl_block_size: 20                    # Phase 7 item: K, the number of n-back trials per METARL block
+                                            # (comments.txt: "BLOCKS of K=20 with a fixed but unsignalled
+                                            # (n, feature)")
 
 # Behavioral gates -- ONE criterion, not two (Phase 3, comments.txt §3): a
 # run is "trained" once every load meets its human-derived criterion,

@@ -207,7 +207,7 @@ class _GatedFlatCore(torch.nn.Module):
         return self.cell.effective_param_count()
 
 
-def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool = False):
+def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool = False, bioinit: bool = False):
     from brainalign_wm.models.front_end import FrontEnd
     from brainalign_wm.models.hrl import HRLCore
     from brainalign_wm.models.heads import Heads
@@ -230,6 +230,16 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
             core = VanillaRNNCell(m["bottleneck"], m["flat_units"], mask=None).to(device)
         else:
             core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs).to(device)
+            if bioinit:
+                # Item 8.9b: arm D + bio-statistics weight init (M00001_bioinit
+                # only) -- replaces the cell's own uniform reset_parameters()
+                # draw with the LogNormal/spectral-radius-0.95 recipe, in place,
+                # AFTER construction (so bias init / mask wiring above are
+                # untouched, only weight_hh's initial values change).
+                from brainalign_wm.models.gru_cell import bioinit_weight_hh
+
+                with torch.no_grad():
+                    core.cell.weight_hh.copy_(bioinit_weight_hh(m["flat_units"]).to(device))
         h_star_dim = m["flat_units"]
     else:
         if substrate == "vanilla":
@@ -1283,6 +1293,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     L = run.get("L", 0)
     P = run.get("P", 0)
     pbwm_gate = bool(run.get("pbwm_gate", False))  # ablation-battery arm M111_pbwm only (§4.4)
+    bioinit = bool(run.get("bioinit", False))  # item 8.9b: M00001_bioinit only, S=0 GRU substrate
     total_steps = int(cfg.get("steps", full_cfg["tiers"]["smoke"]["steps"]))
     run_id = run["run_id"]
 
@@ -1365,7 +1376,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=seed)
 
-    front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate)
+    front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate, bioinit=bioinit)
     reflective_gate = ReflectiveGate(mech_cfg["reflection_lambda"], mech_cfg["reflection_beta"]) if M else None
 
     ckpt_dir = ROOT / "results" / "checkpoints" / run_id

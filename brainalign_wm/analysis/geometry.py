@@ -352,6 +352,60 @@ def dare_solve(A: np.ndarray, B: np.ndarray, Q: np.ndarray, R: np.ndarray) -> tu
     return P, K
 
 
+def orthogonalization_index(X: np.ndarray, labels: np.ndarray) -> float:
+    """[BASHIVAN24] eq. 1, item 8.7: `O = E[triu(1 - |cos(w_i, w_j)|)]`
+    over decision-hyperplane normals `w_i`, one per class (one-vs-rest
+    logistic regression -- `_fit_decoding_axis`'s binary case generalized
+    to >2 classes). `X`: `[n_trials, n_features]` (a single timepoint's
+    state, or any other feature space -- RNN hidden state and cached
+    ResNet features are both valid inputs here per item 8.7's "apply to
+    BOTH" ask, this function is agnostic to which). O near 0: class axes
+    nearly parallel (entangled); O near 1: nearly orthogonal (each class
+    has its own dedicated direction)."""
+    classes = np.unique(labels)
+    if len(classes) < 2:
+        return 0.0
+    Xs = StandardScaler().fit_transform(X)
+    axes = []
+    for c in classes:
+        y = (labels == c).astype(int)
+        clf = LogisticRegression(C=1.0, max_iter=1000)
+        clf.fit(Xs, y)
+        w = clf.coef_[0]
+        norm = np.linalg.norm(w)
+        axes.append(w / norm if norm > 1e-12 else w)
+    axes = np.stack(axes)
+    n = len(axes)
+    cos_terms = [1.0 - abs(float(axes[i] @ axes[j])) for i in range(n) for j in range(i + 1, n)]
+    return float(np.mean(cos_terms)) if cos_terms else 0.0
+
+
+def task_irrelevant_decoding(X: np.ndarray, labels: np.ndarray, n_folds: int = 4, seed: int = 0) -> float:
+    """Item 8.8: cross-validated decode accuracy of a TASK-IRRELEVANT label
+    (serial position -- primary, or category -- secondary) from delay-
+    period state `X: [n_trials, n_features]`. A load-3 Sternberg trial's
+    set-membership judgment does not need item order, so above-chance
+    position decoding means the network retains a full structured
+    representation, not a task-sufficient one ([BASHIVAN24]'s headline
+    result). Plain stratified-CV logistic regression -- reuses the same
+    `StandardScaler`+`LogisticRegression` recipe as the rest of this
+    module, no companion equivalent needed (this is a decode-accuracy
+    question, not a geometry-fitting one)."""
+    from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+    labels = np.asarray(labels)
+    if len(np.unique(labels)) < 2:
+        return float("nan")
+    Xs = StandardScaler().fit_transform(X)
+    clf = LogisticRegression(C=1.0, max_iter=1000)
+    n_folds = min(n_folds, int(np.min(np.bincount(np.unique(labels, return_inverse=True)[1]))))
+    if n_folds < 2:
+        return float("nan")
+    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    scores = cross_val_score(clf, Xs, labels, cv=cv)
+    return float(scores.mean())
+
+
 def lqr_gain(A: np.ndarray, B: np.ndarray, q_state: float = 1.0, r_control: float = 1.0) -> dict:
     """Design an LQR controller with identity-scaled cost matrices
     (`Q = q_state*I`, `R = r_control*I`). Mirrors

@@ -20,6 +20,48 @@ import torch
 import torch.nn as nn
 
 
+def bioinit_weight_hh(hidden_dim: int, n_gates: int = 3, seed: Optional[int] = None) -> torch.Tensor:
+    """Bio-statistics recurrent-weight init (item 8.9b, comments.txt §5,
+    [SHAKIBA26] Fig 1 box 3, connectome-free simplification): every entry
+    drawn once from `LogNormal(mu=-0.5, sigma=0.5)` -- a FIXED multiset of
+    magnitudes (one draw, not repeated/resampled per entry), matching their
+    finding that a permuted-but-fixed multiset of bio weight values
+    performs comparably to the real connectome mapping, while fresh
+    per-entry resampling from a fitted marginal degraded it. Every value is
+    strictly positive (LogNormal's support), which is exactly the "strictly
+    positive recurrent weights" condition their Table 3 result is about.
+
+    Rescaled per GATE BLOCK (each `[hidden_dim, hidden_dim]` slice treated
+    as its own square recurrent matrix -- `weight_hh` is `[n_gates*H, H]`,
+    3 stacked gate blocks for a GRU, not the single H x H matrix their
+    vanilla-RNN recipe assumes; adapted here by applying the same
+    mean/spectral-radius targets to each block independently) in two
+    sequential steps that CANNOT both be hit exactly by one scalar (scaling
+    a matrix by a constant `c` scales both its mean and its spectral radius
+    by `c`, so they can only coincide if the raw draw already has the
+    target ratio): first scale to mean 0.1 (sets the overall magnitude
+    scale), then scale AGAIN to spectral radius 0.95 (the training-
+    stability-relevant target, so it gets the final, authoritative word --
+    the block's mean ends up at `0.1 * (0.95 / radius_after_first_rescale)`,
+    not exactly 0.1, after this second pass).
+
+    Returns `[n_gates*hidden_dim, hidden_dim]`, ready to copy directly into
+    `MaskedGRUCell.weight_hh`."""
+    gen = torch.Generator().manual_seed(seed) if seed is not None else None
+    blocks = []
+    for _ in range(n_gates):
+        w = (
+            torch.distributions.LogNormal(-0.5, 0.5).sample((hidden_dim, hidden_dim)) if gen is None
+            else torch.exp(torch.normal(-0.5, 0.5, size=(hidden_dim, hidden_dim), generator=gen))
+        )
+        w = w * (0.1 / w.mean())
+        radius = torch.linalg.eigvals(w).abs().max().item()
+        if radius > 1e-12:
+            w = w * (0.95 / radius)
+        blocks.append(w)
+    return torch.cat(blocks, dim=0)
+
+
 class MaskedGRUCell(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None):
         super().__init__()

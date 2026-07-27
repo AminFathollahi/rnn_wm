@@ -1506,3 +1506,77 @@ yet, only synthetic data and (for the driver) fabricated fixtures --
 (nonlinear Koopman, still not needed per 8b's rationale), and extending the
 driver to per-run content/context/orthogonalization/task-irrelevant metrics
 are all real Phase 11 prerequisites, not Phase 8 gaps.
+
+---
+
+## Phase 9a — Capacity curve (item 9.1)
+
+**Changed:**
+- `scripts/run_capacity_curve.py`: campaign script for M00000's own
+  architecture (S=0,M=0,P=0,T=0,D=0) at H (`model.flat_units`) in
+  {2,4,8,16,32,64,128,256}, 1 seed, dev tier (20000 steps). The only thing
+  varying across runs is H, via the per-run `flat_units` override
+  `train.py::train_one` already reads (same mechanism
+  `run_perf_matched_baselines.py`'s `flat_gru_2x` arm uses -- no new
+  model/training code). `run_id` convention: `M00000_H{H}_s{seed}`.
+- `scripts/analyze_capacity_curve.py`: loads each run's checkpoint, computes
+  final accuracy via `train.py::evaluate_accuracy` (the exact function
+  training itself uses, not a reimplementation) and Phase 8's `mean_speed`/
+  `pca_participation_ratio` on a fresh 100-trial eval rollout of the load-3
+  delay period, aggregates across seeds into `results/capacity_curve.csv`,
+  and plots accuracy-vs-H and PCA-participation-ratio-vs-H with a knee
+  marker (`results/figures/capacity_curve.png`).
+- `tests/test_capacity_curve.py`: 3 tests -- 2 planted-answer tests for the
+  knee heuristic (early plateau, monotonic-fallback), 1 real-model smoke
+  test of `_rollout_hidden_states`' shape/finiteness (skipped if
+  `stimuli/faces` isn't built; here it is, so it ran for real).
+
+**Run:** `python scripts/run_capacity_curve.py --seeds 1 --tier dev --budget 7h`
+(all 8 runs completed; wall clock ~2080s/run, ~4.6h total), then
+`python scripts/analyze_capacity_curve.py`.
+
+```
+H,acc_load1,acc_load2,acc_load3,criterion_met_frac,mean_speed,pca_participation_ratio
+2,   0.57, 0.58, 0.51, 0.0, 8.4e-22, 1.00
+4,   0.79, 0.67, 0.60, 0.0, 0.072,   1.35
+8,   0.92, 0.68, 0.55, 0.0, 0.019,   2.25
+16,  0.94, 0.73, 0.68, 0.0, 0.045,   2.81
+32,  0.87, 0.62, 0.59, 0.0, 0.257,   3.46
+64,  0.97, 0.69, 0.59, 0.0, 0.200,   5.24
+128, 0.96, 0.66, 0.55, 0.0, 0.299,   7.16
+256, 0.99, 0.60, 0.57, 0.0, 0.399,   9.23
+```
+knee (smallest H within 2pp of the load3-accuracy ceiling): H=4
+
+**Honest read of this result (do not overstate it):** `criterion_met_frac`
+is 0.0 for every H -- at dev tier (20000 steps, 1 seed), NO run reached
+any of the load1/load2/load3 accuracy gates in `configs/config.yaml`.
+Load1 accuracy shows a genuine, interpretable capacity curve (rises from
+0.57 to a plateau ~0.94-0.99 by H=8-16). Load2/load3 accuracy do NOT show
+a clean capacity-dependent curve at this tier -- they hover noisily in
+~0.55-0.73 with no monotonic trend, because 20000 steps and 1 seed is not
+enough for this architecture to solve the harder loads regardless of H
+(load3 at H=256, the largest capacity tested, is 0.57 -- no better than
+H=4's 0.60). The reported "knee (H=4)" is therefore an artifact of the
+load3 curve's noise floor, not a real capacity threshold -- flagging this
+explicitly rather than reporting the number without context. The one
+clean, trustworthy signal here is geometric: `pca_participation_ratio`
+increases monotonically and substantially with H (1.00 -> 9.23), exactly
+as expected (more units, more directions available to the delay-period
+manifold), and is a more reliable proxy for "how much capacity is this
+network using" than load3 accuracy at this tier. Resolving the real load3
+capacity knee requires full-tier, multi-seed training -- Phase 11's job,
+not a Phase 9a rerun (`run_capacity_curve.py --tier full` is already wired
+for this, no code changes needed).
+
+```
+$ python -m pytest
+230 passed, 15 warnings in 282.64s
+```
+(227 pre-Phase-9a + 3 new in `test_capacity_curve.py`.)
+
+**Not done / deferred:** items 9.2 (distillation) and 9.3 (tiny RNN bandit
+tasks) are Phase 9b, not yet dispatched -- this commit is 9.1 only, same
+split pattern as Phase 8's 8a/8b/8c. Re-running this sweep at `--tier full`
+with 3+ seeds to get a trustworthy load2/load3 knee (rather than the
+noisy dev-tier one above) is explicitly Phase 11's job.

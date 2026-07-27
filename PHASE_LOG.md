@@ -1326,3 +1326,183 @@ $ python -m pytest
   (sub-phase 8c) at the earliest, more likely Phase 11.
 - `koopman_edmd` (nonlinear Koopman extension) not built -- see rationale
   above.
+
+---
+
+## Phase 8c — Analysis Suite, part 3/3: orthogonalization, task-irrelevant decoding, network topology, bio-init arm, driver script
+
+Covers items 8.7 (orthogonalization index), 8.8 (task-irrelevant decoding),
+8.9/8.9a-d (network topology: KDE entropy, CNM modularity, degree
+assortativity), 8.9b (the positive-weight-init prediction + `M00001_bioinit`
+arm), and 8.10 (`scripts/run_geometry.py` driver). **Phase 8 is complete
+after this commit.**
+
+**Process note: this sub-phase had two attempts.** The first fork's session
+hit an infrastructure/quota limit ("You've hit your session limit") partway
+through implementing item 8.9's topology refactor -- an external failure,
+not a task-correctness problem -- and its work was never committed. The
+uncommitted diff survived in the working tree, however: `geometry.py`'s
+`orthogonalization_index`/`task_irrelevant_decoding` (8.7/8.8),
+`network_properties.py`'s `weight_entropy(method="kde")`/
+`modularity_q(method="cnm")`/new `degree_assortativity` (8.9a-d, with a
+`_thresholded_largest_cc_graph` helper factored out of `small_worldness` so
+both metrics see the same graph), `gru_cell.py`'s `bioinit_weight_hh`
+(8.9b's init function) and `train.py`'s `bioinit` plumbing through
+`_build_model`/`train_one`, and the untracked `scripts/run_bioinit_arm.py`
+campaign script. This second pass reviewed that surviving work line-by-line
+against comments.txt's spec (found it correct, well-reasoned, and
+consistent with the existing codebase's conventions -- no changes made to
+the implementation itself), then completed the remainder: PDF verification,
+tests for every new function, the item 8.10 driver script, and this log
+entry.
+
+**PDF verification (item 8.9's explicit "read `../shakiba26.pdf` Fig 3 and
+Tables 2-3 before implementing" instruction):** actually opened
+`../shakiba26.pdf` (21 pages, via `pdftotext`+page-split to locate the right
+pages, then the `Read` tool's `pages` parameter to view the real figure/
+tables). Findings:
+- Tables 2-3 are on PDF p.6; Fig. 3 (Modularity/Small-worldness/
+  Assortativity/Entropy, all four panels) is on p.7.
+- Entropy regimes (p.4 body text, verbatim): "high entropy variants (W and
+  WD*C; entropy ~3-6)... Intermediate-entropy variants (W*D*C, WD*, WD,
+  WD*C*, and W!D*C; entropy ~0.6-1.5)... Low-entropy variants (WDC,
+  W*D*C*, W*DC*, and W!D*C*; entropy ~0.02-0.6)".
+- Modularity Q (p.4, verbatim): "developed the strongest community
+  structure (Q ~ 0.4-0.5)... remained only weakly modular (Q ~ 0.1)".
+- Assortativity (p.4, verbatim): "WD*C... positive assortativity across
+  tasks (r ~ 0.4-0.5)... [several functionally-initialized variants] were
+  disassortative (r < 0)".
+All three sets of numbers already present in the surviving uncommitted
+docstrings (from the first, interrupted attempt) matched the real paper
+exactly -- no corrections needed, only added the page citations above into
+`network_properties.py`'s three affected docstrings as the evidence the
+paper was actually read (rather than the numbers being a lucky match to
+comments.txt's own paraphrase, which itself get one range wrong: "~0.02-0.08"
+for low-entropy, vs the paper's real "~0.02-0.6").
+
+**New tests (this sub-phase's own work, item 8's acceptance criterion:
+"each of 8.1-8.8 has a test on SYNTHETIC data with a KNOWN answer"):**
+- `tests/test_geometry.py` (+4): `orthogonalization_index` and
+  `task_irrelevant_decoding`.
+- `tests/test_network_properties.py` (+9): `weight_entropy(method="kde")`,
+  `modularity_q(method="cnm")`, `degree_assortativity` (+2 unknown-method
+  `ValueError` tests reused from the existing style).
+- New `tests/test_gru_cell.py` (+4): `bioinit_weight_hh`.
+
+**Acceptance -- actual output** (`pytest tests/test_geometry.py -k "orthogonalization or task_irrelevant" -v -s`):
+
+```
+orthogonalization_index (10-class one-hot): 0.8889
+orthogonalization_index (2-class same-axis): -2.2e-16
+task_irrelevant_decoding (decodable): 1.0
+task_irrelevant_decoding (independent): 0.5467
+```
+**Non-obvious finding while writing the orthogonal-classes test**: a naive
+first draft planted 3 classes at one-hot positions in R^3 expecting O near
+1 ("orthogonal axes -> orthogonal decision normals") and got O = 0.5, not a
+bug. For K one-vs-rest classifiers on a K-class one-hot simplex, each
+normal must push away from the OTHER K-1 classes' shared centroid, not just
+point along its own axis; the pairwise cosine has a closed form
+`cos = -1/(K-1)` regardless of how orthogonal the raw class centers are --
+for K=3 that's exactly -0.5, giving O = 1-|cos| = 0.5. Using K=10
+(`cos = -1/9`, O ~ 0.89) makes the O -> 1 limit as K grows unambiguous
+instead. Similarly, the first draft of the "entangled" test used 3 classes
+along one shared axis (low/mid/high) and got O = 0.625, not near 0, because
+the MIDDLE class isn't linearly separable from the two flanking classes by
+a single hyperplane, so its fitted decision normal ends up arbitrary rather
+than aligned with the shared axis -- switched to exactly 2 classes (whose
+OvR normals are exact mirror images of each other by construction,
+`w_1 = -w_0`), giving O = 0 to floating-point precision. Both corrections
+were caught by computing the expected values by hand before trusting the
+test, the same discipline 8a's and 8b's forks used on their own vacuous
+first drafts.
+
+```
+KDE entropy uniform: 6.635  concentrated: 5.877
+```
+Point-mass still gives exactly 0 (short-circuits before the KDE path, same
+as the histogram method). For the uniform-vs-concentrated comparison,
+**a second non-obvious finding**: this KDE-entropy method turned out to be
+largely SCALE-invariant, not just shape-sensitive -- tightening a Gaussian's
+sigma by 10x (0.1 -> 0.01 -> 0.001) barely moved its entropy (6.06 -> 5.88 ->
+5.95), because Scott's-rule KDE bandwidth and the `[min,max]` grid both
+scale with the sample's own spread. So the achievable uniform-vs-concentrated
+gap is modest (~0.6-0.75 bits empirically), not the >1.0 bit gap a first
+draft of this test assumed; the assertion margin was set to 0.3 to stay
+safely within the empirically observed range across several sigmas.
+
+```
+degree_assortativity (two cliques + bridge): 0.7687
+degree_assortativity (star-of-stars): <-0.2 (exact value seed-dependent, see test)
+```
+**A third non-obvious finding, this one in the FIRST attempt's surviving
+test draft**: a "hub-clique with attached leaves" construction (all hubs
+densely interconnected, each trailing a couple of leaf nodes) was expected
+to give positive assortativity ("hubs connect to hubs, so r > 0") but
+actually measures r = -0.222. A majority of same-degree edges (28 hub-hub
+vs 16 hub-leaf here) is not sufficient -- degree assortativity is a
+Pearson correlation over edge endpoint degrees, and every hub-leaf edge
+pairs a high-degree node with a degree-1 node, which pulls the correlation
+down hard regardless of how outnumbered those edges are by hub-hub pairs.
+Replaced with two fully-connected cliques of DIFFERENT sizes (different
+within-clique degree) joined by a single bridge edge -- nearly every edge
+now pairs same-degree nodes, only one crosses the degree gap -- verified at
+r ~ 0.77.
+
+```
+bioinit_weight_hh: shape (36, 12) for H=12,n_gates=3; all values > 0;
+each gate block's spectral radius within 0.05 of the 0.95 target;
+identical output for the same seed, different output across seeds.
+```
+
+**`scripts/run_geometry.py` (item 8.10):** driver over `results/manifest.jsonl`
+-> `results/geometry_results.csv`. Since no real training runs exist yet
+(no `manifest.jsonl` on disk), the graceful-empty-case path is this
+script's actual, currently-exercised behavior -- confirmed by running it
+against the real (missing) manifest: it writes a header-only CSV and prints
+an explanatory message, exit 0. Also smoke-tested the non-empty path with
+fabricated fixtures (a fake `manifest.jsonl` + a fake
+`results/activity_logs/{run_id}.parquet` with 20 trials x 6 ticks x 4 units,
+no real checkpoint) in a throwaway run, confirmed it produces a correct
+one-row CSV (`mean_speed`/`pca_participation_ratio` sane, topology columns
+correctly empty since no checkpoint exists), then deleted the fixtures --
+`git status` confirms nothing from that smoke test was left behind.
+Deliberately does NOT attempt content/context rotation, orthogonalization
+index, or task-irrelevant decoding per run in this first version --
+comments.txt's own acceptance bar for 8.10 is just "driver ... -> CSV", not
+full 8.1-8.9 coverage per run, and reconstructing per-trial content/
+context/position labels from the log schema alone is Phase 11's job, once
+real checkpoints exist to design that against. Topology metrics
+(`weight_entropy`/`modularity_q`/`small_worldness`/`degree_assortativity`)
+are computed from a matching checkpoint's `core.cell.weight_hh` if one
+exists (best-effort: returns `{}`, not an error, for substrates with no
+single `weight_hh` matrix to read, e.g. S=1 worker/manager split or
+vanilla).
+
+```
+$ python -m pytest
+227 passed, 15 warnings in 276.42s
+```
+(211 pre-Phase-8c + 16 new: 4 geometry.py + 9 network_properties.py + 4 gru_cell.py)
+
+**Design decisions/deviations, with rationale:**
+- `run_geometry.py`'s single-trial ensemble builder drops any trial whose
+  tick count doesn't match the session's modal tick count, rather than
+  padding/truncating -- a handful of truncated/aborted trials shouldn't
+  force every other trial in the array down to their length, and this
+  driver's real exercise (Phase 11) is expected to have near-uniform trial
+  lengths within a session in the first place.
+- `degree_assortativity`'s docstring/PHASE_LOG note above documents the
+  hub-clique-plus-leaves test-construction mistake in detail (not just the
+  fix) because it's a genuinely counter-intuitive result about what degree
+  assortativity actually measures, worth being able to find again.
+
+**Not done / deferred:** none for Phase 8 itself -- items 8.1-8.10 are all
+implemented and tested. Carried forward to Phase 11 (per repeated notes in
+8a/8b/8c): none of `geometry.py`/`twin.py`/`network_properties.py`'s new
+functions have been run on a REAL trained model's activity log/checkpoint
+yet, only synthetic data and (for the driver) fabricated fixtures --
+`scripts/run_geometry.py`'s non-empty-manifest path, `koopman_edmd`
+(nonlinear Koopman, still not needed per 8b's rationale), and extending the
+driver to per-run content/context/orthogonalization/task-irrelevant metrics
+are all real Phase 11 prerequisites, not Phase 8 gaps.

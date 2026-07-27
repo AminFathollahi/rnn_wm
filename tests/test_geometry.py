@@ -11,9 +11,11 @@ from brainalign_wm.analysis.geometry import (
     cross_temporal_generalization_auc,
     libby_stable_switching_units,
     mean_speed,
+    orthogonalization_index,
     participation_ratio,
     participation_ratio_by_load,
     pca_participation_ratio,
+    task_irrelevant_decoding,
 )
 
 
@@ -209,3 +211,73 @@ def test_trial_averaging_biases_dynamics_estimate():
 def test_mean_speed_zero_for_static_state():
     Z = np.ones((10, 5, 3))
     assert mean_speed(Z) == pytest.approx(0.0)
+
+
+# ---------------- 8.7: orthogonalization index [BASHIVAN24] ----------------
+
+def test_orthogonalization_index_near_one_for_many_orthogonal_classes():
+    """N classes, one-hot along N dedicated axes. NOTE: for one-vs-rest
+    normals on a K-class one-hot simplex, the pairwise cosine has a known
+    closed form cos = -1/(K-1) (each OvR hyperplane must push away from
+    the OTHER K-1 classes' shared centroid, not just its own axis) -- NOT
+    0 even though the class centers themselves are exactly orthogonal, so
+    a small K (e.g. 3, cos=-0.5, O=0.5) does NOT give O near 1. Using
+    K=10 (cos=-1/9, O~0.89) makes the -> 1 limit as K grows unambiguous."""
+    rng = np.random.RandomState(0)
+    n_per_class = 150
+    n_classes = 10
+    X, labels = [], []
+    for c in range(n_classes):
+        centers = np.zeros((n_per_class, n_classes))
+        centers[:, c] = 3.0
+        X.append(centers + rng.randn(n_per_class, n_classes) * 0.3)
+        labels.append(np.full(n_per_class, c))
+    X = np.concatenate(X)
+    labels = np.concatenate(labels)
+    O = orthogonalization_index(X, labels)
+    print("orthogonalization_index (10-class one-hot):", O)
+    assert O > 0.8, O
+
+
+def test_orthogonalization_index_near_zero_for_antipodal_classes():
+    """2 classes offset in opposite directions along the SAME 1-D axis --
+    with exactly 2 classes, the two one-vs-rest normals are exact mirror
+    images of each other (`w_1 = -w_0`) by construction, so
+    `|cos(w_0, w_1)| == 1` exactly and O == 0 exactly: the classes are
+    fully entangled on one shared axis, no dedicated direction each."""
+    rng = np.random.RandomState(1)
+    n = 200
+    w = np.array([1.0, 0.0, 0.0, 0.0])
+    X = np.concatenate([
+        -2.0 * w[None, :] + rng.randn(n, 4) * 0.2,
+        2.0 * w[None, :] + rng.randn(n, 4) * 0.2,
+    ])
+    labels = np.concatenate([np.zeros(n, dtype=int), np.ones(n, dtype=int)])
+    O = orthogonalization_index(X, labels)
+    print("orthogonalization_index (2-class same-axis):", O)
+    assert O < 1e-6, O
+
+
+# ---------------- 8.8: task-irrelevant decoding [BASHIVAN24] ----------------
+
+def test_task_irrelevant_decoding_recovers_perfectly_decodable_label():
+    rng = np.random.RandomState(2)
+    n = 300
+    labels = rng.randint(0, 2, size=n)
+    sign = np.where(labels == 1, 1.0, -1.0)
+    X = np.zeros((n, 5))
+    X[:, 0] = sign * 3.0
+    X += rng.randn(n, 5) * 0.2
+    acc = task_irrelevant_decoding(X, labels, n_folds=4, seed=0)
+    print("task_irrelevant_decoding (decodable):", acc)
+    assert acc > 0.95, acc
+
+
+def test_task_irrelevant_decoding_near_chance_for_independent_label():
+    rng = np.random.RandomState(3)
+    n = 300
+    X = rng.randn(n, 5)
+    labels = rng.randint(0, 2, size=n)  # independent of X
+    acc = task_irrelevant_decoding(X, labels, n_folds=4, seed=0)
+    print("task_irrelevant_decoding (independent):", acc)
+    assert 0.35 < acc < 0.65, acc

@@ -44,16 +44,46 @@ import numpy as np
 import pandas as pd
 
 
-def weight_entropy(W: np.ndarray, n_bins: int = 50) -> float:
-    """Shannon entropy (bits) of `W`'s value histogram (Sheeran et al.
-    2024's weight-entropy diagnostic). `W` is flattened and binned over its
-    own [min, max] range; a completely uniform histogram gives
-    log2(n_bins) (max entropy), a point mass gives 0."""
+def weight_entropy(W: np.ndarray, n_bins: int = 50, method: str = "histogram", n_grid: int = 100) -> float:
+    """Shannon entropy (bits) of `W`'s value distribution (Sheeran et al.
+    2024's weight-entropy diagnostic).
+
+    `method="histogram"` (default, kept for backward compatibility):
+    `W` flattened and binned over its own [min, max] range into `n_bins`
+    bins; a completely uniform histogram gives log2(n_bins) (max entropy),
+    a point mass gives 0.
+
+    `method="kde"` (item 8.9a, comments.txt §5): [SHAKIBA26] use a Gaussian
+    KDE over `n_grid=100` grid points spanning `W`'s value range instead of
+    a histogram, so their published entropy regimes (high ~3-6, random-
+    like; intermediate ~0.6-1.5; low ~0.02-0.6 -- verified verbatim against
+    `../shakiba26.pdf` p.4 body text, "entropy variants (W and WD*C;
+    entropy ~3-6)... Intermediate-entropy variants... entropy ~0.6-1.5...
+    Low-entropy variants... entropy ~0.02-0.6"; comments.txt's own
+    paraphrase said "~0.02-0.08", the real range is wider) are directly
+    comparable to numbers from this function.
+    `scipy.stats.gaussian_kde` estimates a continuous density over an
+    `n_grid`-point grid; that grid IS the discretization the entropy sum is
+    taken over (each grid point treated as one bin of width
+    `(max-min)/(n_grid-1)`, density values renormalized to sum to 1 over
+    the grid before the Shannon-entropy formula -- a KDE has no natural
+    "bin" without an explicit grid, this is the natural analogue of the
+    histogram method's bin count)."""
     vals = np.asarray(W).ravel()
     if vals.size == 0 or np.allclose(vals.max(), vals.min()):
         return 0.0
-    counts, _ = np.histogram(vals, bins=n_bins)
-    p = counts / counts.sum()
+    if method == "histogram":
+        counts, _ = np.histogram(vals, bins=n_bins)
+        p = counts / counts.sum()
+    elif method == "kde":
+        from scipy.stats import gaussian_kde
+
+        kde = gaussian_kde(vals)
+        grid = np.linspace(vals.min(), vals.max(), n_grid)
+        density = kde(grid)
+        p = density / density.sum()
+    else:
+        raise ValueError(f"weight_entropy: unknown method {method!r}, expected 'histogram' or 'kde'")
     p = p[p > 0]
     return float(-(p * np.log2(p)).sum())
 
@@ -72,20 +102,74 @@ def gru_effective_connectivity(weight_hh: np.ndarray) -> np.ndarray:
     return C
 
 
-def modularity_q(C: np.ndarray, seed: int = 0, resolution: float = 1.0) -> Optional[float]:
-    """Louvain community modularity Q of the weighted undirected graph
-    built from connectivity matrix `C` (`C[i,j]` = edge weight, symmetrized
-    via C+C.T since GRU connectivity is inherently directed but modularity
-    on a signed-direction graph isn't well-defined). Returns None if the
-    graph is empty/disconnected-only (fewer than 2 nodes with any edge)."""
+def modularity_q(
+    C: np.ndarray, seed: int = 0, resolution: float = 1.0, method: str = "louvain",
+) -> Optional[float]:
+    """Community modularity Q of the weighted undirected graph built from
+    connectivity matrix `C` (`C[i,j]` = edge weight, symmetrized via C+C.T
+    since GRU connectivity is inherently directed but modularity on a
+    signed-direction graph isn't well-defined). Returns None if the graph
+    is empty/disconnected-only (fewer than 2 nodes with any edge).
+
+    `method="louvain"` (default, kept for backward compatibility):
+    `nx.algorithms.community.louvain_communities`.
+
+    `method="cnm"` (item 8.9b, comments.txt §5): Clauset-Newman-Moore
+    GREEDY modularity maximization, [SHAKIBA26]'s own estimator (their Q
+    ranges -- strongly modular ~0.4-0.5, weakly constrained ~0.1 --
+    verified against `../shakiba26.pdf` p.4, "developed the strongest
+    community structure (Q ~ 0.4-0.5)... remained only weakly modular
+    (Q ~ 0.1)" -- were measured with CNM, not Louvain; the two are
+    different algorithms with no guaranteed-identical output on the same
+    graph, so report which one produced a given number, not just
+    "modularity Q")."""
     C = np.asarray(C)
     C_sym = C + C.T
     G = nx.from_numpy_array(C_sym)
     G.remove_edges_from(nx.selfloop_edges(G))
     if G.number_of_edges() == 0:
         return None
-    communities = nx.algorithms.community.louvain_communities(G, weight="weight", seed=seed, resolution=resolution)
+    if method == "louvain":
+        communities = nx.algorithms.community.louvain_communities(G, weight="weight", seed=seed, resolution=resolution)
+    elif method == "cnm":
+        communities = nx.algorithms.community.greedy_modularity_communities(
+            G, weight="weight", resolution=resolution
+        )
+    else:
+        raise ValueError(f"modularity_q: unknown method {method!r}, expected 'louvain' or 'cnm'")
     return float(nx.algorithms.community.modularity(G, communities, weight="weight", resolution=resolution))
+
+
+def _thresholded_largest_cc_graph(C: np.ndarray, density: float, max_nodes: int, seed: int) -> Optional[nx.Graph]:
+    """Shared graph construction for `small_worldness`/`degree_assortativity`
+    (item 8.9d factored this out of `small_worldness`, which had it
+    inline, so both metrics see the SAME graph): subsample to `max_nodes`
+    (fixed `seed`, reproducible), symmetrize, keep the top `density`
+    fraction of edges by magnitude, return the largest connected component
+    (both `sigma` and `degree_assortativity_coefficient` want a connected
+    graph). Returns `None` if the result would be empty/too small (<10
+    nodes) for either metric to be meaningful."""
+    C = np.asarray(C)
+    if C.shape[0] > max_nodes:
+        idx = np.random.RandomState(seed).choice(C.shape[0], size=max_nodes, replace=False)
+        C = C[np.ix_(idx, idx)]
+    C_sym = C + C.T
+    n = C_sym.shape[0]
+    flat = C_sym[np.triu_indices(n, k=1)]
+    if flat.size == 0 or np.count_nonzero(flat) == 0:
+        return None
+    thresh = np.quantile(flat[flat > 0], 1.0 - density) if np.any(flat > 0) else np.inf
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for i, j in zip(*np.triu_indices(n, k=1)):
+        if C_sym[i, j] >= thresh:
+            G.add_edge(int(i), int(j))
+    if G.number_of_nodes() == 0:
+        return None
+    largest_cc = max(nx.connected_components(G), key=len)
+    if len(largest_cc) < 10:
+        return None
+    return G.subgraph(largest_cc).copy()
 
 
 def small_worldness(
@@ -109,31 +193,39 @@ def small_worldness(
     requires a connected graph); returns None if that component is too
     small (<10 nodes) for the random-reference comparison to be
     meaningful."""
-    C = np.asarray(C)
-    if C.shape[0] > max_nodes:
-        idx = np.random.RandomState(seed).choice(C.shape[0], size=max_nodes, replace=False)
-        C = C[np.ix_(idx, idx)]
-    C_sym = C + C.T
-    n = C_sym.shape[0]
-    flat = C_sym[np.triu_indices(n, k=1)]
-    if flat.size == 0 or np.count_nonzero(flat) == 0:
+    G_cc = _thresholded_largest_cc_graph(C, density, max_nodes, seed)
+    if G_cc is None:
         return None
-    thresh = np.quantile(flat[flat > 0], 1.0 - density) if np.any(flat > 0) else np.inf
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
-    for i, j in zip(*np.triu_indices(n, k=1)):
-        if C_sym[i, j] >= thresh:
-            G.add_edge(int(i), int(j))
-    if G.number_of_nodes() == 0:
-        return None
-    largest_cc = max(nx.connected_components(G), key=len)
-    if len(largest_cc) < 10:
-        return None
-    G_cc = G.subgraph(largest_cc).copy()
     try:
         return float(nx.algorithms.smallworld.sigma(G_cc, niter=n_iter, nrand=n_random, seed=seed))
     except (nx.NetworkXError, ZeroDivisionError):
         return None
+
+
+def degree_assortativity(C: np.ndarray, density: float = 0.1, seed: int = 0, max_nodes: int = 64) -> Optional[float]:
+    """Item 8.9d (comments.txt §5, NOT previously implemented): degree
+    correlation `r` of the SAME thresholded/subsampled graph
+    `small_worldness` builds (`_thresholded_largest_cc_graph`, ~3 lines on
+    top of `gru_effective_connectivity`, per the spec's own estimate).
+    `r > 0`: hubs preferentially connect to other hubs (hub-rich
+    integrative structure). `r < 0`: hub-periphery structure. [SHAKIBA26]:
+    spatially-constrained-but-randomly-initialized variants went
+    positively assortative (r ~ 0.4-0.5); functionally initialized ones
+    went DISASSORTATIVE (r < 0) -- verified against `../shakiba26.pdf` p.4,
+    "WD*C... positive assortativity across tasks (r ~ 0.4-0.5)... [W*D*C
+    and W!D*C*] were disassortative (r < 0)" and Fig. 3c (p.7) -- this
+    metric dissociates two kinds of constraint the other three topology
+    metrics (entropy/modularity/small-worldness) conflate (item 8.9's own
+    "these four do NOT move together" warning, also Fig. 3's own caption,
+    p.7)."""
+    G_cc = _thresholded_largest_cc_graph(C, density, max_nodes, seed)
+    if G_cc is None:
+        return None
+    try:
+        r = nx.degree_assortativity_coefficient(G_cc)
+    except (nx.NetworkXError, ZeroDivisionError):
+        return None
+    return float(r) if r == r else None  # nan-check without importing math for one comparison
 
 
 def _epoch_trial_means(df: pd.DataFrame, epoch: str) -> pd.DataFrame:

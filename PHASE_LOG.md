@@ -1000,3 +1000,147 @@ $ python -m pytest
   it) -- out of scope for a phase whose acceptance bar is "does a
   representation emerge, and how fast," which item 7.1 already answers
   (yes for `n`, weakly/inconclusively for `feature`).
+
+---
+
+## Phase 8a — Analysis Suite, part 1/3: content/context rotation, participation ratio, single-trial dynamics
+
+**Phase 8 is split into three commits (8a/8b/8c), a deliberate deviation
+from "one phase = one commit."** Comments.txt §5 Phase 8 covers 10
+sub-items (8.1-8.10) spanning content/context rotation, participation
+ratio, single-trial-dynamics constraints, DMD/Koopman fitting, causal
+perturbation, LQR control, correct/incorrect trial splits, cross-temporal
+generalization, orthogonalization index, task-irrelevant decoding, network
+topology (reading an external PDF), and a new model arm with a
+bio-statistics weight init -- more scope than any phase so far, comparable
+to Phases 5+7 combined. Splitting keeps each commit reviewable. **Phase 8
+as a whole is NOT done after this commit** -- 8b (8.4 DMD/Koopman/causal
+perturbation/LQR, 8.5 correct-vs-incorrect, 8.6 cross-temporal
+generalization) and 8c (8.7 orthogonalization index, 8.8 task-irrelevant
+decoding, 8.9/8.9b network topology + bio-init arm, 8.10 driver script)
+are still pending.
+
+**This commit covers items 8.1, 8.2, 8.3 only.**
+
+**Changed:**
+- New `brainalign_wm/analysis/geometry.py`: module docstring states the
+  C3 single-trial-ensemble constraint (item 8.3) up front -- every
+  function takes `Z: [n_trials, n_timebins, n_units]` with one row per
+  real trial, never a trial-averaged mean. Mirrors
+  `../../wm_dynamics/src/geometry.py`'s conventions where it already
+  implements a method (per the phase preamble's explicit instruction),
+  read directly rather than reinvented:
+  - `participation_ratio`/`pca_participation_ratio` (item 8.2): identical
+    formula to the companion's `participation_ratio` (Abbott et al. 2011).
+  - `participation_ratio_by_load` (item 8.2): PR of the pooled
+    single-trial delay-period state, per load -- the flat-vs-expanding
+    test.
+  - `_fit_decoding_axis`/`axis_rotation_angle`/`content_context_rotation`
+    (item 8.1): mirrors the companion's `_fit_axis_weights` (per-timepoint
+    logistic-regression decoding axis, unit-normalized) but reports the
+    single-pair angle in degrees between two timepoints directly, rather
+    than the companion's `axis_angular_velocity`'s rate-over-many-steps
+    sweep -- item 8.1's own framing ("rotated 90 degrees by t+10") asks
+    for the direct angle, not a rate.
+  - `cross_temporal_generalization_auc` (item 8.1): mirrors the
+    companion's `cross_temporal_generalization` EXACTLY (LinearSVC +
+    ROC-AUC + StratifiedKFold) -- a DIFFERENT convention from this repo's
+    own `analysis/cross_temporal.py::cross_temporal_decoding`
+    (LogisticRegression + accuracy), deliberately: item 8.1 needs numbers
+    comparable to the companion project's own CTG results ("so the two
+    sets of numbers are directly comparable"), whereas item 8.6 (not this
+    commit) is the one that explicitly reuses this repo's own
+    `cross_temporal_decoding`/`stability_index`. Keeping the two separate
+    rather than collapsing them into one CTG function is deliberate, not
+    duplication.
+  - `libby_stable_switching_units` (item 8.1): the [LIBBY21] per-unit
+    decomposition -- no companion-project equivalent found, built fresh.
+    Per-unit sign of content-selectivity (mean activity difference between
+    the two content classes) during `encode_bins` vs. `maintain_bins`;
+    "stable" if the sign is preserved, "switching" if it flips. Requires
+    exactly 2 content classes (selectivity sign is only well-defined for a
+    binary contrast) -- raises `ValueError` otherwise rather than silently
+    picking an arbitrary pairing.
+  - `mean_speed` (item 8.3): NOT in the original item list, added to give
+    8.3's own explicit test ask ("trial-averaged and single-trial
+    estimates differ on data where you plant a known flow") something
+    concrete to measure. Mean per-tick displacement magnitude, single
+    population scalar (not per-unit) -- the minimal probe that
+    demonstrates trial-averaging's contraction effect on jittered
+    non-linear flows (see the test below for why a LINEAR flow does NOT
+    show this effect and a circular one does).
+- New `tests/test_geometry.py` (10 tests), each with a SYNTHETIC,
+  KNOWN-answer construction (item 8's acceptance criterion: "a geometry
+  function that cannot recover a planted ground truth is worthless").
+
+**Acceptance -- actual output** (`pytest tests/test_geometry.py -v -s`):
+
+```
+content_context_rotation: {'content_rotation_deg': 89.76, 'context_rotation_deg': 0.93,
+                            'paired_difference_deg': 88.83}
+```
+Planted: content axis rotates 90 deg from t=0 to t=10 (T=11), context axis
+is fixed (0 deg). Recovered: 89.76 / 0.93 / 88.83 -- matches the planted
+ground truth to within noise, and the direction (content rotates far more
+than context) is unambiguous. `test_axis_rotation_angle_near_zero_for_static_axis`:
+a genuinely static axis recovers < 20 deg (noise floor), confirming the
+function doesn't spuriously report rotation on a non-rotating axis.
+
+```
+libby_stable_switching_units: 0.7 0.3
+```
+Planted: 7/10 units stable, 3/10 switching. Recovered exactly: 0.7/0.3,
+and `is_stable` matches the planted boolean array element-for-element (not
+just the aggregate fraction).
+
+```
+PR (flat, planted rank=3 at every load):     {1: 2.99, 2: 2.98, 3: 2.99}
+PR (expanding, planted rank=2/4/6 by load):  {1: 1.99, 2: 3.97, 3: 5.96}
+```
+Both planted regimes recovered almost exactly (max deviation 0.04 from
+the true rank). The function clearly distinguishes a load-invariant
+subspace (PR flat within 0.04) from one that genuinely grows with load
+(PR tracks the planted rank almost 1:1).
+
+```
+single_trial_speed=0.7855  trial_averaged_speed=0.4900
+```
+Planted: a circular flow, true local speed `radius*omega = 5 * 2*pi/40 =
+0.7854`. Single-trial estimate (within-trial finite differences, immune
+to each trial's own constant time-jitter) recovers 0.7855 -- accurate to
+4 decimal places. Trial-averaging FIRST, then measuring speed on the
+averaged trajectory, gives 0.4900 -- a 38% contraction, matching the
+jitter-smoothing damping factor predicted analytically (`sinc` of the
+jitter half-width in angular units, ~0.637 here) almost exactly. **Note
+on why the flow must be nonlinear**: an earlier draft of this test used a
+CONSTANT-VELOCITY (linear) flow with per-trial time-jitter -- averaging
+jittered copies of a linear function returns the exact same linear
+function (translation-then-averaging is lossless for linear functions),
+so the "contraction" never appeared and the test was silently vacuous.
+Switched to a circular (nonlinear) flow, where jitter-averaging is a
+genuine low-pass filter that damps amplitude -- caught by manually
+computing the expected numbers before trusting the test, not by the test
+initially failing (it would have "passed" with a near-zero, not
+convincingly demonstrated, difference).
+
+```
+$ python -m pytest
+205 passed, 15 warnings in 281.52s
+```
+(195 pre-Phase-8 + 10 new)
+
+**Not done / deferred (this sub-phase only -- see "Phase 8 as a whole" note above):**
+- Items 8.4-8.10 (DMD/Koopman, causal perturbation, LQR control,
+  correct-vs-incorrect trial splits, cross-temporal generalization via
+  this repo's own `cross_temporal.py`, orthogonalization index,
+  task-irrelevant decoding, network topology + assortativity + bio-init
+  arm, driver script) are NOT built yet -- sub-phases 8b/8c.
+- `brainalign_wm/analysis/twin.py` (named in the phase preamble alongside
+  `geometry.py`) is not created in this sub-phase -- 8.4's causal
+  perturbation/LQR control needs live model access (not just static
+  activity-log arrays), which is what distinguishes `twin.py`'s scope from
+  `geometry.py`'s pure-array-function scope; that's 8b's job.
+- No driver script wires these functions to real activity logs yet (item
+  8.10, sub-phase 8c) -- every function here is exercised only by
+  synthetic-data tests in this commit, not yet run on an actual trained
+  model's activity log.

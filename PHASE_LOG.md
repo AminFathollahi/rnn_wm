@@ -1580,3 +1580,135 @@ tasks) are Phase 9b, not yet dispatched -- this commit is 9.1 only, same
 split pattern as Phase 8's 8a/8b/8c. Re-running this sweep at `--tier full`
 with 3+ seeds to get a trustworthy load2/load3 knee (rather than the
 noisy dev-tier one above) is explicitly Phase 11's job.
+
+## Phase 9b — Tiny RNNs on bandit tasks (item 9.3)
+
+**Changed:**
+- `scripts/verify_neurogym_semantics.py`: throwaway check confirming
+  Bandit-v0/DawTwoStep-v0 never set `terminated`/`truncated` over 5000
+  ticks -- `new_trial=True` only flags a trial boundary, the underlying
+  env auto-advances internally with no external `reset()` needed. This is
+  why `NeuroGymBatchEnv` (`brainalign_wm/tasks/multitask.py`) is the wrong
+  wrapper for this item: its `step()` has `if self.done[b]: continue` and
+  latches `done` the first time `new_trial` fires (correct for the
+  existing multi-task-diet training, one trial per batch instance;
+  incompatible with item 9.3's need for hidden state to persist across
+  MANY consecutive trials).
+- `scripts/run_tiny_rnn_bandit.py`: standalone [JI-AN25] reproduction
+  (follows `run_multitask_diet.py`'s one-off acceptance-script pattern,
+  not `run_grid.py`'s campaign-grid machinery -- doesn't need it).
+  - `ContinuousBatchEnv`: ~15-line stripped analog of `NeuroGymBatchEnv`
+    that never latches `done` -- one `reset()` per instance, then
+    unlimited `step()` calls, asserting `terminated`/`truncated` never
+    fire (would raise if NeuroGym's behavior ever changed).
+  - `TinyRNNPolicy`: a single `nn.GRUCell` (H in {1,2,3,4}) plus a linear
+    readout over each task's *native* action space (2 for bandit, 3 for
+    dawtwostep -- not forced through the multi-task net's shared 3-dim
+    head space, since this is a standalone reproduction). Input is
+    one-hot(a_{t-1}) ++ [r_{t-1}] only, per item 9.3's own spec (no
+    stimulus, unlike [JI-AN25] itself which also conditions on s_{t-1}).
+  - Trained via REINFORCE with discounted reward-to-go (gamma=0.95,
+    20-tick truncated-BPTT chunks) and a per-timestep batch-mean baseline.
+    (ponytail: short-horizon reward-to-go substitutes for exact per-trial
+    return bookkeeping across ragged trial boundaries during training --
+    fine since trials are ~1-2 ticks long here, so gamma^{1,2} barely
+    discounts. Exact trial-boundary bookkeeping is used only for the
+    reported EVAL metric, via `TrialReturnAccumulator`, to stay
+    comparable to `run_multitask_diet.py::chance_reward`'s per-trial
+    convention.)
+  - Also fixes a pre-existing environment issue hit while building this:
+    the pip editable install's meta-path finder maps `brainalign_wm` to a
+    stale pre-rename path (`RNNs/brainalign_wm/brainalign_wm`, which no
+    longer exists -- this repo now lives at `RNNs/rnn_wm/brainalign_wm`),
+    so any script that imports `brainalign_wm` at module level fails
+    when run directly (`python scripts/foo.py`) unless it inserts the
+    repo root onto `sys.path` first, same as `scripts/run_distillation_teacher.py`
+    already does. Confirmed this also silently breaks
+    `scripts/run_multitask_diet.py` if invoked the same way -- not fixed
+    here (out of scope for item 9.3), just flagged; the real fix is
+    reinstalling the editable package (`pip install -e .`) from its
+    current location.
+- `tests/test_tiny_rnn_bandit.py`: 6 tests -- planted-answer checks for
+  `_discounted_returns` (hand-computed 3-tick example) and
+  `TrialReturnAccumulator` (hand-worked single- and multi-batch boundary
+  sequences), a real-env check that Bandit-v0/DawTwoStep-v0 never
+  terminate over 500 ticks, and a check that `TinyRNNPolicy`'s hidden
+  state actually differs several ticks after an early differing
+  (action, reward) pair (necessary condition for "no silent reset").
+
+**Run:** `python scripts/run_tiny_rnn_bandit.py --hidden 1 2 3 4 --tasks
+bandit dawtwostep --ticks 200000 --eval-ticks 20000 --batch-size 64 --seed 0`
+(8 runs, wall clock ~206-311s each, ~33 min total; eval reward is a mean
+over the full 20000-tick eval rollout's completed trials, ~640k-1.28M
+trials depending on task's ticks/trial ratio -- a far more stable estimate
+than the last-1000-training-tick number also logged).
+
+```
+task        H  trained_mean_trial_reward  chance_mean_trial_reward
+bandit      1  +0.9000                    +0.5006
+bandit      2  +0.8997                    +0.5006
+bandit      3  +0.8998                    +0.5006
+bandit      4  +0.9001                    +0.5006
+dawtwostep  1  +0.4991                    +0.2544
+dawtwostep  2  +0.6618                    +0.2544
+dawtwostep  3  +0.6682                    +0.2544
+dawtwostep  4  +0.6002                    +0.2544
+```
+
+**Honest read of this result:** Bandit reproduces [JI-AN25]'s central
+claim cleanly -- H=1 already reaches +0.90, essentially the same as
+H=2/3/4 (all within noise of each other) and near the task's own ceiling
+(the skewed arm's own reward probability is 0.9), so a single GRU unit is
+enough to solve this bandit task from reward history alone; there is no
+capacity-dependent curve to find here because the task is already
+saturated at H=1, matching the paper's own point that 1-4 units suffice
+for these reward-learning tasks. DawTwoStep shows a real, if noisier,
+capacity effect: H=1 (+0.499) clears chance (+0.254) but is clearly weaker
+than H=2/3 (+0.66-0.67); H=4 dips back to +0.60, most likely single-seed
+REINFORCE variance rather than a genuine capacity regression (no
+multi-seed averaging was done here, same caveat Phase 9a's capacity curve
+flagged for its own single-seed sweep -- resolving this properly is a
+Phase 11 job, not this pass). The DawTwoStep result is also notable given
+the caveat raised while designing this: dropping s_{t-1} (per item 9.3's
+own spec) means the RNN cannot directly observe which second-stage state
+a trial is in, which looked like it might cap performance hard -- in
+practice a reward/action-history-only policy still reaches ~2.5x chance,
+consistent with [JI-AN25]'s finding that small RNNs exploit implicit
+history heuristics (stay/switch statistics) without needing full state
+observability, not a structural failure as originally worried.
+
+Comparison to Phase 5's multi-task-diet baseline (`run_multitask_diet.py`,
+2000 steps split across 6 tasks, ~333 steps/task): bandit trained_mean_reward
++0.9200 there vs. this run's +0.90 (H=1-4) -- consistent, both land near
+the same ceiling since bandit is an easy task for either architecture.
+DawTwoStep trained_mean_reward +0.0000 there (chance -0.0640) vs. this
+run's +0.50-0.67 -- a large gap, but **not a fair architecture comparison**:
+the multi-task net got ~333 steps total on this task, vs. 200000 dedicated
+ticks here; the gap is much more likely a training-budget effect than
+evidence that a tiny dedicated RNN out-represents the big multi-task net
+on this task. A budget-matched comparison would require re-running the
+multi-task diet with a comparable per-task tick budget, out of scope here.
+
+Note also why the two setups' *chance* baselines themselves differ
+(bandit: 0.345 there vs. 0.5006 here) -- not a bug in either, a different
+action space. `run_multitask_diet.py::chance_reward` samples uniformly
+over the multi-task net's shared 3-action HEAD space, and `HEAD_TO_ENV`
+maps head-actions {0,1} both to bandit's arm 0 and head-action 2 to arm 1,
+so a uniform head-policy picks the good arm (p=0.9) only 1/3 of the time
+(chance ~= 1/3*0.9 + 2/3*0.1 = 0.37, close to the observed 0.345). This
+script instead samples uniformly over the task's own native 2-action
+space (chance = 0.5), the correct regime for a standalone reproduction
+that isn't funneled through the multi-task head. The two trained numbers
+(+0.90 vs +0.92) happen to land close regardless.
+
+```
+$ python -m pytest
+236 passed, 17 warnings in 440.07s (0:07:20)
+```
+(230 pre-Phase-9b + 6 new in `test_tiny_rnn_bandit.py`.)
+
+**Not done / deferred:** item 9.2 (distillation) is Phase 9c, gated on a
+dedicated full-tier teacher-training run (`scripts/run_distillation_teacher.py`,
+launched separately, in progress as of this writing) since none of Phase
+9a's `M00000_H*` checkpoints reached the §3 criterion and so cannot serve
+as a distillation teacher.

@@ -38,6 +38,17 @@ class VanillaRNNCell(nn.Module):
         nn.init.uniform_(self.weight_ih, -std, std)
         nn.init.uniform_(self.weight_hh, -std, std)
 
+    def init_state(self, batch_size: int, device=None) -> torch.Tensor:
+        """Same interface/return shape as `_GatedFlatCore.init_state` --
+        `training/train.py::_init_state`'s S=0 branch dispatches on this
+        method existing, not on cell type."""
+        return torch.zeros(batch_size, self.hidden_dim, device=device)
+
+    def readout_state(self, h_t: torch.Tensor) -> torch.Tensor:
+        """Identity, same as `_GatedFlatCore.readout_state` -- single
+        recurrent state IS the readout for a flat core, gated or not."""
+        return h_t
+
     def forward(
         self, x_t: torch.Tensor, h_prev: torch.Tensor, extra_update_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

@@ -243,18 +243,28 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
         h_star_dim = m["flat_units"]
     else:
         if substrate == "vanilla":
-            raise NotImplementedError(
-                "HRLCore (S=1) has no vanilla-substrate variant yet -- its worker/manager are "
-                "MaskedGRUCell-based. Stage 1 needs this (§4); build it there rather than silently "
-                "training a GRU run under a vanilla label."
-            )
-        core = HRLCore(
-            input_dim=m["bottleneck"], worker_units=m["worker_units"], manager_units=m["manager_units"],
-            grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
-            g_dim=m["g_dim"], pool_block=m["worker_pool_block"], reflective=bool(M), plastic=bool(P),
-            hebb_kwargs=hebb_kwargs, pbwm_gate=pbwm_gate, reflection_beta=mech["reflection_beta"],
-            manager_every_tick=bool(m.get("manager_every_tick", False)),
-        ).to(device)
+            if M or P:
+                raise NotImplementedError(
+                    "VanillaHRLCore (S=1 vanilla) only supports M=0,P=0 -- Stage 1's factorial (§4) never "
+                    "combines vanilla with M/P; those need HRLCore's reflective-gate/Hebbian hooks, not "
+                    "built for this substrate."
+                )
+            from brainalign_wm.models.hrl import VanillaHRLCore
+
+            core = VanillaHRLCore(
+                input_dim=m["bottleneck"], worker_units=m["worker_units"], manager_units=m["manager_units"],
+                grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
+                g_dim=m["g_dim"], pool_block=m["worker_pool_block"],
+                manager_every_tick=bool(m.get("manager_every_tick", False)),
+            ).to(device)
+        else:
+            core = HRLCore(
+                input_dim=m["bottleneck"], worker_units=m["worker_units"], manager_units=m["manager_units"],
+                grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
+                g_dim=m["g_dim"], pool_block=m["worker_pool_block"], reflective=bool(M), plastic=bool(P),
+                hebb_kwargs=hebb_kwargs, pbwm_gate=pbwm_gate, reflection_beta=mech["reflection_beta"],
+                manager_every_tick=bool(m.get("manager_every_tick", False)),
+            ).to(device)
         h_star_dim = m["worker_units"] + m["manager_units"]
     identity_catch_fraction = float(full_cfg["task"].get("identity_catch_fraction", 0.0))
     n_identity_categories = len(full_cfg["task"]["categories"]) if identity_catch_fraction > 0 else 0
@@ -437,6 +447,7 @@ def _run_trial(
     recurrent_noise_sigma: float = 0.0,
     core_dropout_p: float = 0.0,
     categories: Optional[list] = None,
+    task_name_for_context: Optional[str] = None,
 ):
     """Unrolls a batch of B trials sharing one load (see
     `TaskGenerator.sample_batch` -- every trial has identical tick/epoch
@@ -459,7 +470,12 @@ def _run_trial(
     not None` (i.e. `task.identity_catch_fraction > 0`), unused otherwise.
     `identity_catch` is `{"correct": int, "total": int}` accumulated over
     catch trials in this batch (identity-report accuracy, §9.4a), or None
-    when `heads.identity_aux is None`."""
+    when `heads.identity_aux is None`.
+    `task_name_for_context` (Stage 1 multi-task-diet cells only, §4): when
+    set, `front_end` is assumed to be the diet's own 13-dim `front_end_mt`
+    and `ts.c_t` is wrapped through `multitask.task_context_vector` before
+    reaching it, instead of passed raw -- `None` (every other cell)
+    preserves the exact original 10-dim behavior."""
     B = len(trial_steps_batch)
     T = len(trial_steps_batch[0])
     state = _init_state(core, S, P, B, device)
@@ -492,12 +508,20 @@ def _run_trial(
     )
     last_probe_action_t = torch.full((B,), -1, dtype=torch.long, device=device)
     all_v = _image_features_all_ticks(image_bank, trial_steps_batch, feature_dim, device)
+    if task_name_for_context is not None:
+        from brainalign_wm.tasks.multitask import task_context_vector
 
     for i in range(T):
         ts_list = [trial_steps_batch[b][i] for b in range(B)]
         epoch = ts_list[0].epoch  # shared across the batch: same load => same schedule
         v_t = all_v[i]
-        c_t = torch.tensor([ts.c_t for ts in ts_list], dtype=torch.float32, device=device)
+        if task_name_for_context is not None:
+            c_t = torch.tensor(
+                [task_context_vector(task_name_for_context, ts.c_t) for ts in ts_list],
+                dtype=torch.float32, device=device,
+            )
+        else:
+            c_t = torch.tensor([ts.c_t for ts in ts_list], dtype=torch.float32, device=device)
 
         gate_bias = None
         if reflective_gate is not None:
@@ -1224,7 +1248,7 @@ def _make_local_learners(core, heads, S: int, mech_cfg: dict, rung: int, seed: i
 
 def evaluate_accuracy(
     front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device,
-    n_trials: int, eval_seed: int,
+    n_trials: int, eval_seed: int, task_name_for_context: Optional[str] = None,
 ) -> dict:
     """Match/non-match accuracy per load, with a Wilson 95% CI (Phase 3,
     comments.txt §3 MEASUREMENT), plus `acc["identity_catch"]` (§9.4a
@@ -1270,7 +1294,7 @@ def evaluate_accuracy(
                     front_end, core, heads, reflective_gate, S, int(reflective_gate is not None), P,
                     batch, image_bank, m["feature_dim"], m["action_dim"], _gate_width(S, m), device, mode="eval",
                     recurrent_noise_sigma=float(m.get("recurrent_noise_sigma", 0.0)),
-                    categories=categories,
+                    categories=categories, task_name_for_context=task_name_for_context,
                 )
             is_catch = [steps[0].is_identity_catch for steps in batch]
             n_correct += sum(c for c, catch in zip(correct, is_catch) if not catch)
@@ -1288,7 +1312,10 @@ def evaluate_accuracy(
     return acc
 
 
-def final_evaluation(front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device, seed: int) -> dict:
+def final_evaluation(
+    front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device, seed: int,
+    task_name_for_context: Optional[str] = None,
+) -> dict:
     """The once-per-run, report-worthy final number (Phase 3 item 3.2):
     n=`train.final_eval_trials_per_load` (500) per load, at a fixed
     `eval_seed` derived from the run's own seed with a large offset that no
@@ -1299,7 +1326,7 @@ def final_evaluation(front_end, core, heads, S: int, P: int, reflective_gate, ta
     eval_seed = 900_000_000 + seed
     return evaluate_accuracy(
         front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, cfg, device,
-        n_trials=n_trials, eval_seed=eval_seed,
+        n_trials=n_trials, eval_seed=eval_seed, task_name_for_context=task_name_for_context,
     )
 
 
@@ -1343,13 +1370,25 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `run` below without touching `full_cfg`.
     if "flat_units" in run:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "flat_units": int(run["flat_units"])}}
+    # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's
+    # default GRU -- must also be folded in before `_build_model` reads
+    # `m.get("substrate", "gru")`.
+    if "substrate" in run:
+        full_cfg = {**full_cfg, "model": {**full_cfg["model"], "substrate": str(run["substrate"])}}
 
     m, mech_cfg, t_cfg = full_cfg["model"], full_cfg["mechanisms"], full_cfg["train"]
     # Phase 7 (comments.txt §5): SUP/RL run their fixed signal for the whole
     # run, decoupled from curriculum phase; "legacy" (default) preserves the
     # exact pre-Phase-7 behavior every already-tested cell depends on.
     # METARL is not a `_run_trial` mode at all -- see `run_metarl_block`.
-    supervision = t_cfg.get("supervision", "legacy")
+    # Stage 1 (§4/§11.3) varies supervision per cell, so `run` (like the
+    # architecture-shape overrides above) wins over the config default.
+    supervision = run.get("supervision", t_cfg.get("supervision", "legacy"))
+    # Stage 1's WM-only-vs-multi-task diet factor (§4, §5 Phase 5): "wm_only"
+    # (default -- every already-tested cell) is the untouched Sternberg-only
+    # path below; "multitask" interleaves the 5 NeuroGym tasks in with
+    # Sternberg (see `diet`-gated blocks further down).
+    diet = run.get("diet", "wm_only")
     value_weight = float(t_cfg["value_loss_weight"])
     entropy_coef = float(t_cfg.get("entropy_coef", 0.0))
     energy_cost_weight = float(run.get("energy_cost_weight", t_cfg.get("energy_cost_weight", 0.0)))
@@ -1404,6 +1443,29 @@ def train_one(run: dict, cfg: dict) -> dict:
     front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate, bioinit=bioinit)
     reflective_gate = ReflectiveGate(mech_cfg["reflection_lambda"], mech_cfg["reflection_beta"]) if M else None
 
+    # Stage 1 multi-task-diet cells (§4, §5): `front_end` (10-dim,
+    # Sternberg-only task_vec_dim) is REPLACED wholesale by the diet's own
+    # 13-dim `front_end_mt` (comments.txt item 5.4's task-one-hot-extended
+    # cue) -- mirrors `scripts/run_multitask_diet.py`'s own convention, so
+    # every downstream use of the name `front_end` (training, checkpointing,
+    # evaluation) is automatically diet-aware with no further branching.
+    # `adapters` (one per NeuroGym task, item 5.3) stays `{}` for every
+    # other cell -- every `adapters`-keyed loop below is then a no-op.
+    adapters: dict = {}
+    max_ticks = 0
+    if diet == "multitask":
+        from brainalign_wm.models.front_end import FrontEnd
+        from brainalign_wm.tasks.multitask import (
+            C_DIM_MULTITASK, NEUROGYM_TASKS, NeuroGymAdapter, NeuroGymBatchEnv, obs_dim_for, pick_task,
+        )
+
+        front_end = FrontEnd(m["feature_dim"], C_DIM_MULTITASK, m["bottleneck"], m["input_noise_sigma"]).to(device)
+        adapters = {
+            task: NeuroGymAdapter(obs_dim_for(task), C_DIM_MULTITASK, m["bottleneck"]).to(device)
+            for task in NEUROGYM_TASKS
+        }
+        max_ticks = int(full_cfg["task"]["multitask_max_ticks"])
+
     ckpt_dir = ROOT / "results" / "checkpoints" / run_id
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / "ckpt.pt"
@@ -1413,6 +1475,8 @@ def train_one(run: dict, cfg: dict) -> dict:
     optimizer = None
     if L == 0:
         params = list(front_end.parameters()) + list(core.parameters()) + list(heads.parameters())
+        for adapter in adapters.values():
+            params += list(adapter.parameters())
         optimizer = torch.optim.Adam(params, lr=t_cfg["lr"])
 
     if ckpt_path.exists():
@@ -1420,6 +1484,9 @@ def train_one(run: dict, cfg: dict) -> dict:
         front_end.load_state_dict(ck["front_end"])
         core.load_state_dict(ck["core"])
         heads.load_state_dict(ck["heads"])
+        for name, adapter in adapters.items():
+            if ck.get("adapters", {}).get(name) is not None:
+                adapter.load_state_dict(ck["adapters"][name])
         if optimizer is not None and ck.get("optimizer") is not None:
             optimizer.load_state_dict(ck["optimizer"])
         start_step = ck["step"]
@@ -1493,24 +1560,43 @@ def train_one(run: dict, cfg: dict) -> dict:
 
         if L == 0:
             optimizer.zero_grad()
-            signal = _select_signal(supervision, phase)
-            loss, correct, reward, _ = _run_trial(
-                front_end, core, heads, reflective_gate, S, M, P, trial_batch, image_bank,
-                m["feature_dim"], m["action_dim"], _gate_width(S, m), device, mode="bptt",
-                signal=signal, value_weight=value_weight, entropy_coef=entropy_coef,
-                energy_cost_weight=energy_cost_weight, topo_loss_weight=topo_loss_weight, flat_grid=flat_grid,
-                recurrent_noise_sigma=recurrent_noise_sigma,
-                core_dropout_p=core_dropout_p, categories=full_cfg["task"]["categories"],
-            )
+            # Stage 1 diet cells (§4, §5): one task drawn uniformly per step
+            # (same `pick_task` convention `run_multitask_diet.py`'s
+            # acceptance run already used, item 5.2), deterministic in
+            # (seed, step) so a resumed run redraws the identical schedule.
+            # Every other cell always takes the "sternberg" branch (`task`
+            # is never anything else when `diet != "multitask"`), so this is
+            # a pure addition, not a behavior change, for every already-
+            # tested cell.
+            task = pick_task(seed, step) if diet == "multitask" else "sternberg"
+            if task == "sternberg":
+                signal = _select_signal(supervision, phase)
+                loss, correct, reward, _ = _run_trial(
+                    front_end, core, heads, reflective_gate, S, M, P, trial_batch, image_bank,
+                    m["feature_dim"], m["action_dim"], _gate_width(S, m), device, mode="bptt",
+                    signal=signal, value_weight=value_weight, entropy_coef=entropy_coef,
+                    energy_cost_weight=energy_cost_weight, topo_loss_weight=topo_loss_weight, flat_grid=flat_grid,
+                    recurrent_noise_sigma=recurrent_noise_sigma,
+                    core_dropout_p=core_dropout_p, categories=full_cfg["task"]["categories"],
+                    task_name_for_context=("sternberg" if diet == "multitask" else None),
+                )
+            else:
+                batch_env = NeuroGymBatchEnv(task, batch_size=batch_size, seed=seed * 1_000_003 + step)
+                loss, reward = run_multitask_neurogym_trial(
+                    adapters[task], core, heads, S, M, P, task, batch_env, batch_size, max_ticks, device,
+                    mode="bptt", value_weight=value_weight,
+                )
+                correct = [None] * batch_size
             if l1_weight > 0:
                 l1_term = sum(p.abs().mean() for n, p in core.named_parameters() if "weight" in n)
                 loss = loss + l1_weight * l1_term
             if dale_penalty_weight > 0:
                 loss = loss + dale_penalty_weight * _dale_penalty(core, S, dale_ei_split)
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                list(front_end.parameters()) + list(core.parameters()) + list(heads.parameters()), 5.0
-            )
+            grad_norm_params = list(front_end.parameters()) + list(core.parameters()) + list(heads.parameters())
+            for adapter in adapters.values():
+                grad_norm_params += list(adapter.parameters())
+            grad_norm = torch.nn.utils.clip_grad_norm_(grad_norm_params, 5.0)
             optimizer.step()
             # Track training metrics
             if loss is not None:
@@ -1557,6 +1643,7 @@ def train_one(run: dict, cfg: dict) -> dict:
             acc = evaluate_accuracy(
                 front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device,
                 n_trials=eval_trials_per_load, eval_seed=seed * 1_000_000 + eval_call_counter,
+                task_name_for_context=("sternberg" if diet == "multitask" else None),
             )
             if _nvml_handle is not None:
                 joules_cumulative = pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
@@ -1623,6 +1710,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                         {
                             "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
                             "heads": heads.state_dict(),
+                            "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
                             "optimizer": optimizer.state_dict() if optimizer else None,
                             "rung": rung,
                         },
@@ -1630,6 +1718,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                     )
                     accuracy_at_criterion = final_evaluation(
                         front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                        task_name_for_context=("sternberg" if diet == "multitask" else None),
                     )
 
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
@@ -1637,6 +1726,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                 {
                     "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
                     "heads": heads.state_dict(), "optimizer": optimizer.state_dict() if optimizer else None,
+                    "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
                     "rung": rung,
                 },
                 ckpt_path,
@@ -1646,7 +1736,10 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `ckpt.pt` and this final evaluation are the equal-duration (max_steps)
     # snapshot every cell gets regardless of when/whether it met criterion --
     # geometry analyses use these, unchanged from the original design.
-    accuracy = final_evaluation(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed)
+    accuracy = final_evaluation(
+        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+        task_name_for_context=("sternberg" if diet == "multitask" else None),
+    )
     gates = {f"load{i}>={criterion[f'load{i}']}": accuracy.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads}
     # The officially reported accuracy/gates: at-criterion if confirmed
     # (the honest "trained, and how well" answer at the true stopping

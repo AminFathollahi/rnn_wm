@@ -99,9 +99,13 @@ mechanisms:
   reflection_lambda: 0.9                   # R_t leak rate
   reflection_beta: 1.0                     # gate bias gain
   local_rule: node_perturbation            # local-learning-study default rule; fallback ladder escalates to e-prop
-  perturb_sigma: 0.05
+  perturb_sigma: 0.3                       # item 10.2 fix: 0.05 gave a ~0.2% argmax-flip rate at GRU-gate init
+                                            # scale (swamped by the natural pre-activation gap) -- no exploration
+                                            # signal for node perturbation to correlate with reward at any lr_local.
   elig_decay: 0.9
-  lr_local: 1.0e-3
+  lr_local: 0.5                            # item 10.2 fix: 1e-3 was tuned for the old (too-small) perturb_sigma;
+                                            # re-tuned jointly with perturb_sigma so the rung-1 gate test (see
+                                            # tests/test_local_learning_can_learn.py) actually clears 0.95 in 5k trials.
   hebb_eta_decay: 0.9                      # Knob P (§6.2): Hebb_ij(t) decay
   hebb_eta_hebb: 0.05                      # Knob P: Hebb_ij(t) update rate on x_j(t-1)*h_i(t)
   hebb_clip: 2.0                           # Knob P: Hebb_ij clipped to [-hebb_clip, hebb_clip]

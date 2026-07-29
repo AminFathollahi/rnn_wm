@@ -250,8 +250,14 @@ neural:
   bin_ms: 50
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.
-tiers:
+tiers:                                                          # `steps` is a CEILING (max_steps): training stops as
+                                                                 # soon as the §3 criterion is confirmed (a streak of
+                                                                 # `gates.consecutive_evals` passing evals), not before
+                                                                 # and not after -- see train.py's train-to-criterion
+                                                                 # block. `steps` only governs cells that never confirm
+                                                                 # the criterion at all.
   smoke: {steps: 100, scaffold_sleep_s: 0.02}                  # end-to-end pipeline smoke test
   dev:   {steps: 20000, scaffold_sleep_s: 0.05}                 # NOT a results tier -- new-mechanism (topo/dale)
                                                                  # sanity check only: does the loss decrease, no NaNs
-  full:  {steps: 150000, scaffold_sleep_s: 0.10}                # the real, resumable results tier (5 seeds)
+  full:  {steps: 150000, scaffold_sleep_s: 0.10}                # the real, resumable results tier (5 seeds); ceiling
+                                                                 # for non-converging cells, not everyone's run length

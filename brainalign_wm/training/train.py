@@ -1468,12 +1468,13 @@ def train_one(run: dict, cfg: dict) -> dict:
     # nowhere near it even at the max ~300 periodic calls a 150k-step run
     # makes at eval_every>=500.
     eval_call_counter = 0
-    # Train-to-criterion (§3): a streak of `consecutive_evals_required`
+    # Train-to-criterion (§3, revised): a streak of `consecutive_evals_required`
     # periodic evaluations all meeting `criterion`. Recorded once, at the
     # step of the CONFIRMING (last-in-streak) evaluation -- the first eval
     # in a streak isn't yet distinguishable from a fluke a later eval could
-    # refute -- and never overwritten afterward. Training still runs to
-    # `total_steps` regardless (no early stop).
+    # refute -- and never overwritten afterward. Training stops shortly
+    # after this is confirmed (not further, not less); `total_steps` is
+    # the ceiling for cells that never confirm it.
     consecutive_criterion_evals = 0
     criterion_met = False
     steps_to_criterion = None
@@ -1578,10 +1579,28 @@ def train_one(run: dict, cfg: dict) -> dict:
             running_loss = 0.0
             loss_count = 0
 
-            # Train-to-criterion (§3, Phase 3 item 3.4): NO early stop --
-            # training always continues to total_steps. Track the
-            # consecutive-pass streak and record the sample-efficiency
-            # numbers exactly once, at the confirming (3rd-in-a-row) eval.
+            # Train-to-criterion (§3, Phase 3 item 3.4, revised): the
+            # criterion is confirmed by a streak of `consecutive_evals_required`
+            # periodic evals (each drawn with its own fresh `eval_seed`,
+            # disjoint from `final_evaluation`'s fixed seed below). The
+            # persistence requirement is what keeps this from repeating the
+            # deleted `acc >= 0.999` bug (3.3): a single lucky eval can't
+            # trigger it, and the eval(s) that DO trigger it are never the
+            # same trials as the officially reported accuracy.
+            #
+            # HYBRID policy: the officially reported accuracy/gates (below,
+            # `accuracy_at_criterion`) and a checkpoint snapshot are taken
+            # RIGHT HERE, at the confirmed stopping point -- not further,
+            # not less. But training keeps running in this same process to
+            # `total_steps` (the tier's ceiling) so Phase 8's geometry
+            # suite still gets an equal-duration checkpoint across cells
+            # (comments.txt §3: "geometry keeps changing after accuracy
+            # saturates, so comparing two cells' geometry at different
+            # training durations is invalid"). `ckpt.pt` (the final,
+            # equal-duration snapshot) is unchanged for that reason --
+            # Phase 8's code needs no changes. `ckpt_at_criterion.pt` and
+            # `accuracy_at_criterion`/`gates_at_criterion` are the new,
+            # honest "is this cell trained, and how well" answer.
             if not criterion_met:
                 if all(acc.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads):
                     consecutive_criterion_evals += 1
@@ -1597,7 +1616,21 @@ def train_one(run: dict, cfg: dict) -> dict:
                         if _nvml_handle is not None else None
                     )
                     print(f"[train] criterion met at step {steps_to_criterion} "
-                          f"({consecutive_evals_required} consecutive evals); continuing to {total_steps}.", flush=True)
+                          f"({consecutive_evals_required} consecutive evals); "
+                          f"snapshotting and reporting here, continuing to {total_steps} for geometry only.",
+                          flush=True)
+                    torch.save(
+                        {
+                            "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
+                            "heads": heads.state_dict(),
+                            "optimizer": optimizer.state_dict() if optimizer else None,
+                            "rung": rung,
+                        },
+                        ckpt_dir / "ckpt_at_criterion.pt",
+                    )
+                    accuracy_at_criterion = final_evaluation(
+                        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                    )
 
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
             torch.save(
@@ -1610,14 +1643,32 @@ def train_one(run: dict, cfg: dict) -> dict:
             )
 
     metrics_logger.close()
+    # `ckpt.pt` and this final evaluation are the equal-duration (max_steps)
+    # snapshot every cell gets regardless of when/whether it met criterion --
+    # geometry analyses use these, unchanged from the original design.
     accuracy = final_evaluation(front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed)
-    # Redundant-but-harmless snapshot of the FINAL evaluation against the
-    # same per-load thresholds (kept since run_grid.py's report already
-    # renders it); `criterion_met` above is the authoritative sustained-
-    # performance measure this phase adds.
     gates = {f"load{i}>={criterion[f'load{i}']}": accuracy.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads}
+    # The officially reported accuracy/gates: at-criterion if confirmed
+    # (the honest "trained, and how well" answer at the true stopping
+    # point), else the same max_steps evaluation as a fallback (never met
+    # criterion -- nothing else to report).
+    if criterion_met:
+        accuracy_headline = accuracy_at_criterion
+        gates_headline = {
+            f"load{i}>={criterion[f'load{i}']}": accuracy_at_criterion.get(f"load{i}", 0.0) >= criterion[f"load{i}"]
+            for i in task_loads
+        }
+    else:
+        accuracy_headline = accuracy
+        gates_headline = gates
     return {
-        "status": "completed", "gates": gates, "accuracy": accuracy,
+        "status": "completed",
+        # headline = at-criterion if confirmed, else the max_steps fallback
+        # (see above) -- this is "is this cell trained, and how well".
+        "gates": gates_headline, "accuracy": accuracy_headline,
+        # max_steps snapshot (`ckpt.pt`), always present, for Phase 8's
+        # equal-duration geometry comparisons -- not the headline number.
+        "gates_at_max_steps": gates, "accuracy_at_max_steps": accuracy,
         "rung": rung if L == 1 else 0, "wall_clock_train_s": round(time.time() - t0, 1),
         "criterion_met": criterion_met,
         "steps_to_criterion": steps_to_criterion,

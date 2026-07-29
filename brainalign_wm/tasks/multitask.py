@@ -190,6 +190,71 @@ class NeuroGymBatchEnv:
         return self.obs.copy(), reward, gt_head, newly_done
 
 
+# Item 10.1 (comments.txt §5, Tier 1): Yang's 20-task suite via
+# `neurogym.envs.collections.yang19`. Unlike the 6-task diet above, every
+# yang19 env shares the SAME native action space (verified empirically:
+# `Discrete(17)`, obs_dim 33 -- one fixation action plus a 16-direction
+# response ring, and every task provides a `gt` in that same space, so
+# there is no HEAD_TO_ENV/ENV_GT_TO_HEAD table to hand-derive per task the
+# way the 6-task diet needed -- the identity mapping below is exact, not a
+# compromise). This is dimensionally incompatible with the 6-task diet's
+# shared `N_ACTIONS=3` head (`models/heads.py`), so Yang-19 runs use their
+# own `Heads(n_actions=YANG19_ACTION_DIM)` instance -- the recurrent CORE
+# under test is still exactly the same module, only the input
+# adapter/output head (per-task-family plumbing, same convention the
+# 6-task diet already uses) differ.
+YANG19_TASKS = [
+    "anti", "ctxdlydm1", "ctxdlydm2", "ctxdm1", "ctxdm2", "dlyanti", "dlydm1", "dlydm2",
+    "dlygo", "dm1", "dm2", "dmc", "dms", "dnmc", "dnms", "go", "multidlydm", "multidm",
+    "rtanti", "rtgo",
+]
+YANG19_ENV_IDS = {t: f"yang19.{t}-v0" for t in YANG19_TASKS}
+YANG19_OBS_DIM = 33
+YANG19_ACTION_DIM = 17
+
+
+def make_yang19_env(task_name: str):
+    import neurogym as ngym
+
+    return ngym.make(YANG19_ENV_IDS[task_name])
+
+
+class Yang19BatchEnv:
+    """Same per-tick stepping contract as `NeuroGymBatchEnv`, but with an
+    identity head<->env action mapping (see module comment above) -- no
+    per-task lookup table, since every yang19 task already shares one
+    native action space."""
+
+    def __init__(self, task_name: str, batch_size: int, seed: int):
+        self.task = task_name
+        self.B = batch_size
+        self.envs = [make_yang19_env(task_name) for _ in range(batch_size)]
+        self.done = np.zeros(batch_size, dtype=bool)
+        self.obs = np.zeros((batch_size, YANG19_OBS_DIM), dtype=np.float32)
+        for b, env in enumerate(self.envs):
+            obs, _info = env.reset(seed=seed + b)
+            self.obs[b] = obs
+
+    def step(self, head_actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """`head_actions`: [B] int in [0,17). Returns (obs, reward, gt_head,
+        newly_done) -- gt_head is never None here (every yang19 task has a
+        gt, unlike the bandit-style tasks in the 6-task diet)."""
+        reward = np.zeros(self.B, dtype=np.float32)
+        gt_head = np.zeros(self.B, dtype=np.int64)
+        newly_done = np.zeros(self.B, dtype=bool)
+        for b, env in enumerate(self.envs):
+            if self.done[b]:
+                continue
+            obs, r, terminated, truncated, info = env.step(int(head_actions[b]))
+            self.obs[b] = obs
+            reward[b] = float(r)
+            gt_head[b] = int(info["gt"])
+            if info.get("new_trial", False) or terminated or truncated:
+                self.done[b] = True
+                newly_done[b] = True
+        return self.obs.copy(), reward, gt_head, newly_done
+
+
 def pick_task(seed: int, step_idx: int, tasks: list[str] = DIET_TASKS) -> str:
     """Uniform draw over `tasks`, deterministic given (seed, step_idx) --
     same determinism contract as `TaskGenerator.sample_trial`/`sample_batch`."""

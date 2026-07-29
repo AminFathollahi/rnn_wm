@@ -128,7 +128,17 @@ class NodePerturbationLearner:
         adaptive_baseline: bool = False,
         eprop: bool = False,
         seed: int = 0,
+        mask_hh: Optional[torch.Tensor] = None,
     ):
+        # item 10.2 fix (a), same class as F3 (`_dale_penalty`): a masked
+        # `MaskedGRUCell` zeroes `weight_hh * mask` in its forward pass, so
+        # any update this learner writes to the masked-out entries is pure
+        # waste -- it can never affect behaviour but does accumulate noise
+        # (and, over many trials, unbounded drift) in synapses that do not
+        # exist. Masking the update (not the trace) keeps those entries at
+        # whatever `reset_parameters` initialized them to, matching the
+        # forward pass's own `weight_hh * mask` convention.
+        self._mask_hh = mask_hh
         self.sigma_p = sigma_p
         self.gamma_e = gamma_e
         self.lr_local = lr_local
@@ -183,7 +193,7 @@ class NodePerturbationLearner:
         decay = self.baseline_decay_adaptive if self.adaptive_baseline else self.baseline_decay
         self.reward_baseline = decay * self.reward_baseline + (1 - decay) * mean_reward
         advantage = reward_t - self.reward_baseline  # [B]
-        for tw in self._traced:
+        for idx, tw in enumerate(self._traced):
             trace = tw.trace
             if trace is None:
                 continue
@@ -198,6 +208,8 @@ class NodePerturbationLearner:
                 trace = trace / norm.view(-1, *([1] * (trace.dim() - 1)))
             weighted = adv.view(-1, *([1] * (trace.dim() - 1))) * trace  # [B, *param.shape]
             update = weighted.mean(dim=0)  # average of per-sample (advantage * trace) products
+            if idx == 0 and self._mask_hh is not None:
+                update = update * self._mask_hh
             tw.param.data.add_(self.lr_local * update)
         self.reset_traces()
         self._n_updates += 1
@@ -240,4 +252,5 @@ def make_learner_for_cell(
         adaptive_baseline=(rung in (2, 3)),
         eprop=(rung == 3),
         seed=seed,
+        mask_hh=getattr(cell, "mask", None),
     )

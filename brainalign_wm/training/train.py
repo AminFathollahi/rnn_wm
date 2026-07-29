@@ -1030,6 +1030,7 @@ def _run_trial_local(
         for lrn in learners.values():
             lrn.reset_traces()
 
+        applied_update = False
         for i in range(T):
             ts_list = [trial_steps_batch[b][i] for b in range(B)]
             epoch = ts_list[0].epoch
@@ -1152,6 +1153,27 @@ def _run_trial_local(
                 # Pure tensor op, no host sync -- feeds the reflective
                 # gate's causal R_t chain for the remaining (iti) ticks.
                 prev_reward = ((last_probe_action_t == 1) == true_in_set_t).float().unsqueeze(-1)
+                # item 10.2 fix (b): apply the three-factor update HERE, at
+                # the feedback tick, not after any trailing iti ticks.
+                # `last_probe_action_t`/`true_in_set_t`/`n_probe_matched_t`
+                # are already final by this point (probe precedes feedback).
+                # Previously `apply_update` ran only after the whole T-tick
+                # loop, so with elig_decay=0.9 the trace kept
+                # decaying+accumulating irrelevant iti-tick noise for
+                # however many ticks followed feedback, discounting the
+                # useful signal by gamma^3..gamma^12 before the
+                # reward-relevant update landed.
+                has_probed_now = last_probe_action_t != -1
+                correct_now = ((last_probe_action_t == 1) == true_in_set_t) & has_probed_now
+                if dense_reward:
+                    reward_now = (
+                        (n_probe_matched_t / n_probe_total).tolist() if n_probe_total > 0 else [0.0] * B
+                    )
+                else:
+                    reward_now = correct_now.float().tolist()
+                for lrn in learners.values():
+                    lrn.apply_update(reward_now)
+                applied_update = True
 
         # Phase 2 (B3): a single sync (`.tolist()`) after the loop, not B*T
         # `.item()` calls inside it.
@@ -1164,8 +1186,11 @@ def _run_trial_local(
             )
         else:
             reward = correct_t.float().tolist()
-        for lrn in learners.values():
-            lrn.apply_update(reward)
+        if not applied_update:
+            # defensive fallback -- every well-formed trial has a feedback
+            # tick, but never silently skip the update if one doesn't.
+            for lrn in learners.values():
+                lrn.apply_update(reward)
         return correct, reward
 
 

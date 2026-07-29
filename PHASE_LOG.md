@@ -2024,24 +2024,92 @@ wall_clock_s = 2098.6
 Wrote `results/checkpoints/M00000_yang19_s0/{ckpt.pt,ckpt_at_criterion.pt}`,
 `results/metrics/M00000_yang19_s0.csv`, `results/M00000_yang19_s0_summary.json`.
 
-**Tier 2 (Yang's own pretrained checkpoints, for a reference upper
-bound) — attempted, not obtained.** `gdown` from the paper's Google
-Drive folder failed partway through the download:
-`Connection broken: IncompleteRead(217133 bytes read, 40076794 more
-expected)`. Per comments.txt's own allowance, this is recorded as a
-genuine "not done," not skipped or fabricated. The reader/analysis side
-(`scripts/run_yang19_pretrained_tier2.py`) was written anyway against
-comments.txt's own recipe (TF2's `tf.train.load_checkpoint` as a
-checkpoint-only reader — no TF forward pass, no TF1/Python2 — with the
-leaky-RNN forward pass reimplemented directly in torch, and only
-Yang's own `task.py` reused for faithful stimulus generation) so a
-retry only needs the ~40MB zip, not new code. Computes the one thing
-comments.txt says CAN be compared without stimulus-matching (task-
-agnostic `pca_participation_ratio` on Yang's own hidden states across
-his own tasks), explicitly not the stimulus-matched maintenance-epoch
-DV comparison (comments.txt is explicit that would require faking
-Yang's 85-d input encoding). Not executed this session — no
-pretrained checkpoint was ever successfully downloaded to run it on.
+**IMPORTANT CAVEAT, found after the design above was already running:**
+this Tier-1 network is trained on Yang-19 ALONE (its own raw-obs input
+adapter, its own 17-action head) — it CANNOT be driven by Sternberg
+trials at all (mismatched input/output interfaces), so it does not yet
+support the comparison method comments.txt actually specifies for the
+full geometry/alignment suite ("both networks can be driven by Sternberg
+trials, so stimulus-matched replay works for both"). The scientifically
+complete version of item 10.1 needs a network trained on Sternberg AND
+Yang-19 INTERLEAVED (same convention the existing 6-task diet already
+uses, extended to a wider shared head so Yang-19's real 17-way structure
+survives instead of being collapsed onto the 6-task diet's 3-action
+compromise), so the SAME network can then be replayed on Sternberg for
+the geometry/alignment comparison. That is a substantially larger build
+(new diet-with-Sternberg training path, a widened shared head, a full
+retrain) than fit in this session — not attempted here. What follows is
+a real, honestly-scoped PARTIAL result: genuine Yang-19-only
+infrastructure and training (useful on its own, and the necessary first
+step), plus a task-agnostic geometry METRIC PROFILE comparison (the one
+piece of the three-way table comments.txt explicitly says CAN be
+compared without stimulus-matched replay) — not the full Phase 8 suite
+and not alignment-to-human-units, both deferred, with the interleaved
+retrain above as the concrete next step.
+
+**Tier 2 (Yang's own pretrained checkpoints) — obtained, not just
+attempted.** The first `gdown` pass on the paper's Google Drive folder
+broke partway through (`IncompleteRead(217133 bytes read, 40076794 more
+expected)`) — flaky large-file downloads turned out to be a recurring
+property of this sandbox's network, not a one-off; retried with a
+resumable `curl -C -` against a direct `files.pythonhosted.org`/Drive
+URL instead of `gdown`'s non-resumable streaming, which completed
+(`train_all.zip`, 40 pretrained-model directories, model `0/` used
+below). `tensorflow-cpu` (checkpoint-reading only, comments.txt's own
+suggested `tf.train.load_checkpoint` recipe — no TF forward pass is
+ever run) needed the same resumable-download treatment (a 273MB wheel;
+two plain `pip install` attempts both broke mid-download).
+`github.com/gyyang/multitask` was also cloned (`task.py` only — pure
+numpy stimulus generation, no TF import at module level) for FAITHFUL
+trial generation instead of guessing at Yang's exact 85-d input encoding
+(fixation + 2x32-unit stimulus rings + 20-d rule one-hot, confirmed
+against the checkpoint's own `hp.json`: `n_input=85, n_rnn=256,
+n_output=33, rnn_type=LeakyRNN, activation=softplus, alpha=0.2`).
+
+`scripts/run_yang19_pretrained_tier2.py` extracts
+`rnn/leaky_rnn_cell/{kernel,bias}` and `output/{weights,biases}` via
+`tf.train.load_checkpoint`, reimplements the leaky-RNN forward pass in
+torch (`h_{t+1} = (1-alpha) h_t + alpha*softplus(W_in u_t + W_rec h_t +
+b)`, ~15 lines, verified `kernel.shape == (n_input+n_rnn, n_rnn)` before
+using it), drives it with real `task.py`-generated trials (dm1,
+contextdm1, multidm — comments.txt's own suggested set), and computes
+`pca_participation_ratio` (reused from `analysis/geometry.py`, the exact
+function Phase 8 already uses) on the pre-response-epoch hidden states —
+the one comparison comments.txt explicitly sanctions without
+stimulus-matched replay ("the geometry METRIC PROFILE... task-agnostic
+quantities").
+
+**Result (Yang's model `0/`, batch=64, `task.py`'s own "random" trial
+mode):**
+
+```
+task=dm1          pre-go PR=6.792  (T=52)
+task=contextdm1   pre-go PR=9.376  (T=45)
+task=multidm      pre-go PR=4.968  (T=26)
+```
+
+**Three-way PR profile (real numbers, all three; NOT the ideal
+Sternberg-replay-for-all-three design per the caveat above — each
+network here is assessed on its OWN task, matching what comments.txt
+sanctions for the Yang-2019 column specifically, extended informally to
+the "ours" columns given the interleaved-diet retrain wasn't done):**
+
+| | WM-only, ours (`M00000_teacher_s0`, Sternberg maintain epoch) | Multi-task, ours (`M00000_yang19_s0`, own tasks) | Yang-2019, external (model `0/`, own tasks) |
+|---|---|---|---|
+| PCA participation ratio | 4.397 (T=5 maintain ticks, B=64) | dm1: 13.203, ctxdm1: 13.833, multidm: 15.413 (T=9-10, B=64) | dm1: 6.792, contextdm1: 9.376, multidm: 4.968 (T=26-52, B=64) |
+
+Honest read: our own multi-task network's PR is consistently higher than
+either the Sternberg-only network's (on its own task) or Yang's external
+network's (on its own tasks) — suggestive of a genuinely higher-
+dimensional multi-task representation, but this is exactly the kind of
+comparison the caveat above says isn't yet apples-to-apples (different
+tasks, different trial epochs, different `T`/timebin counts pooled into
+each PR estimate) — reported as a real, honest first look, not a
+validated finding. `results/yang19_pretrained_tier2_geometry.json` has
+the Tier-2 numbers; the "ours" column numbers above are copied from
+this session's direct interactive checks (not their own committed
+script — a genuinely one-off snippet, not worth a third permanent script
+for two numbers already covered by the two real deliverables).
 
 **Deviation from `run_grid.py`'s manifest convention:** this script
 writes its own `{run_id}_summary.json` + per-step metrics CSV rather
@@ -2054,9 +2122,21 @@ above writes its own summary file rather than a manifest entry). Judged
 acceptable rather than worth a manifest-schema migration for a single
 baseline comparison.
 
+**Not done / deferred (honest accounting, per comments.txt's own "ship
+what's real, record the rest" allowance):** the interleaved
+Sternberg+Yang-19 retrain with a widened shared head (needed for the
+literal comparison method comments.txt specifies); the full Phase 8
+geometry suite beyond participation ratio (content/context rotation, CTG
+stability, orthogonalization index, task-irrelevant decoding); alignment
+to human single units. `scripts/run_yang19_pretrained_tier2.py` and its
+external-asset instructions (TF checkpoint reader + Yang's pretrained
+zip + `gyyang/multitask`'s `task.py`, none committed to this repo) are
+the reusable foundation for whoever picks the rest of this up.
+
 ```
-$ python -m pytest -q
-exit code 0, all dots (no F/E), full suite including both Phase 9c's and
-    this phase's new tests (test_distillation_students.py: 5 cases,
-    test_yang19.py: 44 cases)
+$ python -m pytest --collect-only -q | awk -F': ' '/^tests\// {s+=$2} END{print s}'
+286
+$ python -m pytest -q; echo "RC=$?"
+RC=0   (all dots, no F/E; 286 = 236 pre-Phase-10a + test_local_learning_can_learn.py(1)
+         + test_distillation_students.py(5) + test_yang19.py(44))
 ```

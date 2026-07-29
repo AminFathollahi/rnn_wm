@@ -231,6 +231,14 @@ gates:
     load2: 0.91    # median human session 0.9111
     load3: 0.86    # median human session 0.8667
   consecutive_evals: 3     # must hold across 3 consecutive evaluations
+  # n-back (Stage 3, Phase 6/11): from the 2 Kai Miller ECoG patients (CA,
+  # CC) with a usable dataglove response signal -- AL has no response
+  # channel, UG's is degenerate -- scripts/human_behavior_gates_nback.py,
+  # results/human_behavior_nback.csv. n=0 excluded (target-detection
+  # control, not a memory comparison); n=3 not run in this dataset.
+  nback:
+    n1: 0.96    # median patient accuracy 0.9600; pooled 0.9600 [0.923,0.980], n=200 trials, 2 patients
+    n2: 0.83    # median patient accuracy 0.8300; pooled 0.8300 [0.772,0.876], n=200 trials, 2 patients
   # <set in Phase 11 from the pilot's real steps_to_criterion numbers --
   # comments.txt's §3 text says "Phase 7" but its own Phase 11 ("PILOT,
   # THEN RUN", item 11.2) is what actually derives this; not invented here.

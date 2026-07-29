@@ -1929,3 +1929,134 @@ into `train.py`** — n-back's generator is explicitly "not wired into
 training/train.py" per its own docstring (Phase 7/METARL decides how
 n-back trials reach the network, still open work); these numbers are
 prep for when that wiring happens, not a claim that it already exists.
+
+## Phase 9c — distillation students (item 9.2)
+
+**Added:** `scripts/run_distillation_students.py`, `tests/test_distillation_students.py`.
+
+Distills the qualifying teacher (`M00000_teacher_s0`, Phase 9c prep —
+`criterion_met=True` at step 70000) into a ladder of progressively
+smaller recurrent cores (`--hidden 1 2 4 8 16 32 64`), reusing the
+teacher's frozen front_end so only the core+heads (the actual capacity
+axis under test) are trained per student. Objective is pure behavioral
+cloning — soft cross-entropy between student and teacher policy logits
+on the same trials — plus a small state-matching MSE term (student
+`h_star` -> linear map -> teacher `h_star`) that should only help
+geometry alignment, never hurt it. Each student is trained to its own
+§3-criterion streak (3 consecutive passing evals) or an 8000-step
+ceiling, whichever comes first.
+
+Two bars per student: (a) behavioral — the same §3 `gates.criterion`
+loads1/2/3, and (b) geometry — RSA (Spearman correlation of RDM upper
+triangles, condition = load × in-set, 6 conditions, plain
+1-minus-Pearson-correlation RDM, not crossnobis — model-to-model
+activations have no repeated-measurement noise for crossnobis to
+cross-validate away) between the student's and teacher's condition-mean
+`h_star` RDMs, thresholded at 80% of the teacher's own self-consistency
+RSA (0.9214, measured from two independent trial draws through the same
+teacher).
+
+**Result (real run, `--seed 0`):**
+
+```
+H=1   criterion_met=False  rsa=0.0000  (load1=0.47, load2=0.54, load3=0.54 — near chance)
+H=2   criterion_met=False  rsa=0.0000  (load1=0.47, load2=0.54, load3=0.54 — near chance)
+H=4   criterion_met=False  rsa=0.0143  (load1=0.51, load2=0.53, load3=0.48)
+H=8   criterion_met=False  rsa=0.2714  (load1=0.80, load2=0.65, load3=0.62)
+H=16  criterion_met=False  rsa=0.9714  (load1=0.97, load2=0.79, load3=0.74 — behavior short of load2/3 gates)
+H=32  criterion_met=True   rsa=0.9857  steps_to_criterion=6000  (load1=0.972, load2=0.920, load3=0.874)
+H=64  criterion_met=True   rsa=0.9786  steps_to_criterion=5000  (load1=0.986, load2=0.930, load3=0.902)
+```
+
+Smallest student clearing both bars: **H=32** (rsa=0.9857 ≥ threshold
+0.8×0.9214=0.7371). Monotonic, sensible trend: geometry (RSA) tracks
+capacity smoothly through H=16 even before behavior clears the gate,
+consistent with representational structure emerging before the last few
+points of accuracy. Full sweep written to
+`results/distillation_students.json`.
+
+(Full-suite pytest run covering this phase's new tests is reported once,
+combined with Phase 10b's, below.)
+
+## Phase 10b — Yang-19 multi-task baseline (item 10.1, Tier 1)
+
+**Added:** `brainalign_wm/tasks/multitask.py` (`Yang19BatchEnv`,
+`make_yang19_env`, `YANG19_TASKS`/`YANG19_ENV_IDS`/`YANG19_OBS_DIM`/
+`YANG19_ACTION_DIM`), `scripts/run_yang19_baseline.py`,
+`tests/test_yang19.py`.
+
+Item 10.1 asks for a matched comparison: this repo's canonical
+S=0,M=0,P=0 cell trained on Yang's 20-task suite
+(`neurogym.envs.collections.yang19`) vs. the same architecture trained
+on Sternberg alone. Every yang19 task shares one native action/obs space
+(`Discrete(17)`, obs_dim 33 — verified empirically per-task in
+`test_yang19.py`, not assumed), so `Yang19BatchEnv` uses an identity
+head<->env action mapping (no per-task lookup table, unlike the 6-task
+diet's `NeuroGymBatchEnv`). Dimensionally incompatible with the 6-task
+diet's shared 3-action head, so this uses its own `Heads(n_actions=17)`
+and its own input adapter — same "shared core, per-family adapter"
+convention the 6-task diet already established, only the core under
+test is unchanged.
+
+The Sternberg-only side of the comparison is NOT retrained — it already
+exists (`M00000_teacher_s0`, Phase 9c prep, same exact architecture,
+`criterion_met=True`, load1/2/3 = 1.0/0.974/0.958). Retraining a second
+redundant Sternberg-only run would just be the same experiment twice.
+
+Train-to-criterion: no `gates.criterion` exists for Yang-19
+(Sternberg-specific), so this defines its own — pooled per-tick decision
+accuracy (excluding fixation ticks) over a fresh eval must exceed
+`--criterion-acc` (default 0.90) for 3 consecutive evals. Same hybrid
+policy as `train.py`'s (Phase 3 revision, this session): snapshots
+`ckpt_at_criterion.pt` at the gate, keeps training to `--steps` for an
+equal-duration `ckpt.pt`.
+
+**Result, Tier 1 (real run, `M00000_yang19_s0`, `--steps 50000`):**
+
+```
+criterion (0.90) met at step 13000 (3 consecutive evals, 416000 trials,
+  529.8s wall)
+continued to 50000 for the equal-duration checkpoint
+final_eval_pooled_decision_acc = 0.9175
+wall_clock_s = 2098.6
+```
+
+Wrote `results/checkpoints/M00000_yang19_s0/{ckpt.pt,ckpt_at_criterion.pt}`,
+`results/metrics/M00000_yang19_s0.csv`, `results/M00000_yang19_s0_summary.json`.
+
+**Tier 2 (Yang's own pretrained checkpoints, for a reference upper
+bound) — attempted, not obtained.** `gdown` from the paper's Google
+Drive folder failed partway through the download:
+`Connection broken: IncompleteRead(217133 bytes read, 40076794 more
+expected)`. Per comments.txt's own allowance, this is recorded as a
+genuine "not done," not skipped or fabricated. The reader/analysis side
+(`scripts/run_yang19_pretrained_tier2.py`) was written anyway against
+comments.txt's own recipe (TF2's `tf.train.load_checkpoint` as a
+checkpoint-only reader — no TF forward pass, no TF1/Python2 — with the
+leaky-RNN forward pass reimplemented directly in torch, and only
+Yang's own `task.py` reused for faithful stimulus generation) so a
+retry only needs the ~40MB zip, not new code. Computes the one thing
+comments.txt says CAN be compared without stimulus-matching (task-
+agnostic `pca_participation_ratio` on Yang's own hidden states across
+his own tasks), explicitly not the stimulus-matched maintenance-epoch
+DV comparison (comments.txt is explicit that would require faking
+Yang's 85-d input encoding). Not executed this session — no
+pretrained checkpoint was ever successfully downloaded to run it on.
+
+**Deviation from `run_grid.py`'s manifest convention:** this script
+writes its own `{run_id}_summary.json` + per-step metrics CSV rather
+than appending to `results/manifest.jsonl`. `run_grid.py`'s manifest
+write is inlined in its own `main()` loop over 6-task-diet grid runs
+(`run["run_id"]`/`config_hash`/S-M-P-T-D flags), not a standalone
+reusable function, and its schema doesn't fit a one-off Yang-19
+comparison run cleanly (same reason `run_distillation_students.py`
+above writes its own summary file rather than a manifest entry). Judged
+acceptable rather than worth a manifest-schema migration for a single
+baseline comparison.
+
+```
+$ python -m pytest -q
+exit code 0, all dots (no F/E), full suite including both Phase 9c's and
+    this phase's new tests (test_distillation_students.py: 5 cases,
+    test_yang19.py: 44 cases)
+```

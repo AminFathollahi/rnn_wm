@@ -1776,7 +1776,16 @@ def train_one(run: dict, cfg: dict) -> dict:
                     print(f"[train] milestone {_mkey}>={_mthresh} confirmed at step "
                           f"{milestone_steps_to[_mkey]} ({consecutive_evals_required} consecutive evals)",
                           flush=True)
-                    if first_milestone_step is None:
+                    # Checkpoint/eval snapshot fires on Gate A (`criterion`,
+                    # load1) only -- NOT on an `extra_milestones` key (e.g.
+                    # load3). Extra milestones are pure efficiency DVs with
+                    # a threshold sourced from a single dataset (§12.6
+                    # comment: "000469, only dataset with load 3"); letting
+                    # one trigger ckpt_at_criterion.pt would make its
+                    # meaning vary run-to-run across the Stage-1 grid,
+                    # breaking the cross-run/cross-dataset comparison this
+                    # snapshot exists for.
+                    if _mkey in criterion and first_milestone_step is None:
                         first_milestone_step = milestone_steps_to[_mkey]
                         print(f"[train] first milestone ({_mkey}); snapshotting ckpt_at_criterion.pt, "
                               f"continuing to {total_steps} for geometry only.", flush=True)

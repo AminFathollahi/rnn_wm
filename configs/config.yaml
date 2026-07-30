@@ -112,7 +112,12 @@ mechanisms:
 
 task:                                      # image-Sternberg working-memory task
   loads: [1, 2, 3]
-  encode_steps: 10
+  encode_steps: 15                          # Phase 12.5 NO-GO fallback lever 1 (comments.txt §12.5): vanilla
+                                             # S=0 never cleared Gate A in 200k steps (train_loss frozen at
+                                             # 0.117 from step 10k on -- vanishing-gradient collapse). Lever 1
+                                             # (least distorting: more time to encode, no change to memory
+                                             # demand) is tried first, before lure_fraction/load-2-stage/
+                                             # maintain_steps. Was 10.
   maintain_steps: 25
   probe_steps: 10
   lure_fraction: 0.3

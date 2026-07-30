@@ -9,6 +9,23 @@ point of this file is traceability from a design choice back to its source.
 
 ---
 
+## 0. The companion paper (digital-twin target, comments.txt §0)
+
+### Fathollahi, M.A. (in prep). *A controllable code for working memory: content and context geometry benchmarked against, and validated by, prefrontal stimulation.*
+`../wm_dynamics/PAPER_REPORT.tex` — nine datasets (human single units, iEEG,
+ECoG, macaque PFC; seven observational cohorts, two electrical-stimulation
+cohorts).
+
+The source of the four findings (C1-C4, pre-registered in
+`preregistration.md`'s 2026-07-26 amendment) this RNN is built to reproduce
+as a controllable digital twin: content/context rotation asymmetry,
+load-invariant low-dimensional manifold, single-trial-only identifiability
+of the maintenance dynamics, and a dominant contracting mode whose alignment
+predicts real stimulation's causal effect. Every Phase 8 analysis exists to
+test one of these four against this repo's RNN.
+
+---
+
 ## 1. Parameter count and model size
 
 ### Lei, X., Ito, T., & Bashivan, P. (2024). *Geometry of naturalistic object representations in recurrent neural network models of working memory.* NeurIPS 2024. arXiv:2411.02685

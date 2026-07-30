@@ -121,7 +121,7 @@ def parse_budget(s: str) -> float:
 
 
 def enumerate_runs(seeds: list[int], include_local_learning: bool = False) -> list[dict]:
-    """Seed-major ordering => all 8 Core cells at seed0, then seed1, ...
+    """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
     local-learning cells (§6.3) after the Core cells within each seed --
     off by default, since that study is reported on its own terms and

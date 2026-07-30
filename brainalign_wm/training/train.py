@@ -22,15 +22,31 @@ Contract:
              from configs/config.yaml, since `run_grid.py` only threads the
              tier subset through.
       returns {"status": "completed"|"failed",
-               "gates": {"load1>=0.94": bool, "load2>=0.91": bool, "load3>=0.86": bool},  # final-eval snapshot
+               # Phase 12 (§3.4): the headline is the max_steps (equal-duration)
+               # evaluation, unconditionally -- this is where every cell is
+               # compared and every geometry analysis reads. Round 1's "prefer
+               # the at-criterion snapshot if confirmed" hybrid policy is gone.
+               "gates": {"load1>=0.83": bool},  # keys = configs/config.yaml gates.criterion, §3.1
                "accuracy": {"load1": float, "load1_ci_lo": float, "load1_ci_hi": float, ...},  # final_evaluation, n=500
+               "gates_at_max_steps": ..., "accuracy_at_max_steps": ...,  # aliases of the two above, unchanged shape
                "rung": int,
-               # Phase 3 (A3, §3): train-to-criterion. All four are None until the
-               # criterion holds for `gates.consecutive_evals` consecutive periodic
-               # evals; never substituted afterward if it's never met.
-               "criterion_met": bool, "steps_to_criterion": int | None,
-               "trials_to_criterion": int | None, "wall_s_to_criterion": float | None,
-               "joules_to_criterion": float | None, "ms_per_step": float | None}
+               # §3.1: Gate A (inclusion) verdict and its floor-only-gate
+               # mitigation covariate (9.10) -- NOT a stop condition.
+               "matched": bool,
+               "human_percentile_load1": float | None, "human_percentile_load2": float | None,
+               "human_percentile_load3": float | None,
+               # §3.3: one independent record per milestone key (gates.criterion
+               # merged with gates.extra_milestones), e.g. "steps_to_load1_0.83",
+               # "steps_to_load3_0.8" -- each None until its own streak of
+               # `gates.consecutive_evals` consecutive periodic evals holds, never
+               # substituted afterward, and NEVER a stop condition (only
+               # `gates.max_steps`, the loop's own ceiling, is).
+               "steps_to_<key>_<threshold>": int | None, "trials_to_<key>_<threshold>": int | None,
+               "wall_s_to_<key>_<threshold>": float | None, "joules_to_<key>_<threshold>": float | None,
+               # The checkpoint/eval snapshot at the FIRST milestone (of any
+               # key) reached -- what 12.4 compares `ckpt.pt` (max_steps) against.
+               "accuracy_at_first_milestone": dict | None, "first_milestone_step": int | None,
+               "ms_per_step": float | None}
 
 Design decisions made to resolve underspecified aspects of the training
 procedure:
@@ -129,7 +145,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # every caller of this module.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from scripts.human_behavior_gates import wilson_ci  # noqa: E402
+from scripts.human_behavior_gates import dedupe_sessions, wilson_ci  # noqa: E402
 
 
 class _MetricsLogger:
@@ -1349,6 +1365,34 @@ def final_evaluation(
     )
 
 
+def _human_percentiles(accuracy: dict) -> dict:
+    """Phase 12 (§3.1, 9.10): Gate A is a floor and cannot catch a
+    superhuman run, so every run instead RECORDS its human percentile per
+    load as a covariate -- the fraction of human sessions its final
+    (max_steps) accuracy beats. Same asymmetry as Gate A itself: the
+    DEDUPLICATED pooled session set for load 1 (the only load all three
+    Sternberg datasets share), 000469 alone for loads 2/3 (the only
+    dataset that ran them). `None` per load if `results/human_behavior.csv`
+    doesn't exist yet (e.g. a smoke test run before
+    `scripts/human_behavior_gates.py` has ever been run)."""
+    path = ROOT / "results" / "human_behavior.csv"
+    if not path.exists():
+        return {"load1": None, "load2": None, "load3": None}
+    import pandas as pd
+
+    df = pd.read_csv(path, dtype={"dataset": str})  # "000469" would lose its leading zeros as int64
+    df_dedup = dedupe_sessions(df)
+    out = {}
+    for load, src in ((1, df_dedup), (2, df[df.dataset == "000469"]), (3, df[df.dataset == "000469"])):
+        key = f"load{load}"
+        accs = src.loc[src.load == load, "accuracy"].to_numpy(dtype=float)
+        if accs.size == 0 or accuracy.get(key) is None:
+            out[key] = None
+        else:
+            out[key] = round(float((accs <= accuracy[key]).mean()), 4)
+    return out
+
+
 def train_one(run: dict, cfg: dict) -> dict:
     from brainalign_wm.utils.seeding import seed_everything
     from brainalign_wm.utils.device import get_device
@@ -1450,8 +1494,7 @@ def train_one(run: dict, cfg: dict) -> dict:
         _crit = full_cfg["gates"]["criterion"]
         return {"status": "failed", "error": f"stimuli pool missing at {stimuli_root}; run scripts/build_stimuli_pool.py",
                 "gates": {f"{k}>={v}": False for k, v in _crit.items()}, "accuracy": {}, "rung": 0,
-                "criterion_met": False, "steps_to_criterion": None, "trials_to_criterion": None,
-                "wall_s_to_criterion": None, "joules_to_criterion": None, "ms_per_step": None}
+                "matched": False, "ms_per_step": None}
 
     image_bank = ImageTokenBank(
         stimuli_root=stimuli_root, categories=full_cfg["task"]["categories"],
@@ -1548,6 +1591,13 @@ def train_one(run: dict, cfg: dict) -> dict:
     criterion = full_cfg["gates"]["criterion"]
     consecutive_evals_required = int(full_cfg["gates"]["consecutive_evals"])
     task_loads = full_cfg["task"]["loads"]
+    # Phase 12 (§3.3): the milestone set is `gates.criterion` (Gate A, §3.1)
+    # merged with `gates.extra_milestones` -- Gate A's own threshold is
+    # tracked as a milestone automatically, so its number lives in exactly
+    # one place in config.yaml. Iterating THESE keys (not `task_loads`) is
+    # the root-cause fix for a partial-coverage gate: any future criterion
+    # naming a subset of loads no longer needs a train.py change.
+    milestone_thresholds = {**criterion, **(full_cfg["gates"].get("extra_milestones") or {})}
 
     # Phase 3 (A3): every `evaluate_accuracy` call in this run (rung checks,
     # periodic logging) gets a fresh eval_seed from an incrementing counter
@@ -1556,19 +1606,22 @@ def train_one(run: dict, cfg: dict) -> dict:
     # nowhere near it even at the max ~300 periodic calls a 150k-step run
     # makes at eval_every>=500.
     eval_call_counter = 0
-    # Train-to-criterion (§3, revised): a streak of `consecutive_evals_required`
-    # periodic evaluations all meeting `criterion`. Recorded once, at the
-    # step of the CONFIRMING (last-in-streak) evaluation -- the first eval
-    # in a streak isn't yet distinguishable from a fluke a later eval could
-    # refute -- and never overwritten afterward. Training stops shortly
-    # after this is confirmed (not further, not less); `total_steps` is
-    # the ceiling for cells that never confirm it.
-    consecutive_criterion_evals = 0
-    criterion_met = False
-    steps_to_criterion = None
-    trials_to_criterion = None
-    wall_s_to_criterion = None
-    joules_to_criterion = None
+    # Phase 12 (§3.3): milestones, not a stop rule. Each key gets its OWN
+    # streak counter -- confirmed at the step of the CONFIRMING (last-in-
+    # streak) evaluation, never overwritten afterward, never stops training
+    # (§3: Gate A is inclusion-only; Gate B, i.e. `total_steps`, is the only
+    # ceiling). A milestone never confirmed stays `None` -- a result, not a
+    # missing value.
+    milestone_consecutive = {k: 0 for k in milestone_thresholds}
+    milestone_reached = {k: False for k in milestone_thresholds}
+    milestone_steps_to = {k: None for k in milestone_thresholds}
+    milestone_trials_to = {k: None for k in milestone_thresholds}
+    milestone_wall_s_to = {k: None for k in milestone_thresholds}
+    milestone_joules_to = {k: None for k in milestone_thresholds}
+    # The FIRST milestone (of any key) reached gets a checkpoint + full
+    # evaluation snapshot -- what 12.4 compares `ckpt.pt` (max_steps) against.
+    first_milestone_step = None
+    accuracy_at_first_milestone = None
 
     t0 = time.time()
     running_loss = 0.0
@@ -1687,60 +1740,60 @@ def train_one(run: dict, cfg: dict) -> dict:
             running_loss = 0.0
             loss_count = 0
 
-            # Train-to-criterion (§3, Phase 3 item 3.4, revised): the
-            # criterion is confirmed by a streak of `consecutive_evals_required`
-            # periodic evals (each drawn with its own fresh `eval_seed`,
-            # disjoint from `final_evaluation`'s fixed seed below). The
-            # persistence requirement is what keeps this from repeating the
-            # deleted `acc >= 0.999` bug (3.3): a single lucky eval can't
-            # trigger it, and the eval(s) that DO trigger it are never the
-            # same trials as the officially reported accuracy.
+            # Phase 12 (§3.3): each milestone (`gates.criterion` merged with
+            # `gates.extra_milestones`) is confirmed independently by its own
+            # streak of `consecutive_evals_required` periodic evals (each
+            # drawn with its own fresh `eval_seed`, disjoint from
+            # `final_evaluation`'s fixed seed below). The persistence
+            # requirement is what keeps this from repeating the deleted
+            # `acc >= 0.999` bug (3.3): a single lucky eval can't trigger it,
+            # and the eval(s) that DO trigger it are never the same trials
+            # as the officially reported (max_steps, §3.4) accuracy.
             #
-            # HYBRID policy: the officially reported accuracy/gates (below,
-            # `accuracy_at_criterion`) and a checkpoint snapshot are taken
-            # RIGHT HERE, at the confirmed stopping point -- not further,
-            # not less. But training keeps running in this same process to
-            # `total_steps` (the tier's ceiling) so Phase 8's geometry
-            # suite still gets an equal-duration checkpoint across cells
-            # (comments.txt §3: "geometry keeps changing after accuracy
-            # saturates, so comparing two cells' geometry at different
-            # training durations is invalid"). `ckpt.pt` (the final,
-            # equal-duration snapshot) is unchanged for that reason --
-            # Phase 8's code needs no changes. `ckpt_at_criterion.pt` and
-            # `accuracy_at_criterion`/`gates_at_criterion` are the new,
-            # honest "is this cell trained, and how well" answer.
-            if not criterion_met:
-                if all(acc.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads):
-                    consecutive_criterion_evals += 1
+            # NONE of these stop training -- §3: Gate A (`criterion`) is
+            # inclusion, not a stop rule, and `extra_milestones` are pure
+            # efficiency DVs; only Gate B (`total_steps`, the loop's own
+            # ceiling) does. The FIRST milestone reached (of any key) gets a
+            # checkpoint + full evaluation snapshot -- what 12.4 compares
+            # `ckpt.pt` (the max_steps, equal-duration snapshot, unchanged
+            # below) against.
+            for _mkey, _mthresh in milestone_thresholds.items():
+                if milestone_reached[_mkey]:
+                    continue
+                if acc.get(_mkey, 0.0) >= _mthresh:
+                    milestone_consecutive[_mkey] += 1
                 else:
-                    consecutive_criterion_evals = 0
-                if consecutive_criterion_evals >= consecutive_evals_required:
-                    criterion_met = True
-                    steps_to_criterion = step + 1
-                    trials_to_criterion = steps_to_criterion * batch_size
-                    wall_s_to_criterion = round(time.time() - t0, 1)
-                    joules_to_criterion = (
+                    milestone_consecutive[_mkey] = 0
+                if milestone_consecutive[_mkey] >= consecutive_evals_required:
+                    milestone_reached[_mkey] = True
+                    milestone_steps_to[_mkey] = step + 1
+                    milestone_trials_to[_mkey] = milestone_steps_to[_mkey] * batch_size
+                    milestone_wall_s_to[_mkey] = round(time.time() - t0, 1)
+                    milestone_joules_to[_mkey] = (
                         pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
                         if _nvml_handle is not None else None
                     )
-                    print(f"[train] criterion met at step {steps_to_criterion} "
-                          f"({consecutive_evals_required} consecutive evals); "
-                          f"snapshotting and reporting here, continuing to {total_steps} for geometry only.",
+                    print(f"[train] milestone {_mkey}>={_mthresh} confirmed at step "
+                          f"{milestone_steps_to[_mkey]} ({consecutive_evals_required} consecutive evals)",
                           flush=True)
-                    torch.save(
-                        {
-                            "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
-                            "heads": heads.state_dict(),
-                            "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
-                            "optimizer": optimizer.state_dict() if optimizer else None,
-                            "rung": rung,
-                        },
-                        ckpt_dir / "ckpt_at_criterion.pt",
-                    )
-                    accuracy_at_criterion = final_evaluation(
-                        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
-                        task_name_for_context=("sternberg" if diet == "multitask" else None),
-                    )
+                    if first_milestone_step is None:
+                        first_milestone_step = milestone_steps_to[_mkey]
+                        print(f"[train] first milestone ({_mkey}); snapshotting ckpt_at_criterion.pt, "
+                              f"continuing to {total_steps} for geometry only.", flush=True)
+                        torch.save(
+                            {
+                                "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
+                                "heads": heads.state_dict(),
+                                "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
+                                "optimizer": optimizer.state_dict() if optimizer else None,
+                                "rung": rung,
+                            },
+                            ckpt_dir / "ckpt_at_criterion.pt",
+                        )
+                        accuracy_at_first_milestone = final_evaluation(
+                            front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                            task_name_for_context=("sternberg" if diet == "multitask" else None),
+                        )
 
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
             torch.save(
@@ -1755,39 +1808,43 @@ def train_one(run: dict, cfg: dict) -> dict:
 
     metrics_logger.close()
     # `ckpt.pt` and this final evaluation are the equal-duration (max_steps)
-    # snapshot every cell gets regardless of when/whether it met criterion --
-    # geometry analyses use these, unchanged from the original design.
+    # snapshot every cell gets regardless of when/whether any milestone was
+    # reached -- geometry analyses use these, unchanged from the original
+    # design.
     accuracy = final_evaluation(
         front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
         task_name_for_context=("sternberg" if diet == "multitask" else None),
     )
-    gates = {f"load{i}>={criterion[f'load{i}']}": accuracy.get(f"load{i}", 0.0) >= criterion[f"load{i}"] for i in task_loads}
-    # The officially reported accuracy/gates: at-criterion if confirmed
-    # (the honest "trained, and how well" answer at the true stopping
-    # point), else the same max_steps evaluation as a fallback (never met
-    # criterion -- nothing else to report).
-    if criterion_met:
-        accuracy_headline = accuracy_at_criterion
-        gates_headline = {
-            f"load{i}>={criterion[f'load{i}']}": accuracy_at_criterion.get(f"load{i}", 0.0) >= criterion[f"load{i}"]
-            for i in task_loads
-        }
-    else:
-        accuracy_headline = accuracy
-        gates_headline = gates
+    # Root-cause fix (same as the periodic-eval loop above): iterate
+    # `criterion`'s own keys, not `task_loads` -- a load-1-only criterion
+    # must not require every future gate change to touch this code.
+    gates = {f"{k}>={v}": accuracy.get(k, 0.0) >= v for k, v in criterion.items()}
+    # §3.4: the headline is now the max_steps evaluation, unconditionally --
+    # this is where every cell is compared and where every geometry
+    # analysis reads, so it inverts Round 1's "at-criterion is the headline"
+    # policy. `accuracy_at_max_steps`/`gates_at_max_steps` stay as aliases
+    # (identical to `accuracy`/`gates` now) so nothing downstream that reads
+    # them specifically breaks.
+    # §3.1: Gate A specifically (not the extra efficiency milestones) is the
+    # behavioural-matching/inclusion verdict.
+    matched = all(milestone_reached[k] for k in criterion)
+    human_percentile = _human_percentiles(accuracy)
     return {
         "status": "completed",
-        # headline = at-criterion if confirmed, else the max_steps fallback
-        # (see above) -- this is "is this cell trained, and how well".
-        "gates": gates_headline, "accuracy": accuracy_headline,
-        # max_steps snapshot (`ckpt.pt`), always present, for Phase 8's
-        # equal-duration geometry comparisons -- not the headline number.
+        "gates": gates, "accuracy": accuracy,
         "gates_at_max_steps": gates, "accuracy_at_max_steps": accuracy,
+        # The at-first-milestone snapshot (`ckpt_at_criterion.pt`) -- None if
+        # no milestone was ever confirmed. What 12.4 compares `ckpt.pt` against.
+        "accuracy_at_first_milestone": accuracy_at_first_milestone,
+        "first_milestone_step": first_milestone_step,
         "rung": rung if L == 1 else 0, "wall_clock_train_s": round(time.time() - t0, 1),
-        "criterion_met": criterion_met,
-        "steps_to_criterion": steps_to_criterion,
-        "trials_to_criterion": trials_to_criterion,
-        "wall_s_to_criterion": wall_s_to_criterion,
-        "joules_to_criterion": joules_to_criterion,
+        "matched": matched,
+        "human_percentile_load1": human_percentile.get("load1"),
+        "human_percentile_load2": human_percentile.get("load2"),
+        "human_percentile_load3": human_percentile.get("load3"),
+        **{f"steps_to_{k}_{v}": milestone_steps_to[k] for k, v in milestone_thresholds.items()},
+        **{f"trials_to_{k}_{v}": milestone_trials_to[k] for k, v in milestone_thresholds.items()},
+        **{f"wall_s_to_{k}_{v}": milestone_wall_s_to[k] for k, v in milestone_thresholds.items()},
+        **{f"joules_to_{k}_{v}": milestone_joules_to[k] for k, v in milestone_thresholds.items()},
         "ms_per_step": round(1000 * statistics.median(step_durations), 3) if step_durations else None,
     }

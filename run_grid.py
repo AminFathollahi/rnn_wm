@@ -219,11 +219,23 @@ def git_commit() -> str:
 
 def _fmt(r: dict, key: str) -> str:
     """`r.get(key, "-")`, but also renders an explicitly-`None` value (JSON
-    `null` -- e.g. `steps_to_criterion` when criterion was never met) as
-    "-" instead of the literal string "None". `False`/`0` are NOT missing
-    (e.g. `criterion_met: false`) and print as-is."""
+    `null` -- e.g. a milestone never reached) as "-" instead of the literal
+    string "None". `False`/`0` are NOT missing (e.g. `matched: false`) and
+    print as-is."""
     v = r.get(key, "-")
     return "-" if v is None else str(v)
+
+
+def _fmt_milestone(r: dict, prefix: str) -> str:
+    """Phase 12 (§3.3): milestone keys are named `<prefix>_<key>_<threshold>`
+    (e.g. `steps_to_load1_0.83`), and the threshold comes from config.yaml,
+    not this file -- so look up by prefix instead of hardcoding the
+    threshold here, the same root-cause reason train.py iterates
+    `criterion`'s own keys instead of `task_loads`."""
+    for k, v in r.items():
+        if k.startswith(prefix):
+            return "-" if v is None else str(v)
+    return "-"
 
 
 def _fmt_acc_ci(acc: dict, load: int) -> str:
@@ -252,16 +264,17 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         "",
         "## Per-run",
         "",
-        # Phase 3 (comments.txt §5 item 3.6): criterion_met/steps_to_criterion/
-        # trials_to_criterion/ms_per_step/joules_to_criterion added; final
-        # per-load accuracy now carries its Wilson CI; `wall(s)` renamed
-        # `wall_total_s` (still the run's total wall clock, unrelated to
-        # `wall_s_to_criterion` -- sample efficiency is reported as
-        # trials_to_criterion, not a step or wall-clock count, per 3.6).
+        # Phase 12 (§3): the old single graded criterion_met/steps_to_criterion
+        # split into Gate A's `matched` (inclusion, §3.1) and per-milestone
+        # steps/trials_to_<key>_<threshold> (§3.3, milestones, not a stop
+        # rule -- `_fmt_milestone` looks these up by prefix since the
+        # threshold suffix comes from config.yaml, not this file). `wall(s)`
+        # is `wall_total_s`, the run's total wall clock -- workers (§12.3)
+        # means it is NOT comparable across rows with different `workers`.
         "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | "
-        "criterion_met | steps_to_criterion | trials_to_criterion | ms_per_step | "
-        "joules_to_criterion | wall_total_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "matched | steps_to_load1 | steps_to_load3 | ms_per_step | "
+        "wall_total_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in sorted(recs, key=lambda x: x.get("run_id", "")):
         g = r.get("gates", {})
@@ -277,9 +290,9 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
             f"| {r.get('run_id','?')} | {r.get('S','-')} | {r.get('M','-')} | {p_or_l} | "
             f"{r.get('T','-')} | {r.get('D','-')} | "
             f"{r.get('status','?')} | {gates} | {accs} | {r.get('rung','-')} | "
-            f"{_fmt(r, 'criterion_met')} | {_fmt(r, 'steps_to_criterion')} | "
-            f"{_fmt(r, 'trials_to_criterion')} | {_fmt(r, 'ms_per_step')} | "
-            f"{_fmt(r, 'joules_to_criterion')} | {r.get('wall_clock_s','-')} |"
+            f"{_fmt(r, 'matched')} | {_fmt_milestone(r, 'steps_to_load1_')} | "
+            f"{_fmt_milestone(r, 'steps_to_load3_')} | {_fmt(r, 'ms_per_step')} | "
+            f"{r.get('wall_clock_s','-')} |"
         )
     errs = [r for r in recs if r.get("status") in ("error", "failed")]
     if errs:

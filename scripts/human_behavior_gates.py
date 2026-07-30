@@ -46,6 +46,35 @@ def wilson_ci(n_correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
+def dedupe_sessions(df: pd.DataFrame) -> pd.DataFrame:
+    """Phase 12 (§3.1/9.8): 001187 is an MTL re-release of recordings also
+    present in 000673 -- 19 session identifiers appear in both, with
+    identical trial counts and accuracies (e.g. `sub-10_ses-1_P68CS` is
+    68/70 in both). Any pooled statistic must count each underlying session
+    once, not once per release that happens to include it. Collapse on
+    (session, load), keeping the first occurrence -- order doesn't matter
+    since duplicates are identical by construction, only presence does."""
+    return df.drop_duplicates(subset=["session", "load"], keep="first").reset_index(drop=True)
+
+
+def session_quantiles(df: pd.DataFrame, load: int) -> dict:
+    """n, min, q05, q10, q25, median of PER-SESSION accuracy (not pooled
+    trial-level accuracy) for one load. Caller is responsible for having
+    deduplicated `df` first if it spans datasets that can overlap."""
+    accs = df.loc[df.load == load, "accuracy"].to_numpy(dtype=float)
+    if accs.size == 0:
+        return {"n": 0, "min": float("nan"), "q05": float("nan"), "q10": float("nan"),
+                "q25": float("nan"), "median": float("nan")}
+    return {
+        "n": int(accs.size),
+        "min": float(np.min(accs)),
+        "q05": float(np.percentile(accs, 5)),
+        "q10": float(np.percentile(accs, 10)),
+        "q25": float(np.percentile(accs, 25)),
+        "median": float(np.median(accs)),
+    }
+
+
 def collect(data_root: Path, datasets: list[str]) -> pd.DataFrame:
     import h5py
 
@@ -102,82 +131,56 @@ def main(argv=None) -> int:
     df.to_csv(out, index=False)
     print(f"\n[human] wrote {out}  ({len(df)} session x load rows)\n")
 
-    print("Per-load, pooled over all sessions and datasets")
-    print(f"{'load':>5} {'sessions':>9} {'trials':>8} {'accuracy':>9} {'95% CI':>16} {'per-session min':>16}")
-    print("-" * 70)
-    pooled = {}
-    for load, g in df.groupby("load"):
-        n, k = int(g.n_trials.sum()), int(g.n_correct.sum())
-        acc = k / n
-        lo, hi = wilson_ci(k, n)
-        pooled[int(load)] = {"acc": acc, "lo": lo, "hi": hi, "n": n,
-                             "min_session": float(g.accuracy.min()),
-                             "median_session": float(g.accuracy.median())}
-        print(f"{load:>5} {len(g):>9} {n:>8} {acc:>9.4f} {f'[{lo:.3f},{hi:.3f}]':>16} {g.accuracy.min():>16.4f}")
+    # ---- Phase 12 (§3.1/9.8): dedup on session identifier BEFORE anything
+    # pooled. 19 identifiers are shared between 000673 and 001187 (001187 is
+    # an MTL re-release of overlapping recordings) -- naive pooling double-
+    # counts them (111 rows) and gives q10=0.8222, not the correct 0.8344.
+    df_dedup = dedupe_sessions(df)
+    n_dup = len(df[df.load == 1]) - len(df_dedup[df_dedup.load == 1])
+    print(f"[human] load-1 rows: {len(df[df.load == 1])} raw -> "
+          f"{len(df_dedup[df_dedup.load == 1])} deduplicated ({n_dup} duplicate sessions dropped)")
 
-    print("\nPer dataset")
+    # ---- GATE A (§3.1): load 1 only, the one load every dataset measured.
+    # Pooling load 2/3 across datasets is invalid: only 000469 ran them, and
+    # it is also the lowest-performing dataset, so a pooled graded profile
+    # puts load3 ABOVE load2 -- a Simpson's-paradox artefact of unequal
+    # coverage, not a fact about humans. Load 2/3 are reported from 000469
+    # alone, labelled single-dataset, not pooled.
+    q_load1 = session_quantiles(df_dedup, 1)
+    single_ds = "000469"
+    df_single = df[df.dataset == single_ds]  # no cross-dataset dup risk within one dataset
+    q_load2 = session_quantiles(df_single, 2)
+    q_load3 = session_quantiles(df_single, 3)
+
+    print("\nPer-session accuracy quantiles (Gate A basis, §3.1)")
+    print(f"{'load':>6} {'source':>22} {'n':>4} {'min':>7} {'q05':>7} {'q10':>7} {'q25':>7} {'median':>7}")
+    print("-" * 70)
+    for load, q, src in ((1, q_load1, "dedup pool (3 ds)"), (2, q_load2, f"{single_ds} only"),
+                         (3, q_load3, f"{single_ds} only")):
+        print(f"{load:>6} {src:>22} {q['n']:>4} {q['min']:>7.4f} {q['q05']:>7.4f} "
+              f"{q['q10']:>7.4f} {q['q25']:>7.4f} {q['median']:>7.4f}")
+
+    print("\nPer dataset (trial-pooled, for reference)")
     for (ds, load), g in df.groupby(["dataset", "load"]):
         n, k = int(g.n_trials.sum()), int(g.n_correct.sum())
         print(f"  {ds} load{load}: {k/n:.4f}  (n={n}, {len(g)} sessions)")
 
-    # ---- DO NOT POOL ACROSS DATASETS FOR A LOAD-GRADED PROFILE ----
-    # Only some datasets ran every load (here: only 000469 has load 2). The
-    # pooled numbers above therefore show load3 ABOVE load2, which is
-    # backwards for a WM task -- a Simpson's-paradox artefact of load 2
-    # being measured only in the lowest-performing dataset. A load-graded
-    # gate must come from datasets that measured the whole ladder.
-    loads_all = sorted(df.load.unique().tolist())
-    complete = [ds for ds, g in df.groupby("dataset") if sorted(g.load.unique().tolist()) == loads_all]
-    print(f"\nDatasets covering the full load ladder {loads_all}: {complete or 'NONE'}")
-    for ds, g in df.groupby("dataset"):
-        print(f"  {ds}: loads {sorted(g.load.unique().tolist())}"
-              f"{'  <- complete' if ds in complete else '  (partial -- not usable for a graded profile)'}")
-    if not complete:
-        print("\n[human] no dataset covers every load; cannot derive a graded gate. "
-              "Report per-load gates only for loads with full coverage.")
-        return 1
-
-    prof = {}
-    src = df[df.dataset.isin(complete)]
-    for load, g in src.groupby("load"):
-        n, k = int(g.n_trials.sum()), int(g.n_correct.sum())
-        lo, hi = wilson_ci(k, n)
-        prof[int(load)] = {"acc": k / n, "lo": lo, "hi": hi, "n": n,
-                           "median_session": float(g.accuracy.median())}
-    accs = [prof[l]["acc"] for l in sorted(prof)]
-    monotone = all(a >= b for a, b in zip(accs, accs[1:]))
-    print(f"\nGraded profile from {complete}: "
-          + ", ".join(f"load{l} {prof[l]['acc']:.4f}" for l in sorted(prof))
-          + f"   monotone_decreasing={monotone}")
-    if not monotone:
-        print("[human] WARNING: profile is not monotone in load. Investigate before using as a gate.")
-
+    gate_a_load1 = math.floor(q_load1["q10"] * 100) / 100
+    gate_b_load3 = math.floor(q_load3["q10"] * 100) / 100
     print("\n" + "=" * 70)
     print("PROPOSED GATES (paste into configs/config.yaml)")
     print("=" * 70)
     print("gates:")
-    print("  # Derived from human Sternberg performance in the very sessions this")
-    print("  # study aligns against -- scripts/human_behavior_gates.py,")
-    print("  # results/human_behavior.csv. Not a literature estimate.")
-    print(f"  # Graded profile from {complete} (the only dataset(s) covering every load);")
-    print("  # pooling across datasets is invalid here -- see the script's comment.")
-    print("  convergence:   # stops training: match the median human session, per load")
-    for load in sorted(prof):
-        print(f"    load{load}: {math.floor(prof[load]['median_session'] * 100) / 100:.2f}"
-              f"    # median human session {prof[load]['median_session']:.4f}")
-    print("  inclusion:     # admits a run to the representational analyses:")
-    print("                 # human lower 95% CI bound, per load")
-    for load in sorted(prof):
-        print(f"    load{load}: {math.floor(prof[load]['lo'] * 100) / 100:.2f}"
-              f"    # human {prof[load]['acc']:.4f} "
-              f"[{prof[load]['lo']:.3f},{prof[load]['hi']:.3f}], n={prof[load]['n']}")
-    print("\n  # Cross-check, ALL datasets, loads with full coverage only:")
-    for load in sorted(pooled):
-        n_ds = df[df.load == load].dataset.nunique()
-        if n_ds == df.dataset.nunique():
-            print(f"  #   load{load}: {pooled[load]['acc']:.4f} "
-                  f"[{pooled[load]['lo']:.3f},{pooled[load]['hi']:.3f}], n={pooled[load]['n']} "
-                  f"({n_ds} datasets)")
+    print("  # Gate A (§3.1): behavioural matching / inclusion. Load 1 only,")
+    print(f"  # deduplicated pooled q10 = {q_load1['q10']:.4f} (n={q_load1['n']} sessions).")
+    print("  # Does NOT stop training.")
+    print("  criterion:")
+    print(f"    load1: {gate_a_load1:.2f}")
+    print("  consecutive_evals: 3")
+    print("  # §3.3 efficiency DVs.")
+    print("  extra_milestones:")
+    print(f"    load3: {gate_b_load3:.2f}          # {single_ds} load-3 q10 = {q_load3['q10']:.4f}")
+    print("  max_steps: null        # Gate B (§3.2), set by 12.6")
     return 0
 
 

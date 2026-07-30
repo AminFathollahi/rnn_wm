@@ -121,7 +121,7 @@ def main() -> int:
         RESULTS.mkdir(exist_ok=True)
         pd.DataFrame(columns=[
             "H", "n_seeds", "acc_load1_mean", "acc_load2_mean", "acc_load3_mean",
-            "criterion_met_frac", "mean_speed_mean", "pca_participation_ratio_mean",
+            "matched_frac", "mean_speed_mean", "pca_participation_ratio_mean",
         ]).to_csv(OUT_CSV, index=False)
         print(f"[analyze_capacity_curve] no completed M00000_H* runs found in {MANIFEST} -- "
               f"wrote header-only {OUT_CSV}. Run scripts/run_capacity_curve.py first.", flush=True)
@@ -135,7 +135,7 @@ def main() -> int:
 
     rows = []
     for H in sorted(by_h):
-        per_seed = {"acc_load1": [], "acc_load2": [], "acc_load3": [], "criterion_met": [],
+        per_seed = {"acc_load1": [], "acc_load2": [], "acc_load3": [], "matched": [],
                     "mean_speed": [], "pca_participation_ratio": []}
         for rec in by_h[H]:
             run_id, seed = rec["run_id"], rec["seed"]
@@ -157,7 +157,7 @@ def main() -> int:
             per_seed["acc_load1"].append(acc["load1"])
             per_seed["acc_load2"].append(acc["load2"])
             per_seed["acc_load3"].append(acc["load3"])
-            per_seed["criterion_met"].append(bool(rec.get("criterion_met", False)))
+            per_seed["matched"].append(bool(rec.get("matched", False)))
 
             Z = _rollout_hidden_states(
                 front_end, core, heads, task_gen, image_bank, cfg_H, device,
@@ -172,7 +172,7 @@ def main() -> int:
             "acc_load1_mean": float(np.mean(per_seed["acc_load1"])), "acc_load1_std": float(np.std(per_seed["acc_load1"])),
             "acc_load2_mean": float(np.mean(per_seed["acc_load2"])), "acc_load2_std": float(np.std(per_seed["acc_load2"])),
             "acc_load3_mean": float(np.mean(per_seed["acc_load3"])), "acc_load3_std": float(np.std(per_seed["acc_load3"])),
-            "criterion_met_frac": float(np.mean(per_seed["criterion_met"])),
+            "matched_frac": float(np.mean(per_seed["matched"])),
             "mean_speed_mean": float(np.mean(per_seed["mean_speed"])) if per_seed["mean_speed"] else float("nan"),
             "pca_participation_ratio_mean": float(np.mean(per_seed["pca_participation_ratio"])) if per_seed["pca_participation_ratio"] else float("nan"),
         }

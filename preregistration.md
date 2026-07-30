@@ -243,3 +243,49 @@ conclusion.
 This amendment does not reopen or re-litigate H1/H2/H5/H6 or the P-arm
 framing above; it adds the C1-C4/multi-task/topology/Dale's-law predictions
 and updates the gate reference, per comments.txt §10.
+
+---
+
+## Amendment (2026-07-30): split gate (Gate A / Gate B), Stage 1 GO/NO-GO
+(comments.txt Phase 12, §3)
+
+Per comments.txt §10's explicit instruction. The single graded criterion
+above (`load1>=0.94, load2>=0.91, load3>=0.86`, all three loads jointly) is
+superseded by TWO logically distinct gates, which Round 1 had conflated:
+
+- **Gate A** (§3.1, behavioural matching / inclusion): `load1 >= 0.83`,
+  the deduplicated pooled q10 across all three sessions (n=92; see the
+  9.8 correction below). Load 1 only — it is the only load all three
+  Sternberg datasets (000469, 000673, 001187) share. Checked every
+  `eval_every` steps, confirmed after `consecutive_evals=3` consecutive
+  passes. Does NOT stop training.
+- **Gate B** (§3.2, fixed equal-duration training budget): `gates.max_steps`,
+  a single step count applied to every Stage 1 cell so runs are compared at
+  matched training duration, not matched accuracy. Set in 12.6 from the
+  vanilla-substrate pilot's (12.5) accuracy-plateau (or geometry-plateau,
+  per 12.4) trace. `null` until then.
+
+Per-milestone efficiency DVs (§3.3) — `steps_to_<key>_<threshold>`,
+`trials_to_...`, `wall_s_to_...`, `joules_to_...`, one set per key in
+`gates.criterion` union `gates.extra_milestones` — are pre-registered
+descriptive measures, not a third gate; none of them stop training either.
+`extra_milestones.load3: 0.80` (000469's own load-3 q10) is currently the
+only entry beyond Gate A's own load1 threshold.
+
+### 9.8 correction: 92 vs 111 sessions
+The dedup q10 above (0.8344) replaces an earlier, wrong pooled figure of
+0.8222 computed from the naive 111-row (undeduplicated) pool. 001187 is a
+re-release of MTL recordings already present in 000673 — 19 session
+identifiers are shared between the two datasets and were being counted
+twice. `scripts/human_behavior_gates.py::dedupe_sessions` now collapses on
+`(session, load)` before any pooled statistic is computed; the raw,
+undeduplicated 243-row `results/human_behavior.csv` is kept on disk for
+auditability, with dedup applied only at the point pooled quantiles are
+derived. This is a corrected number, not a re-derivation from a different
+choice of statistic — recorded here per comments.txt's instruction that a
+changed gate number after data inspection must be documented, with its
+reason, not silently swapped.
+
+This amendment does not reopen or re-litigate H1-H6, C1-C4, or the
+multi-task/topology/Dale's-law predictions above; it replaces the gate
+mechanics only.

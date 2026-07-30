@@ -2566,3 +2566,96 @@ pytest: deferred to end of session per standing user instruction.
 ACCEPTANCE: the four-checkpoint table above, the within-cell-vs-cross-cell
 difference comparison, and the concluded branch (geometry-plateau, not
 accuracy-plateau).
+
+================================================================================
+Phase 12.5 — BLOCKING: the vanilla pilot GO/NO-GO (redoes 11.1, correctly)
+================================================================================
+  $PY scripts/run_phase11_pilot.py --s 0 --seed 0 --substrate vanilla
+  $PY scripts/run_phase11_pilot.py --s 1 --seed 0 --substrate vanilla
+(run concurrently, per 12.3). BEFORE STARTING: confirmed
+`results/resolved_config_phase11_pilot_vanilla_s{0,1}.yaml` both record
+`substrate: vanilla` (F1 is fixed; the invalid GRU pilot from 11.1 is
+`M00000_pilot_s0`/no-substrate-field, untouched on disk, not reused). Both
+arms run_id `..._s0` -- `--seed 0` for BOTH (S=0 vs S=1 lives in the
+model_id prefix `M00000`/`M10000`, not the seed suffix). Ceiling 200,000
+steps, run to the ceiling regardless of milestones (12.6 needs the whole
+trace).
+
+RESULT (from `results/manifest.jsonl`, `final_evaluation`'s n=500 held-out
+eval, Wilson 95% CI):
+
+```
+run_id                    Gate A(load1>=0.83)  load1(CI)              load2(CI)              load3(CI)              human_pctile(L1/L2/L3)   ms/step
+M00000_pilot_vanilla_s0   False (never)         0.530 [0.486,0.573]   0.462 [0.419,0.506]    0.462 [0.419,0.506]    0.0  / 0.0   / 0.0        86.529
+M10000_pilot_vanilla_s0   True  (step 20000)    0.842 [0.807,0.871]   0.700 [0.658,0.739]    0.654 [0.611,0.694]    0.109/ 0.048 / 0.0        93.254
+```
+
+S=0's periodic-eval trace (`results/metrics/M00000_pilot_vanilla_s0.csv`,
+100 evals every 2000 steps from step 10000 to 200000, spanning warmup ->
+ramp -> target): `train_loss` frozen at 0.1170-0.1194 from step 10000
+onward, never moving again through the full 190,000 remaining steps.
+`train_acc_load{1,2,3}` (this column is actually the periodic held-out eval
+accuracy, not a raw training-batch stat -- same `evaluate_accuracy()` call
+that drives the milestone-streak logic) oscillates at chance (~0.42-0.60)
+for every one of the 100 evals. Gate A's 3-consecutive-eval streak never
+started once. `steps_to_load1_0.83` / `steps_to_load3_0.8`: both `None`.
+
+S=1's trace (`results/metrics/M10000_pilot_vanilla_s0.csv`) is not flat --
+Gate A (load1>=0.83) confirms permanently at step 20000
+(`accuracy_at_first_milestone`: load1=0.86, load2=0.722, load3=0.702;
+2,560,000 trials, 1825.5s wall into training) and load1 stays mostly in the
+0.80s through target phase. But the load3>=0.80 extra-milestone never
+sustains a 3-consecutive-eval streak across the full 100-eval trace: it
+touches >=0.80 in isolation exactly twice (step 42000: 0.80; step 96000:
+0.795, just under) and otherwise oscillates 0.62-0.78 with no sustained
+upward trend, ending at load3=0.645 on the final eval (step 200000).
+`steps_to_load3_0.8`: `None`.
+
+Joules: `joules_cumulative` is blank in both CSVs for every row -- this
+pilot config does not log energy, so
+`joules_to_load1_0.83`/`joules_to_load3_0.8` are correctly `None`, not a
+missing computation.
+
+ms/step (comments.txt's "ALSO REPORT"): 86.529 (S=0) / 93.254 (S=1),
+vs. the original (F1-invalid, pre-12.0/12.2) 11.1 GRU pilot's 184.427 --
+roughly 2x faster post-12.0's fixes and 12.2's shorter warmup. This is the
+number §6's budget must be rebuilt from in 12.6.
+
+ROOT CAUSE (diagnostic only, no code change): read
+`brainalign_wm/models/vanilla_rnn.py::VanillaRNNCell` (plain
+`h_t = tanh(W_ih x_t + W_hh_masked h_{t-1} + b)`, standard
+`uniform(+/-1/sqrt(hidden_dim))` init, no defect) and `train.py`'s
+`_build_model` S=0 dispatch -- no bug found. S=0's frozen-loss/chance-accuracy
+signature (loss pinned at 0.117 for 190,000 steps, zero gradient-driven
+movement) is the textbook vanishing-gradient failure of an ungated tanh
+core over this task's full-BPTT horizon (encode+delay+probe, untruncated).
+This is the exact failure mode Stage 1's vanilla-substrate arm exists to
+test for, not an implementation defect.
+
+VERDICT: per comments.txt §12.5, GO requires S=0 to clear Gate A
+(load1>=0.83, 3 consecutive evals) AND reach load3>=0.80 (3 consecutive
+evals) within 200k steps. S=0 cleared neither (`gates['load1>=0.83']`:
+False; `steps_to_load3_0.8`: None) -- **NO-GO**.
+
+Per the pre-specified protocol: STOP, report, do not lower the gate or
+reintroduce a probe-time cue. Fallback levers, in the mandated order:
+1. `encode_steps` 10 -> 15 (least distorting -- more time to encode, no
+   change to memory demand) -- **recommended first lever**.
+2. `lure_fraction` 0.3 -> 0.2 during ramp.
+3. add a load-2 stage between warmup and ramp.
+4. `maintain_steps` 25 -> 15.
+If lever 4 is reached without success, comments.txt is explicit that the
+finding becomes a documented scientific result ("an ungated tanh core
+cannot do this task at this H") and Stage 1 runs on the GRU with vanilla
+reported as a documented failure -- not a silent substrate switch.
+
+No lever has been applied yet. No commit made for this item. Awaiting
+explicit user go-ahead before applying lever 1, re-running the pilot, or
+proceeding to 12.6/12.7.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: both arms' milestone steps/trials/wall/joules (table above,
+S=0 has none, S=1's Gate A only -- load3 milestone reached by neither),
+final accuracy per load with Wilson 95% CI and human percentiles (table
+above), ms/step vs. the pre-12.0 pilot, and the verdict: **NO-GO**.

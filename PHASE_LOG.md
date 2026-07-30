@@ -2472,3 +2472,97 @@ pytest: deferred to end of session per standing user instruction.
 ACCEPTANCE: N=1..16 scaling table above, chosen N=8 with the reason
 (largest N under the 1.5x-of-N=1 ms/step cap), the two stub tests
 passing, and a manifest row showing `workers` (both CLIs, above).
+
+================================================================================
+Phase 12.4 — does geometry drift after accuracy saturates? (F5, free)
+================================================================================
+`scripts/run_geometry.py`: added `--checkpoint NAME` (default `ckpt.pt`,
+unchanged behavior) threaded into `_topology_metrics` and
+`generate_activity_logs.py::_load_checkpoint` (new `checkpoint_name`
+param, default `"ckpt.pt"` -- every other caller unaffected). Output path
+now `out_csv_for(checkpoint)`: `results/geometry_results.csv` for the
+default, `results/geometry_results_<stem>.csv` otherwise, so the two
+checkpoints' results never overwrite each other. TEST
+(`tests/test_run_geometry.py`, both passing): default checkpoint keeps
+the original filename; `ckpt_at_criterion.pt` gets a distinct one.
+NOTE: this CLI's PR/mean_speed metrics are still read from
+`results/activity_logs/{run_id}.parquet`, which `generate_activity_logs.py`
+always builds from `ckpt.pt` -- `--checkpoint` only retargets the
+weight_hh-based topology metrics (comments.txt's own line-92 citation is
+specifically that hardcoding). Real C1/C2/C4 numbers below were produced
+by a dedicated rollout script (not this CLI's activity-log path, which has
+no logs for the pilot cells and isn't the vehicle 12.4 needs for C1/C2/C4
+in the first place -- those need per-load, per-category single-trial
+ensembles this driver doesn't build).
+
+C1 (content-vs-context rotation): NOT COMPUTED. Both pilot cells are
+wm_only diet, single task -- there is no task-CONTEXT variable that varies
+independently of content in this data (a genuine context axis needs
+Stage 1's multitask-diet arm, where the 5-NeuroGym-task identity IS the
+context). Faking a context split from an arbitrary label would not be
+measuring C1's actual claim. Reported as an honest N/A, not skipped
+silently -- re-evaluate C1 once a multitask-diet checkpoint exists.
+
+C2 (participation ratio per load + slope) and C4 (dominant-mode
+alignment): real, computed from 80 single-trial rollouts per load per
+checkpoint (own harness: `TaskGenerator.sternberg.generate_trial` at a
+fixed load, `_step_core` stepped manually, frozen forward pass, S=0 uses
+`state["h"]`, S=1 uses `state["h_worker"]` -- no single flat vector exists
+for S=1's worker/manager split, so the worker population is the
+comparably-scoped choice). C4 reported as (a) the DMD-fit dominant
+direction v_star's cosine alignment with the load-1 content(category)
+axis at end-of-delay, and (b) v_star's cosine similarity BETWEEN a cell's
+two checkpoints -- a direct "has the dominant direction itself stabilized"
+measure, standing in for the full causal-perturbation confirmation
+(`analysis/twin.py::perturb_and_measure_decodability`), which is a
+materially heavier experiment out of scope for this training-free item.
+
+```
+run_id            ckpt              step    pr_L1  pr_L2  pr_L3  PR-slope  dmd_r2_cv  content_align
+M00000_pilot_s0   at_criterion      66660   4.734  6.199  7.243  1.2544    0.923      0.2439
+M00000_pilot_s0   ckpt (max_steps)  200000  4.119  6.845  8.373  2.1268    0.870      0.0259
+M10000_pilot_s0   at_criterion      66660   3.226  7.139  7.575  2.1741    0.915      0.0148
+M10000_pilot_s0   ckpt (max_steps)  200000  5.435  12.472 11.948 3.2569    0.799      0.1352
+```
+
+WITHIN-CELL drift (criterion -> max_steps):
+```
+S=0: pr_L1 -0.615, pr_L3 +1.130, slope +0.872, content_align -0.218, v_star_cosine(criterion,max_steps)=-0.244
+S=1: pr_L1 +2.209, pr_L3 +4.373, slope +1.083, content_align +0.120, v_star_cosine(criterion,max_steps)=+0.685
+```
+
+CROSS-CELL spread (S=0 vs S=1, at max_steps -- the reference "how different
+are two very different architectures" scale): pr_L1 diff +1.316, pr_L3
+diff +3.575, slope diff +1.130, content_align diff +0.109. (v_star cosine
+between S=0/S=1 is undefined: 128-unit flat core vs 196-unit worker
+population, different dimensionality -- not a meaningful comparison, not
+computed.)
+
+INTERPRETATION: within-cell drift is COMPARABLE TO OR LARGER than the
+cross-cell spread. S=1's pr_L3 drift alone (+4.373) exceeds the entire
+S=0-vs-S=1 spread (+3.575) -- criterion-to-max_steps movement within ONE
+cell is bigger than the gap between two structurally different cells.
+S=0's v_star rotates past orthogonal (cosine -0.244: the dominant
+direction at max_steps is not even the same direction, let alone aligned,
+as at criterion); S=1's v_star cosine (+0.685) is positive but far from
+1.0 -- substantial rotation there too. None of PR, slope, or the dominant
+direction has stabilized by the criterion (66,660-step) checkpoint on
+either cell.
+
+CONCLUSION (per 12.4's pre-specified branches): geometry is STILL MOVING
+long after accuracy saturates. Gate B must be set by where GEOMETRY
+plateaus, not accuracy -- 12.6 must extend the (vanilla) pilot until it
+finds that point, not stop at the accuracy-plateau/milestone step. This is
+the more expensive branch. Honest negative, reported as such.
+
+CAVEAT (from 12.4's own text, restated): these are GRU pilots (F1-invalid
+for Stage 1's substrate) -- this answers "does geometry drift
+post-saturation on this task", not "at what step for vanilla". 12.5's
+vanilla pilot is what 12.6 actually budgets from; this result sets the
+EXPECTATION (extend past the accuracy milestone) but not the number.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: the four-checkpoint table above, the within-cell-vs-cross-cell
+difference comparison, and the concluded branch (geometry-plateau, not
+accuracy-plateau).

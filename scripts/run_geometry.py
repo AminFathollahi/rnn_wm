@@ -22,6 +22,7 @@ real trained checkpoints exist to design it against.
 
 Usage:
   python scripts/run_geometry.py
+  python scripts/run_geometry.py --checkpoint ckpt_at_criterion.pt  # §12.4: at-milestone snapshot
 """
 from __future__ import annotations
 
@@ -47,7 +48,16 @@ from brainalign_wm.analysis.network_properties import (  # noqa: E402
 )
 
 ACTIVITY_LOGS = RESULTS / "activity_logs"
-OUT_CSV = RESULTS / "geometry_results.csv"
+
+
+def out_csv_for(checkpoint: str) -> Path:
+    """Phase 12.4 (comments.txt §12.4): `--checkpoint NAME` lets this
+    driver analyse the at-milestone snapshot (`ckpt_at_criterion.pt`) as
+    well as the default `ckpt.pt` -- the two must write to DIFFERENT
+    files or the second run silently overwrites the first. Default
+    checkpoint keeps the original filename unchanged (no change for any
+    existing caller)."""
+    return RESULTS / "geometry_results.csv" if checkpoint == "ckpt.pt" else RESULTS / f"geometry_results_{Path(checkpoint).stem}.csv"
 
 COLUMNS = [
     "run_id", "model_id", "seed", "status", "n_trials",
@@ -82,14 +92,14 @@ def _build_single_trial_ensemble(df: pd.DataFrame) -> np.ndarray:
     return np.stack(per_trial) if per_trial else np.zeros((0, 0, 0))
 
 
-def _topology_metrics(run_id: str, model_id: str) -> dict:
+def _topology_metrics(run_id: str, model_id: str, checkpoint: str = "ckpt.pt") -> dict:
     """Best-effort: load the trained checkpoint and read `core.cell.weight_hh`
     to compute the four [SHAKIBA26] topology metrics. Returns {} (not an
     error) if there's no checkpoint, or this cell's substrate has no single
     `weight_hh` matrix to read (S=1 worker/manager split, vanilla substrate)
     -- item 8.10's job is a driver over whatever is available today, not to
     force every architecture to expose this."""
-    ckpt_path = RESULTS / "checkpoints" / run_id / "ckpt.pt"
+    ckpt_path = RESULTS / "checkpoints" / run_id / checkpoint
     if not ckpt_path.exists():
         return {}
     from brainalign_wm.training.generate_activity_logs import _load_checkpoint, _parse_model_id, _run_id_extras
@@ -100,7 +110,7 @@ def _topology_metrics(run_id: str, model_id: str) -> dict:
     full_cfg = _load_full_config()
     device = torch.device("cpu")
     front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate)
-    _load_checkpoint(front_end, core, heads, run_id, device)
+    _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint)
     if not hasattr(core, "cell") or not hasattr(core.cell, "weight_hh"):
         return {}
     weight_hh = core.cell.weight_hh.detach().cpu().numpy()
@@ -115,15 +125,26 @@ def _topology_metrics(run_id: str, model_id: str) -> dict:
     }
 
 
-def _write_csv(rows: list[dict]) -> None:
-    with OUT_CSV.open("w", newline="") as f:
+def _write_csv(rows: list[dict], out_csv: Path) -> None:
+    with out_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in COLUMNS})
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--checkpoint", type=str, default="ckpt.pt",
+                     help="§12.4: checkpoint filename to read topology metrics from, e.g. "
+                          "ckpt_at_criterion.pt vs the default ckpt.pt (max_steps). The "
+                          "activity-log-derived metrics (mean_speed/PR) are unaffected -- "
+                          "the log itself is always built from ckpt.pt by generate_activity_logs.py.")
+    args = ap.parse_args(argv)
+    out_csv = out_csv_for(args.checkpoint)
+
     RESULTS.mkdir(exist_ok=True)
     records = [r for r in load_all_records(MANIFEST) if r.get("status") == "completed"]
     rows = []
@@ -140,7 +161,7 @@ def main() -> int:
             if Z.shape[0] >= 2:
                 row["mean_speed"] = mean_speed(Z)
                 row["pca_participation_ratio"] = pca_participation_ratio(Z.reshape(-1, Z.shape[-1]))
-            row.update(_topology_metrics(run_id, row["model_id"]))
+            row.update(_topology_metrics(run_id, row["model_id"], checkpoint=args.checkpoint))
             row["status"] = "ok"
         except Exception as e:  # noqa: BLE001 -- one bad run shouldn't blank the whole CSV (run_grid.py's own isolation philosophy)
             row["status"] = "error"
@@ -148,18 +169,18 @@ def main() -> int:
         rows.append(row)
 
     if not rows:
-        _write_csv([])
+        _write_csv([], out_csv)
         print(
             f"[run_geometry] no completed runs with a matching activity log found under "
-            f"{ACTIVITY_LOGS} (manifest: {MANIFEST}) -- wrote header-only {OUT_CSV}. "
+            f"{ACTIVITY_LOGS} (manifest: {MANIFEST}) -- wrote header-only {out_csv}. "
             f"Run brainalign_wm/training/generate_activity_logs.py after training a model "
             f"to populate this.",
             flush=True,
         )
         return 0
 
-    _write_csv(rows)
-    print(f"[run_geometry] wrote {len(rows)} row(s) to {OUT_CSV}", flush=True)
+    _write_csv(rows, out_csv)
+    print(f"[run_geometry] wrote {len(rows)} row(s) to {out_csv}", flush=True)
     return 0
 
 

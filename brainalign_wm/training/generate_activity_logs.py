@@ -109,8 +109,8 @@ def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
     )
 
 
-def _load_checkpoint(front_end, core, heads, run_id: str, device) -> int:
-    ckpt_path = ROOT / "results" / "checkpoints" / run_id / "ckpt.pt"
+def _load_checkpoint(front_end, core, heads, run_id: str, device, checkpoint_name: str = "ckpt.pt") -> int:
+    ckpt_path = ROOT / "results" / "checkpoints" / run_id / checkpoint_name
     if not ckpt_path.exists():
         raise FileNotFoundError(f"no checkpoint for {run_id} at {ckpt_path}")
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)

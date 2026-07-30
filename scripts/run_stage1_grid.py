@@ -95,7 +95,10 @@ def main(argv=None) -> int:
     full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
     cfg = {"steps": args.max_steps}
 
-    resolved_cfg = build_resolved_config(full_cfg, {"steps": args.max_steps}, "stage1")
+    # F1: every STAGE1_CELL is substrate=vanilla; without this the written
+    # resolved config would claim config.yaml's `gru` default.
+    resolved_cfg = build_resolved_config(full_cfg, {"steps": args.max_steps}, "stage1",
+                                         model_overrides={"substrate": "vanilla"})
     cfg_hash = config_hash(resolved_cfg)
     resolved_config_path("stage1").write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
 

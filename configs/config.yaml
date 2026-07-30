@@ -190,7 +190,23 @@ train:
   eval_trials_per_load: 200                # Phase 3 (A3, §3 MEASUREMENT): n>=200/load during training;
                                             # CI half-width +/-0.042 at p=0.90, vs. +/-0.093 at the old n=40
   final_eval_trials_per_load: 500          # Phase 3 (A3): n=500 for the final, once-per-run number (+/-0.026 CI)
-  eval_batch_size: 8                       # batch width used only for evaluate_accuracy's own trial batches
+  eval_every: 2000                         # Phase 12 (F3): ABSOLUTE step count between periodic evaluations.
+                                            # Was `max(500, total_steps // 30)`, which made the RESOLUTION of
+                                            # `steps_to_criterion` depend on `max_steps` (6,666 at the pilot's
+                                            # 200k, 3,333 at a 100k grid) -- and `steps_to_criterion` is a
+                                            # reported efficiency DV, so runs with different ceilings were not
+                                            # comparable. Same fix, same reason, as Phase 3 item 3.5's switch of
+                                            # the curriculum boundaries from fractions to absolute steps.
+                                            # Confirmation lag is `consecutive_evals` x this = 6,000 steps.
+  eval_batch_size: 200                     # batch width used only for evaluate_accuracy's own trial batches.
+                                            # Phase 12: was 8. Every tick of a batch costs the same fixed Python/
+                                            # kernel-launch overhead regardless of width, so 8 paid the ~71-tick
+                                            # unroll cost 25x per 200-trial load instead of once: measured ~100 s
+                                            # per periodic evaluation in the Phase 11 pilot. Trials are generated
+                                            # one at a time from the same `master_rng` sequence either way, so the
+                                            # ESTIMATOR is unchanged; only the input-noise realisations differ
+                                            # (FrontEnd noise is active in eval, by design), i.e. a different
+                                            # Monte-Carlo sample of the same quantity, not a different quantity.
   value_loss_weight: 0.5
   entropy_coef: 0.01                       # REINFORCE (L=0, ramp/target phases) entropy bonus; audit fix A1a
   rung_check_frac: 0.5                     # fraction of budget before checking the rung-1 gate (local-learning fallback)

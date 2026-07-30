@@ -508,20 +508,41 @@ def _run_trial(
     )
     last_probe_action_t = torch.full((B,), -1, dtype=torch.long, device=device)
     all_v = _image_features_all_ticks(image_bank, trial_steps_batch, feature_dim, device)
+    # Everything below is derived from `trial_steps_batch` alone, i.e. known
+    # before the unroll starts. Building it per-tick cost a host->device copy
+    # (and, for `any_catch`, a full device SYNC) on each of the ~71 ticks:
+    # profiled at 229 cudaMemcpyAsync + 218 cudaStreamSynchronize per training
+    # step. Hoisted here into one transfer each, the same way `all_v` already
+    # is. `non_catch` is per-TRIAL (`is_catch` is drawn once per trial in
+    # SternbergGenerator.generate_trial and stamped on every tick), so it has
+    # no tick axis at all and `any_catch` is a plain Python bool.
     if task_name_for_context is not None:
         from brainalign_wm.tasks.multitask import task_context_vector
 
+        all_c = torch.tensor(
+            [[task_context_vector(task_name_for_context, trial_steps_batch[b][i].c_t) for b in range(B)]
+             for i in range(T)],
+            dtype=torch.float32, device=device,
+        )
+    else:
+        all_c = torch.tensor(
+            [[trial_steps_batch[b][i].c_t for b in range(B)] for i in range(T)],
+            dtype=torch.float32, device=device,
+        )
+    all_targets = torch.tensor(
+        [[_target_action(trial_steps_batch[b][i].epoch, trial_steps_batch[b][i].in_set) for b in range(B)]
+         for i in range(T)],
+        dtype=torch.long, device=device,
+    )
+    catch_flags = [trial_steps_batch[b][0].is_identity_catch for b in range(B)]
+    any_catch = any(catch_flags)
+    non_catch = torch.tensor([not f for f in catch_flags], dtype=torch.float32, device=device)
+    non_catch_n = float(len(catch_flags) - sum(catch_flags))
+
     for i in range(T):
-        ts_list = [trial_steps_batch[b][i] for b in range(B)]
-        epoch = ts_list[0].epoch  # shared across the batch: same load => same schedule
+        epoch = trial_steps_batch[0][i].epoch  # shared across the batch: same load => same schedule
         v_t = all_v[i]
-        if task_name_for_context is not None:
-            c_t = torch.tensor(
-                [task_context_vector(task_name_for_context, ts.c_t) for ts in ts_list],
-                dtype=torch.float32, device=device,
-            )
-        else:
-            c_t = torch.tensor([ts.c_t for ts in ts_list], dtype=torch.float32, device=device)
+        c_t = all_c[i]
 
         gate_bias = None
         if reflective_gate is not None:
@@ -556,24 +577,21 @@ def _run_trial(
                 torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
             )
 
-        # Identity-report catch trials (§9.4a) have no
-        # real in/out judgment (`in_set=None`) -- excluded from the policy/
-        # value loss below via `non_catch`, so they contribute only through
-        # the auxiliary identity-report loss (added after the tick loop
-        # would otherwise discard it under "reinforce" -- see end of
-        # function). A no-op (all-ones) mask whenever no catch trial is in
-        # this batch, i.e. always in Core (`identity_catch_fraction=0`).
-        non_catch = torch.tensor([not ts.is_identity_catch for ts in ts_list], dtype=torch.float32, device=device)
-        any_catch = bool((non_catch < 1).any())
-
-        if mode == "bptt" and signal == "ce" and (not any_catch or non_catch.sum() > 0):
-            targets = torch.tensor([_target_action(ts.epoch, ts.in_set) for ts in ts_list], device=device)
+        # Identity-report catch trials (§9.4a) have no real in/out judgment
+        # (`in_set=None`) -- excluded from the policy/value loss below via
+        # `non_catch` (hoisted above the loop: per-trial, not per-tick), so
+        # they contribute only through the auxiliary identity-report loss
+        # (added after the tick loop would otherwise discard it under
+        # "reinforce" -- see end of function). `non_catch` is a no-op
+        # (all-ones) mask whenever no catch trial is in this batch, i.e.
+        # always in Core (`identity_catch_fraction=0`).
+        if mode == "bptt" and signal == "ce" and non_catch_n > 0:
             # The trivial "predict fixation" target
             # outnumbers the real decision ~5:1 in tick count and dominates
             # the loss unless upweighted.
             tick_weight = 1.0 if epoch == "probe" else 0.1
-            ce_per_sample = F.cross_entropy(logits, targets, reduction="none")
-            total_loss = total_loss + tick_weight * (ce_per_sample * non_catch).sum() / non_catch.sum()
+            ce_per_sample = F.cross_entropy(logits, all_targets[i], reduction="none")
+            total_loss = total_loss + tick_weight * (ce_per_sample * non_catch).sum() / non_catch_n
             n_ce_terms += tick_weight
 
         if mode == "eval":
@@ -581,7 +599,7 @@ def _run_trial(
         else:
             action = torch.multinomial(policy.detach(), 1).squeeze(-1)  # [B]; sampling policy is load-bearing under REINFORCE (B5)
 
-        if mode == "bptt" and signal == "reinforce" and epoch == "probe" and (not any_catch or non_catch.sum() > 0):
+        if mode == "bptt" and signal == "reinforce" and epoch == "probe" and non_catch_n > 0:
             logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))  # keeps graph
             policy_terms.append((logp_a, value, non_catch))
             probs = policy.clamp_min(1e-8)
@@ -591,7 +609,8 @@ def _run_trial(
             catch_mask = 1.0 - non_catch
             id_logits = heads.identity_logits(h_star)
             target_idx = torch.tensor(
-                [categories.index(ts.identity_catch_category) if ts.is_identity_catch else 0 for ts in ts_list],
+                [categories.index(trial_steps_batch[b][i].identity_catch_category) if catch_flags[b] else 0
+                 for b in range(B)],
                 device=device,
             )
             if mode == "bptt":
@@ -1495,6 +1514,8 @@ def train_one(run: dict, cfg: dict) -> dict:
     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed) if L == 1 else None
 
     # Audit addition: periodic metrics logging
+    # F3: absolute, from config -- NOT a fraction of total_steps. See the
+    # `train.eval_every` comment in configs/config.yaml for why.
     eval_every = int(t_cfg.get("eval_every", max(500, total_steps // 30)))
     metrics_logger = _MetricsLogger(run_id)
 

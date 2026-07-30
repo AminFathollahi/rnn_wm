@@ -169,13 +169,27 @@ def load_all_records(manifest: Path) -> list[dict]:
     return list(latest.values())
 
 
-def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str) -> dict:
+def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str, model_overrides: dict | None = None) -> dict:
     """The full merged, resolved config for this grid invocation: every
     project subsystem (model/mechanisms/task/train/gates/neural) plus the
     tier subset actually in effect -- covers every config change that
     could affect a run, not just the tier subset `run_grid.py` threads
-    through to `train_one`."""
+    through to `train_one`.
+
+    `model_overrides` (Phase 12 audit finding F1): per-run `model.*` keys
+    that `train_one` applies from the run dict (currently `substrate`) are
+    invisible here otherwise, so the written audit trail records
+    config.yaml's DEFAULT while something else actually trained. That is
+    exactly how the Phase 11.1 pilot ran a GRU while
+    `resolved_config_phase11_pilot_s0.yaml` said -- correctly about the
+    file, wrongly about the run -- `substrate: gru`, and nobody noticed for
+    a 24-hour campaign. Pass the override whenever it is constant across
+    the runs this resolved config covers; a campaign whose cells DISAGREE
+    on a model key must write one resolved config per distinct value, not
+    a single misleading one."""
     resolved = {k: v for k, v in full_cfg.items() if k != "tiers"}
+    if model_overrides:
+        resolved["model"] = {**resolved.get("model", {}), **model_overrides}
     resolved["tier"] = {"name": tier, **tier_cfg}
     return resolved
 

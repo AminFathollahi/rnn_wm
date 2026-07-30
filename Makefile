@@ -27,7 +27,7 @@ features: ## precompute + cache frozen ResNet features (ImageTokenBank + dataset
 test: ## run unit tests (scaffold + package)
 	$(PY) -m pytest -q
 
-smoke: ## end-to-end check of the training entrypoint (8 cells x 1 seed, minimal step budget)
+smoke: ## end-to-end check of the training entrypoint (15 cells x 1 seed, minimal step budget)
 	$(PY) run_grid.py --seeds 1 --budget 20m --tier smoke
 
 recovery: ## simulated-spike geometry-recovery gate -- must pass before real-data alignment

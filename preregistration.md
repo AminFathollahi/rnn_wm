@@ -154,3 +154,92 @@ this task.
 
 This amendment does not reopen or re-litigate H1/H2/H5/H6, which are
 unaffected by the L->P swap.
+
+---
+
+## Amendment (2026-07-26): single behavioural gate (comments.txt §3), digital-twin
+predictions (C1-C4), and the multi-task/topology/Dale's-law predictions
+
+Per comments.txt §10's explicit instruction, three additions, appended (not
+rewriting the frozen text above).
+
+### Gate update
+Every earlier gate reference in this file (the `load1>=0.95`/`load3>=0.80`
+pair used to frame H3, and any dev-tier ad hoc threshold) is superseded by
+comments.txt §3's single, human-derived criterion:
+
+    criterion: load1 >= 0.94, load2 >= 0.91, load3 >= 0.86
+    consecutive_evals: 3
+
+Derived from DANDI 000469 (the only dataset covering all three loads;
+0.9444/0.9111/0.8667 median human session), not from any published
+literature value — see `references.md` §5c. A run is "trained" when it
+holds this criterion across 3 consecutive evaluations; there is no second
+admission gate. This is the criterion Phase 11.1's pilot (S=0/S=1, seed 0)
+was evaluated against, and the one Stage 1/2/3 grids are evaluated against
+going forward.
+
+### C1-C4: digital-twin predictions (comments.txt §0)
+The companion project (`../wm_dynamics/PAPER_REPORT.tex`, nine datasets —
+human single units, iEEG, ECoG, macaque PFC) established four findings the
+RNN is tested for reproducing. Pre-registered here as directional
+predictions, tested by Phase 8's analysis suite:
+
+- **C1** (content/context rotation, tested by 8.1): the memorandum
+  (content) axis rotates more than the task-context axis across the delay
+  period, within the same units (companion-paper paired difference 0.102,
+  p=0.008).
+- **C2** (manifold dimensionality vs load, tested by 8.2): the maintenance
+  manifold's participation ratio does NOT expand with load (companion-paper
+  pooled slope 0.01, 95% CI [-0.10, 0.12], p=0.87).
+- **C3** (single-trial identifiability, tested by 8.3): maintenance dynamics
+  are identifiable only from single trials; trial-averaged means manufacture
+  a spurious contraction not present in the single-trial ensemble.
+- **C4** (dominant mode and control, tested by 8.4): the delay-period
+  dynamics form a contracting flow with a single slowest-decaying direction,
+  and alignment to that direction — not to random or context directions —
+  predicts the causal effect of a simulated perturbation (companion paper:
+  this held for real electrical stimulation).
+
+If the RNN reproduces C1-C4, it stands as the simulator on which closed-loop
+stimulation policies can be developed before touching a patient (§0). Each
+prediction is falsifiable independently; failing one does not invalidate
+the others.
+
+### Multi-task diet: task-irrelevant decoding (Phase 5, [BASHIVAN24])
+PRE-REGISTERED, from [BASHIVAN24]'s STSF/STMF/MTMF result: the multi-task
+diet model retains decodable task-IRRELEVANT information (serial position,
+category) at >85%; the WM-only diet model does not. Tested by the existing
+task-irrelevant decoding analysis (Phase 8.7-8.8) run on both Stage 1 diet
+arms.
+
+### Network topology (Phase 8.9, [SHAKIBA26])
+PRE-REGISTERED published ranges for the four topology metrics, reported per
+trained cell and NOT collapsed into a single "brain-likeness" score (their
+Fig 3 shows the four do not move together):
+- entropy (Gaussian-KDE-100): ~3-6 random-like, ~0.6-1.5 intermediate,
+  ~0.02-0.08 highly structured.
+- modularity Q (Clauset-Newman-Moore): ~0.4-0.5 strongly modular, ~0.1
+  weakly constrained.
+- small-worldness sigma: ~1.5-2.5 robust small-world, ~1 random-like.
+- assortativity r: functionally-initialized networks go disassortative
+  (r < 0); spatially-constrained-but-randomly-initialized networks go
+  assortative (r ~ 0.4-0.5).
+
+### Arm D (Dale's law) cost prediction (Phase 8.9b/9.5, [SHAKIBA26])
+PRE-REGISTERED: arm D (the Dale sign-constraint penalty) COSTS substantial
+performance in this battery, growing with `dale_penalty_weight`, because
+every Core cell initializes uniform(-1/sqrt(H), +1/sqrt(H)) — the
+randomly-initialized condition under which [SHAKIBA26]'s Table 3 shows a
+sign constraint is catastrophic (near-chance) unless rescued by a
+biologically-derived weight initialization. `M00001_bioinit` (arm D plus a
+log-normal, spectral-radius-0.95, mean-0.1 recurrent init, no connectome
+data) tests whether initialization rescues the sign constraint here as it
+does in [SHAKIBA26]. If D is instead nearly free in the plain battery, that
+is evidence the penalty is too weak to be doing anything, not that Dale's
+law is harmless — check `dale_penalty_weight` before drawing the latter
+conclusion.
+
+This amendment does not reopen or re-litigate H1/H2/H5/H6 or the P-arm
+framing above; it adds the C1-C4/multi-task/topology/Dale's-law predictions
+and updates the gate reference, per comments.txt §10.

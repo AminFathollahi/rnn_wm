@@ -2379,3 +2379,96 @@ pytest: deferred to end of session per standing user instruction.
 
 ACCEPTANCE: config diff (`git show --stat HEAD` after the commit below)
 plus the A/B table above.
+
+================================================================================
+Phase 12.3 — run runs concurrently (ProcessPoolExecutor, --workers)
+================================================================================
+Extracted the duplicate sequential loop in `run_grid.py` (~line 408) and
+`scripts/run_stage1_grid.py` (~line 111) into ONE shared function,
+`run_grid.run_grid_loop`, called by both. `--workers N` added to both
+CLIs (default 1). Requirements from comments.txt §12.3, all implemented:
+`concurrent.futures.ProcessPoolExecutor` (not threads -- escapes the GIL
+the Python-overhead audit found the runtime actually lives in); a
+module-level `_worker_entry(run, cfg, force_scaffold)` that resolves
+`train_one` itself inside the worker process (a closure over an
+already-resolved `train_one` is not picklable across a process boundary);
+`_pool_initializer` sets `OMP_NUM_THREADS=MKL_NUM_THREADS=2` per worker
+process before that process's first torch/numpy import (which happens
+inside `_worker_entry`, not at module load, so the env var is actually in
+effect when BLAS/OpenMP read it); manifest appends serialised in the
+parent as futures complete, never from a worker; `completed` read once up
+front (identical resume semantics to the old loop); budget/SIGTERM stop
+submitting new futures and let in-flight ones finish; every manifest row
+now carries `workers: N`. `workers=1` routes through the same
+`ProcessPoolExecutor` path as any other N (not a separate sequential
+branch), so its rows are produced by exactly the same mechanism.
+
+TESTS (`tests/test_run_grid_concurrency.py`, both passing): N workers
+(1 vs 4) produce the identical set of manifest rows (same run_ids,
+statuses, and -- since the scaffold stub is deterministic per run_id --
+identical accuracy) with `workers` recorded correctly on each; a worker
+raising (patched to fail on one specific run_id) yields a `status: error`
+row with the exception message, while the other two runs in the same
+sweep still complete normally.
+
+End-to-end smoke (both CLIs, `--scaffold --workers N`, not just the
+extracted function): `run_grid.py --scaffold --seeds 1 --workers 3` ran
+all 15 cells to completion and wrote `RUN_REPORT.md` with a `workers`
+column; `scripts/run_stage1_grid.py --scaffold --seeds 1 --workers 2
+--max-steps 1000` ran all 8 Stage 1 cells, each manifest row carrying both
+`"workers": 2` and `"phase": "11.3_stage1"`. Sample manifest row (workers
+field): `{"model_id": "M11111", ..., "workers": 3, "status": "completed", ...}`.
+
+CONCURRENCY SCALING SWEEP (same harness as Appendix A's 12.3 RESULT: 400
+real training steps/process, target-phase settings i.e. step_idx=140,000+
+so REINFORCE/full-unroll is active, batch_size 128,
+OMP_NUM_THREADS=MKL_NUM_THREADS=2), measured fresh end-to-end on this
+tree/machine (self-consistent N=1..16, rather than splicing Appendix A's
+N<=8 rows with new N=12/16 rows measured under different background
+load -- see the contaminated-then-redone N=1 note below):
+
+```
+N   ms/step/proc   aggregate steps/s   wall_s (400 steps)
+1        92.5             10.82             48.1
+2        95.3             20.99             49.7
+4       103.9             38.49             53.0
+6       108.9             55.10             56.8
+8       115.6             69.22             60.7
+12      142.8             84.02             75.1
+16      179.7             89.03             88.3
+```
+
+Closely reproduces Appendix A's N=1..8 shape (88.0->119.3 ms/step,
+11.37->67.01 steps/s there vs 92.5->115.6 ms/step, 10.82->69.22 steps/s
+here -- same machine, same qualitative curve, small run-to-run variance).
+
+CAP: 1.5x this run's own N=1 baseline (92.5 ms) = 138.75 ms -- essentially
+the same cap Appendix A computed from its own N=1 (88.0 -> 132 ms); both
+give the same verdict. N=8 (115.6 ms) is the LARGEST N under the cap.
+N=12 (142.8 ms) and N=16 (179.7 ms) both exceed it, despite higher
+aggregate steps/s (84.02 and 89.03) -- diminishing returns past N=8, with
+per-process throughput degrading enough that the DV-comparability warning
+(§12.3: `wall_s_to_*`/`joules_to_*` become cross-N-incomparable, and a
+sufficiently degraded per-process rate makes wall-clock budgeting for the
+stage unpredictable even though `steps_to_*`/`trials_to_*` stay
+concurrency-invariant) starts to bite.
+
+DECISION: N=8. Matches Appendix A's own fallback ("if N=8 remains best
+under that constraint, use 8"). `workers` is fixed at 8 for the whole of
+Stage 1 (12.7) so within-stage wall-clock comparisons stay meaningful.
+
+DEVIATION NOTE: my first N=1 measurement (145.4 ms/step) was contaminated
+-- run while the N=12/N=16 sweep was still executing in the background on
+the same machine, competing for CPU/GPU. Caught immediately (implausibly
+high for N=1, higher than even the N=16 background-sweep run), and
+re-measured N=1 (and N=2/4/6/8, for full self-consistency) only after the
+background sweep had completed and no other load was running. The table
+above is the clean, uncontaminated set. Reporting the mistake and the fix
+rather than silently discarding it, per this project's standing "report
+disagreements, don't paper over them" convention.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: N=1..16 scaling table above, chosen N=8 with the reason
+(largest N under the 1.5x-of-N=1 ms/step cap), the two stub tests
+passing, and a manifest row showing `workers` (both CLIs, above).

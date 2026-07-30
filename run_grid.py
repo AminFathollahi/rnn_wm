@@ -15,15 +15,22 @@ Design properties:
   * isolated per-run execution: an exception or failed gate in one run is
     recorded and does not halt the remaining runs;
   * enforces a wall-clock budget and terminates cleanly on SIGINT/SIGTERM;
-  * writes `results/manifest.jsonl` and a summary report, `RUN_REPORT.md`.
+  * writes `results/manifest.jsonl` and a summary report, `RUN_REPORT.md`;
+  * `--workers N` (§12.3): runs N `train_one` calls concurrently via
+    `ProcessPoolExecutor` (`run_grid_loop`, shared with
+    `scripts/run_stage1_grid.py`). N=8 measured best on this machine
+    (Appendix A / PHASE_LOG.md's Phase 12.3 entry: largest N keeping
+    per-process ms/step under 1.5x the N=1 value); every manifest row
+    records the `workers` value in force so wall-clock/energy DVs are
+    never compared across rows with different N.
 
 A `--scaffold` mode substitutes a synthetic stub for `train_one`, allowing
 the orchestration logic to be exercised without the model/training
 dependencies installed.
 
 Usage:
-  python run_grid.py --seeds 5 --budget 48h            # execute the training grid
-  python run_grid.py --scaffold --seeds 3 --budget 30m # orchestration-only demonstration
+  python run_grid.py --seeds 5 --budget 48h --workers 8 # execute the training grid, 8-way concurrent
+  python run_grid.py --scaffold --seeds 3 --budget 30m  # orchestration-only demonstration
 """
 from __future__ import annotations
 
@@ -36,6 +43,8 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -269,12 +278,14 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         # steps/trials_to_<key>_<threshold> (§3.3, milestones, not a stop
         # rule -- `_fmt_milestone` looks these up by prefix since the
         # threshold suffix comes from config.yaml, not this file). `wall(s)`
-        # is `wall_total_s`, the run's total wall clock -- workers (§12.3)
-        # means it is NOT comparable across rows with different `workers`.
+        # is `wall_total_s`, the run's total wall clock -- with concurrency
+        # (§12.3) it is NOT comparable across rows with different `workers`
+        # (its own column here), which is why steps_to_*/trials_to_* (not
+        # wall_s_to_*/joules_to_*) are the primary efficiency DVs.
         "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | "
         "matched | steps_to_load1 | steps_to_load3 | ms_per_step | "
-        "wall_total_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "wall_total_s | workers |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in sorted(recs, key=lambda x: x.get("run_id", "")):
         g = r.get("gates", {})
@@ -292,7 +303,7 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
             f"{r.get('status','?')} | {gates} | {accs} | {r.get('rung','-')} | "
             f"{_fmt(r, 'matched')} | {_fmt_milestone(r, 'steps_to_load1_')} | "
             f"{_fmt_milestone(r, 'steps_to_load3_')} | {_fmt(r, 'ms_per_step')} | "
-            f"{r.get('wall_clock_s','-')} |"
+            f"{_fmt(r, 'wall_clock_s')} | {_fmt(r, 'workers')} |"
         )
     errs = [r for r in recs if r.get("status") in ("error", "failed")]
     if errs:
@@ -350,6 +361,99 @@ def resolve_train_fn(force_scaffold: bool):
         return _scaffold_train_one
 
 
+# ----------------------------- concurrent execution (Phase 12.3) -----------------------------
+
+def _pool_initializer() -> None:
+    """Runs once per worker process, before that process imports torch/numpy
+    (those imports happen later, inside `resolve_train_fn`/`train_one`,
+    called from `_worker_entry` -- not at module load) -- so this actually
+    governs the BLAS/OpenMP thread count each worker's torch ends up using.
+    32 CPUs / N worker processes x (OpenMP + Python) oversubscribes at the
+    default of one OpenMP thread per core; comments.txt §12.3 fixes it at 2
+    per worker."""
+    os.environ["OMP_NUM_THREADS"] = "2"
+    os.environ["MKL_NUM_THREADS"] = "2"
+
+
+def _worker_entry(run: dict, cfg: dict, force_scaffold: bool) -> dict:
+    """Module-level (picklable) `ProcessPoolExecutor` entry point (§12.3):
+    resolves `train_one` itself, inside the worker process. A closure over
+    an already-resolved `train_one` is not picklable across a process
+    boundary, so each worker re-resolves it from scratch -- cheap (an
+    import, not a load) and the only correct option."""
+    train_one = resolve_train_fn(force_scaffold)
+    return train_one(run, cfg)
+
+
+def run_grid_loop(
+    runs: list[dict], completed: set, cfg: dict, cfg_hash: str, commit: str, tier: str,
+    budget_s: float, t0: float, manifest: Path, force_scaffold: bool, workers: int,
+    log_prefix: str, extra_rec_fields: dict | None = None,
+) -> None:
+    """Shared execution loop for `run_grid.py` and `scripts/run_stage1_grid.py`
+    (§12.3): one `train_one` call per OS process (`ProcessPoolExecutor`,
+    NOT threads -- the whole point is escaping the GIL that the Python
+    overhead the audit measured actually lives in; every run is otherwise
+    bit-identical to running it alone, which is why this is a pure
+    scheduling change, not a hack). Manifest appends are serialised HERE,
+    in the parent, as futures complete -- never from a worker. `completed`
+    is read once by the caller before this is invoked, same resume
+    semantics as the old sequential loop. `workers=1` still goes through
+    the pool (not a separate code path), so its manifest rows are produced
+    by exactly the same mechanism as any other N -- the property the
+    12.3 test locks in. A worker that raises is caught per-future and
+    recorded as a `status: error` row; it does not stop the others or
+    poison the pool. SIGINT/SIGTERM/budget: stop SUBMITTING new futures,
+    let in-flight ones finish, then return."""
+    extra_rec_fields = extra_rec_fields or {}
+    pending = [r for r in runs if r["run_id"] not in completed]
+    with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer) as ex:
+        in_flight: dict = {}
+        next_idx = 0
+
+        def _try_submit() -> None:
+            nonlocal next_idx
+            while (
+                next_idx < len(pending)
+                and len(in_flight) < workers
+                and not _STOP
+                and (time.time() - t0) < budget_s
+            ):
+                run = pending[next_idx]
+                next_idx += 1
+                started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                print(f"{log_prefix} >>> {run['run_id']}", flush=True)
+                fut = ex.submit(_worker_entry, run, cfg, force_scaffold)
+                in_flight[fut] = (run, time.time(), started)
+
+        _try_submit()
+        while in_flight:
+            done, _ = futures_wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
+            for fut in done:
+                run, r0, started = in_flight.pop(fut)
+                rec = {
+                    **run, "config_hash": cfg_hash, "git": commit, "tier": tier,
+                    "started": started, "workers": workers, **extra_rec_fields,
+                }
+                try:
+                    result = fut.result()
+                    rec.update(result)
+                    rec.setdefault("status", "completed")
+                except Exception as e:  # noqa: BLE001 -- isolation is the point
+                    rec.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
+                    print(f"{log_prefix} !!! {run['run_id']} errored: {rec['error']}", flush=True)
+                rec["wall_clock_s"] = round(time.time() - r0, 1)
+                rec["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                with manifest.open("a") as f:
+                    f.write(json.dumps(rec) + "\n")
+            if _STOP:
+                print(f"{log_prefix} stop requested; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
+            elif (time.time() - t0) >= budget_s:
+                print(f"{log_prefix} budget reached; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
+            else:
+                _try_submit()
+
+
 # ----------------------------- main loop -----------------------------
 
 def main(argv=None) -> int:
@@ -362,6 +466,12 @@ def main(argv=None) -> int:
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
     ap.add_argument("--local-learning", action="store_true",
                      help="also enumerate the 4 Extended local-learning cells (M**L, §6.3)")
+    ap.add_argument("--workers", type=int, default=1,
+                     help="§12.3: concurrent training processes (ProcessPoolExecutor, one run per "
+                          "process). N=8 measured 5.9x aggregate throughput for a 1.36x per-process "
+                          "slowdown (Appendix A, 12.3 RESULT); keep N FIXED for a whole stage since "
+                          "wall_s_to_*/joules_to_* are not comparable across rows with different "
+                          "`workers` (every manifest row records it).")
     args = ap.parse_args(argv)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -414,38 +524,14 @@ def main(argv=None) -> int:
             print(f"[run_grid] failed to write resolved config as YAML ({e}); falling back to JSON.", flush=True)
             resolved_path.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
-    train_one = resolve_train_fn(args.scaffold)
-
-    print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h "
+    print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h workers={args.workers} "
           f"runs={len(runs)} already_completed={len(completed)} config_hash={cfg_hash[:12]}", flush=True)
 
     t0 = time.time()
-    for run in runs:
-        if _STOP:
-            print("[run_grid] stop requested; exiting loop.", flush=True)
-            break
-        if run["run_id"] in completed:
-            continue
-        elapsed = time.time() - t0
-        if elapsed >= budget_s:
-            print(f"[run_grid] budget reached ({elapsed/3600:.2f}h); stopping.", flush=True)
-            break
-
-        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        r0 = time.time()
-        rec = {**run, "config_hash": cfg_hash, "git": commit, "tier": args.tier, "started": started}
-        print(f"[run_grid] >>> {run['run_id']}", flush=True)
-        try:
-            result = train_one(run, cfg)  # isolated
-            rec.update(result)
-            rec.setdefault("status", "completed")
-        except Exception as e:  # noqa: BLE001 — isolation is the point
-            rec.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
-            print(f"[run_grid] !!! {run['run_id']} errored: {rec['error']}", flush=True)
-        rec["wall_clock_s"] = round(time.time() - r0, 1)
-        rec["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with MANIFEST.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
+    run_grid_loop(
+        runs, completed, cfg, cfg_hash, commit, args.tier, budget_s, t0, MANIFEST,
+        args.scaffold, args.workers, "[run_grid]",
+    )
 
     write_report(MANIFEST, REPORT, budget_s, time.time() - t0)
     return 0

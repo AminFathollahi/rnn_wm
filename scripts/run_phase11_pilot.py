@@ -3,8 +3,21 @@
 Sternberg task (all of F1-F3's leak fixes now in place, Phase 0-2) is
 genuinely harder than the pre-audit numbers suggested and nobody yet
 knows whether it is solvable at all. Before any Stage 1/2/3 grid run,
-train S=0 and S=1 (vanilla: M=0,P=0,T=0,D=0), seed 0, up to 200k steps,
+train S=0 and S=1 on the **vanilla tanh substrate**, M=P=T=D=0, seed 0,
 train-to-criterion.
+
+SUBSTRATE (Phase 12 audit finding F1 -- the first run of this pilot was
+INVALID and its GO verdict does not transfer): §11.1's word "vanilla" was
+originally read here as "no mechanisms on (M=P=T=D=0)" and the run dict
+carried no `substrate` key, so `train_one` fell through to
+`config.yaml`'s `model.substrate: gru` and the pilot trained a GRU
+(`results/resolved_config_phase11_pilot_s0.yaml` records `substrate: gru`).
+But §4 defines Stage 1 -- which this pilot gates -- as the vanilla tanh RNN
+(~25k recurrent synapses at H=128), and gatedness is being promoted to its
+own arm precisely because an ungated tanh core maintaining item identity
+across a 25-tick delay is the harder problem. A GRU's GO says nothing about
+whether the vanilla substrate can clear the gate. `--substrate` now defaults
+to vanilla and is written into the run dict explicitly.
 
   GO    -> S=0 meets the §3 criterion within 200k steps.
   NO-GO -> it does not. STOP. Report. Per comments.txt, the task must be
@@ -48,6 +61,8 @@ def main(argv=None) -> int:
     ap.add_argument("--s", type=int, required=True, choices=[0, 1], help="S=0 flat or S=1 hierarchical")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--steps", type=int, default=PILOT_STEPS)
+    ap.add_argument("--substrate", choices=["vanilla", "gru"], default="vanilla",
+                    help="F1: Stage 1 (which this pilot gates) is the vanilla tanh RNN, §4")
     ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     args = ap.parse_args(argv)
 
@@ -57,15 +72,23 @@ def main(argv=None) -> int:
     import yaml
 
     full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
-    model_id = f"M{args.s}0000_pilot"
+    # run_id carries the substrate: the invalid GRU pilot already occupies
+    # `M{s}0000_pilot_s{seed}` in the manifest and its checkpoints are still
+    # on disk (needed for F5's at-criterion-vs-max_steps geometry check), so
+    # a re-run must not resume from them or overwrite them.
+    model_id = f"M{args.s}0000_pilot_{args.substrate}"
     run = {
         "model_id": model_id, "S": args.s, "M": 0, "P": 0, "T": 0, "D": 0,
+        "substrate": args.substrate,
         "seed": args.seed, "run_id": f"{model_id}_s{args.seed}",
     }
     cfg = {"steps": args.steps}
-    resolved_cfg = build_resolved_config(full_cfg, full_cfg.get("tiers", {}).get("full", {}), "full")
+    resolved_cfg = build_resolved_config(full_cfg, full_cfg.get("tiers", {}).get("full", {}), "full",
+                                         model_overrides={"substrate": args.substrate})
     cfg_hash = config_hash(resolved_cfg)
-    resolved_config_path(f"phase11_pilot_s{args.s}").write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
+    resolved_config_path(f"phase11_pilot_{args.substrate}_s{args.s}").write_text(
+        yaml.safe_dump(resolved_cfg, sort_keys=True)
+    )
 
     train_one = resolve_train_fn(force_scaffold=False)
     print(f"[phase11-pilot] run_id={run['run_id']} steps_ceiling={args.steps} config_hash={cfg_hash[:12]}", flush=True)

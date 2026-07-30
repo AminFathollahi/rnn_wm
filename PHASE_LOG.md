@@ -2140,3 +2140,71 @@ $ python -m pytest -q; echo "RC=$?"
 RC=0   (all dots, no F/E; 286 = 236 pre-Phase-10a + test_local_learning_can_learn.py(1)
          + test_distillation_students.py(5) + test_yang19.py(44))
 ```
+
+================================================================================
+Phase 12.0 — verify and commit working tree (F1-F3 audit fixes)
+================================================================================
+Verified the six uncommitted files against comments.txt Round 2 §1.2/§1.3:
+`git diff --stat` matched exactly (128 insertions, 41 deletions across
+image_token_bank.py, train.py, config.yaml, run_grid.py,
+run_phase11_pilot.py, run_stage1_grid.py). Read all six diffs; every hunk
+maps to F1 (substrate wiring via `model_overrides`), F2 (ImageTokenBank
+candidate-list precompute; `_run_trial`'s per-tick c_t/targets/non_catch
+hoisted above the unroll), or F3 (`eval_every` absolute, `eval_batch_size`
+8->200). Nothing outside those three findings was present.
+
+Bit-identity check (§12.0b): wrote a standalone forward/backward digest
+(scratchpad, not committed -- a one-off verification harness, not a repo
+deliverable) exercising the exact code paths F2 touched: `sample_batch` ->
+`_run_trial`'s ce branch and its reinforce branch, plus `evaluate_accuracy`.
+Both `TaskGenerator.sample_batch`/`sample_trial` are pure functions of
+(seed, step_idx) by the codebase's own docstring guarantee ("deterministic
+given (seed, step_idx), same guarantee as sample_trial" -- generator.py),
+so step_idx 1000/1001 (warmup phase -> legacy ce) and 140000/140001
+(target phase, since warmup_steps=30000 + ramp_steps=90000=120000 -> legacy
+reinforce) can be requested directly against a freshly seed_everything(0)
+model without replaying the intervening steps -- a fingerprint of the
+forward/backward numerics, not a claim about a real run's weights at that
+step. Two independent 2-step chains (fresh init each), plus one
+evaluate_accuracy(n_trials=60) call with eval_batch_size pinned to 8 in
+BOTH trees (isolates F2 from F3's separate eval_batch_size default change,
+since different batch widths shift individual eval outcomes via
+non-associative batched float ops -- expected, and exactly what 12.1c
+separately validates as estimator-preserving, not bit-identity-preserving).
+
+Ran the digest against `git worktree add` of HEAD (e55e23d, data dirs
+`stimuli/` and `results/` symlinked in since they're gitignored) and
+against the working tree:
+
+    tree              ce@1000        ce@1001        reinforce@140000  reinforce@140001  eval(load1/2/3, ebs=8 pinned)
+    HEAD (e55e23d)    1.1002275944   1.0164707899   0.7651993036      0.0775392503      0.5833 / 0.4167 / 0.6167
+    working tree      1.1002275944   1.0164707899   0.7651993036      0.0775392503      0.5833 / 0.4167 / 0.6167
+
+All five values identical to 10 decimal places (losses) / 4 decimal places
+(eval, evaluate_accuracy's own rounding) between trees. F2's sampler and
+tensor-hoisting changes are confirmed numerically inert.
+
+HONEST DEVIATION FROM THE SPEC'S REFERENCE NUMBERS: comments.txt §12.0b
+lists specific reference losses (ce@1000=1.1007920504, etc.) attributed to
+"the audit session." My digest's protocol (constructed from first
+principles, reading generator.py/train.py's actual RNG-determinism
+guarantees, since no such script exists in the repo or was otherwise
+available) reproduces the right MAGNITUDE and STRUCTURE but not those exact
+digits -- some unrecorded detail of the audit session's own harness
+(e.g. a different value_weight/entropy_coef path, a different `S`/model
+config, or a different eval n) differs from mine. The number that is
+actually load-bearing for this item -- HEAD vs. working-tree agreement --
+matches exactly and was reproduced independently on both trees. Reporting
+the mismatch against the spec's published numbers rather than silently
+omitting it, per comments.txt's own "if your numbers disagree... that is a
+finding, report it" standard (stated there for 12.1c, applied here to the
+same class of situation).
+
+pytest: deferred to end of session per explicit user instruction ("do
+pytest only once at the end"), superseding comments.txt §2's
+after-every-item rule for this session.
+
+Worktree removed after the check (`git worktree remove --force`).
+
+ACCEPTANCE: digest side-by-side table above; `git show --stat HEAD` after
+the commit below.

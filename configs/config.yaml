@@ -242,11 +242,38 @@ train:
 # human Sternberg performance in 000469 (the only dataset covering all
 # three loads) -- see scripts/human_behavior_gates.py, results/human_behavior.csv.
 gates:
+  # Phase 12 (§3): the old single graded criterion did two incompatible
+  # jobs (behavioural inclusion AND training stop rule) at once. Split:
+  #
+  # Gate A (§3.1): behavioural matching / inclusion. Load 1 only -- the
+  # only load all three Sternberg datasets (000469, 000673, 001187) share
+  # -- at the DEDUPLICATED pooled q10 (scripts/human_behavior_gates.py,
+  # results/human_behavior.csv; 9.8: 92 unique sessions, not 111 rows --
+  # 19 identifiers are shared between 000673 and 001187, an MTL
+  # re-release of overlapping recordings; naive pooling gives q10=0.8222,
+  # not the correct 0.8344). q10 (not min): the observed minimum is one
+  # unlucky 36-45-trial session with a Wilson 95% CI of roughly
+  # [0.54, 0.80] and would let a single outlier set the study's inclusion
+  # threshold. Does NOT stop training -- see extra_milestones/max_steps
+  # below. A run below this is recorded `matched: false` with its final
+  # accuracy and Wilson CI, never dropped from the report (9.9/9.10).
   criterion:
-    load1: 0.94    # median human session 0.9444
-    load2: 0.91    # median human session 0.9111
-    load3: 0.86    # median human session 0.8667
+    load1: 0.83    # dedup pooled q10 = 0.8344, n=92 sessions
   consecutive_evals: 3     # must hold across 3 consecutive evaluations
+  # §3.3 efficiency DVs: milestones tracked ADDITIONALLY to Gate A's own
+  # threshold (which is tracked as a milestone automatically from
+  # `criterion` above) -- so 0.83 lives in exactly one place. Each entry
+  # gets its own independent consecutive-eval counter; reaching one never
+  # stops training and a milestone never reached is recorded `null`.
+  extra_milestones:
+    load3: 0.80    # 000469 (only dataset with load 3) q10 = 0.8000
+  # Gate B (§3.2): the equal-duration budget. A single max_steps, fixed
+  # for every cell in a stage, set ONCE per stage from that stage's pilot
+  # (12.6) -- NOT a per-run stopping rule, because C1-C4 are geometry DVs
+  # that keep changing after accuracy saturates, and comparing two cells'
+  # geometry at different training durations confounds arm with duration.
+  # `ckpt.pt` at max_steps is what every geometry analysis reads.
+  max_steps: null        # set by 12.6 from the vanilla pilot's plateau
   # n-back (Stage 3, Phase 6/11): from the 2 Kai Miller ECoG patients (CA,
   # CC) with a usable dataglove response signal -- AL has no response
   # channel, UG's is degenerate -- scripts/human_behavior_gates_nback.py,
@@ -255,12 +282,6 @@ gates:
   nback:
     n1: 0.96    # median patient accuracy 0.9600; pooled 0.9600 [0.923,0.980], n=200 trials, 2 patients
     n2: 0.83    # median patient accuracy 0.8300; pooled 0.8300 [0.772,0.876], n=200 trials, 2 patients
-  # <set in Phase 11 from the pilot's real steps_to_criterion numbers --
-  # comments.txt's §3 text says "Phase 7" but its own Phase 11 ("PILOT,
-  # THEN RUN", item 11.2) is what actually derives this; not invented here.
-  # Not a training stop condition: `cfg["steps"]` (tiers.<tier>.steps)
-  # still governs how many steps a run executes.
-  max_steps: null
 
 # Neural alignment: Tier A is the pooled 000469 + 000673 dataset.
 neural:

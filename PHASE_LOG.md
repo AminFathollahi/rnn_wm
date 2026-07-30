@@ -2208,3 +2208,119 @@ Worktree removed after the check (`git worktree remove --force`).
 
 ACCEPTANCE: digest side-by-side table above; `git show --stat HEAD` after
 the commit below.
+
+================================================================================
+Phase 12.1 — split gate: Gate A / Gate B / per-milestone efficiency DVs
+================================================================================
+12.1a. `scripts/human_behavior_gates.py::dedupe_sessions` collapses on
+(session, load) before any pooled statistic is computed (001187 re-releases
+19 of 000673's MTL sessions -- §3.1/9.8). `results/human_behavior.csv`
+regenerated (243 raw session x load rows, kept undeduplicated on disk for
+auditability; dedup applied only at the point pooled quantiles are
+derived). Real run against the actual DANDI data:
+
+```
+$ PYTHONPATH=. python scripts/human_behavior_gates.py --datasets 000469 000673 001187
+[human] 000469: 21 WM sessions
+[human] 000673: 44 WM sessions
+[human] 001187: 46 WM sessions
+[human] load-1 rows: 111 raw -> 92 deduplicated (19 duplicate sessions dropped)
+
+  load                 source    n     min     q05     q10     q25  median
+     1      dedup pool (3 ds)   92  0.6889  0.7979  0.8344  0.9286  0.9714
+     2            000469 only   21  0.6944  0.7778  0.7778  0.8667  0.9111
+     3            000469 only   21  0.7222  0.7778  0.8000  0.8222  0.8667
+```
+
+ACCEPTANCE: load-1 dedup q10 = 0.8344, exact match to comments.txt's
+required 0.8344 +/- 0.0001. TEST: `tests/test_human_behavior_gates.py`
+(`test_dedupe_pooled_n_is_union_not_sum`) -- pooled n is the union (3), not
+the naive sum (4), of two frames sharing one session id.
+
+12.1b. `configs/config.yaml`'s `gates:` block replaced with Gate A
+(`criterion: {load1: 0.83}`, `consecutive_evals: 3`) + `extra_milestones:
+{load3: 0.80}` + `max_steps: null` (set by 12.6); 0.83 now lives in exactly
+one place. `train.py` rewritten to iterate the CRITERION's own keys (union
+of `gates.criterion` and `gates.extra_milestones`) instead of hardcoding
+`task_loads` at the three sites that previously KeyError'd on a
+load-1-only criterion -- the milestone set is `milestone_thresholds =
+{**criterion, **extra_milestones}`, each with its own consecutive-eval
+counter, `steps_to_<key>_<threshold>` (+trials/wall/joules), and its own
+ckpt-at-first-milestone snapshot. The returned `accuracy`/`gates` headline
+is now unconditionally the max_steps evaluation (`accuracy_at_max_steps`
+kept as an alias). Added `matched: bool` and `human_percentile_load{1,2,3}`
+(read from the deduplicated `results/human_behavior.csv`).
+
+Downstream consumers of the old `criterion_met`/`steps_to_criterion` keys
+fixed at the root (comments.txt's "root-cause fix" standard, applied past
+the two sites the spec named): `run_grid.py`'s report table and
+`scripts/analyze_capacity_curve.py`'s manifest reducer both read
+`rec.get("matched", ...)` now. `scripts/run_capacity_curve.py` passes
+`train_one`'s dict straight through and needed no change.
+`run_distillation_students.py`/`run_yang19_baseline.py` have their OWN
+inline `criterion_met` locals from a self-contained training loop that
+never calls `train_one` -- confirmed via grep, not touched.
+
+TESTS (both real, not monkeypatched-away from the gate logic they check):
+`test_gate_a_load1_only_does_not_keyerror_against_all_task_loads` (a
+load-1-only criterion against `task.loads=[1,2,3]` does not KeyError);
+`test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training_continues`
+(a milestone confirmed at eval k is recorded at step k*eval_every, and
+`ckpt.pt`'s saved step proves training continued past it).
+
+ACCEPTANCE (12,000-step real smoke run, `S=0/M=0/seed=0`, current
+`warmup_steps=30000` so the entire run stays in the load-1-only warmup
+phase -- 12.2 has not landed yet):
+
+```
+[train] milestone load1>=0.83 confirmed at step 6000 (3 consecutive evals)
+[train] first milestone (load1); snapshotting ckpt_at_criterion.pt, continuing to 12000 for geometry only.
+"first_milestone_step": 6000, "steps_to_load1_0.83": 6000, "steps_to_load3_0.8": null,
+"matched": true, "gates": {"load1>=0.83": true}
+```
+
+Load-1 milestone fired with a step number, load-3 milestone stayed `null`
+(load 3 is untrained during warmup), `matched` is set, and the run
+continued 6,000 further steps past the milestone rather than stopping --
+the two counters are independently tracked, as required.
+
+BUG FOUND AND FIXED while producing this run: `human_percentile_load2`
+and `_load3` came back `null` even though `accuracy["load2"/"load3"]`
+were populated. Root cause: `results/human_behavior.csv` stores dataset
+codes as the string `"000469"`; `pandas.read_csv` infers that column as
+int64 on reload and silently drops the leading zeros (`469 != "000469"`),
+so `_human_percentiles`'s `df.dataset == "000469"` filter matched zero rows
+every time the CSV was read back from disk (the bug never showed inside
+`human_behavior_gates.py` itself, which builds the same-typed dataframe
+in-memory and never round-trips it through CSV). Fixed by reading with
+`dtype={"dataset": str}`. TEST added:
+`test_human_percentiles_survives_dataset_code_csv_roundtrip`.
+
+12.1c. Validated `eval_batch_size: 200` (F3) against `8`, same S=0 GRU
+pilot checkpoint (`M00000_pilot_s0/ckpt.pt`, step 200000), n_trials=200/load,
+10 eval seeds:
+
+```
+bsz=8:   load1 0.9910(0.0061)  load2 0.9510(0.0102)  load3 0.9190(0.0190)  wall_median=1.152s
+bsz=200: load1 0.9905(0.0080)  load2 0.9525(0.0072)  load3 0.9225(0.0181)  wall_median=0.261s
+speedup = 4.41x
+load1: bsz200 mean within bsz8's 95% Wilson CI (0.9643, 0.9973) -- agree
+load2: bsz200 mean within bsz8's 95% Wilson CI (0.9104, 0.9726) -- agree
+load3: bsz200 mean within bsz8's 95% Wilson CI (0.8740, 0.9502) -- agree
+```
+
+Means agree well inside the Wilson CI on all three loads; the estimator is
+unchanged. Speedup measured here (4.41x, 1.152s -> 0.261s) is close to but
+not identical to Appendix A's cited 4.1x (1.194s -> 0.289s) -- expected
+run-to-run wall-clock variance on shared hardware, not a discrepancy in the
+estimator itself, and both comfortably clear F3's intent. Reported per
+comments.txt's "if your numbers disagree... that is a finding" standard.
+
+`preregistration.md` amended (2026-07-30 entry) to replace the single
+graded criterion with Gate A/Gate B and record the 92-vs-111 (9.8)
+correction, in this same commit.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: all three sub-item outputs above; `git show --stat HEAD` after
+the commit below.

@@ -51,8 +51,8 @@ def test_cell_smoke(cell):
     expected_acc_keys = {f"load{i}" for i in (1, 2, 3)} | {f"load{i}_ci_{b}" for i in (1, 2, 3) for b in ("lo", "hi")}
     assert set(result["accuracy"].keys()) == expected_acc_keys
     assert result["rung"] == 0  # BPTT throughout; rung is local-learning-only
-    assert result["criterion_met"] is False  # 6-step smoke run cannot reach 3 consecutive passing evals
-    assert result["steps_to_criterion"] is None
+    assert result["matched"] is False  # 6-step smoke run cannot reach 3 consecutive passing evals
+    assert result["steps_to_load1_0.83"] is None
 
 
 @pytest.mark.parametrize("cell", CFG["local_learning_cells"])
@@ -185,3 +185,90 @@ def test_run_dict_overrides_perf_matched_baselines(extra):
             shutil.rmtree(ckpt_dir)
 
     assert result["status"] == "completed"
+
+
+def test_gate_a_load1_only_does_not_keyerror_against_all_task_loads():
+    """Phase 12 (§3.1/12.1b): `gates.criterion` names only `load1`, but
+    `task.loads` is [1,2,3] -- the periodic-eval milestone loop and the
+    final `gates` dict must iterate `criterion`'s OWN keys, not
+    `task_loads`, or every run in the study raises KeyError on load2/load3.
+    This is the root-cause regression test for that bug (train.py used to
+    index `criterion[f"load{i}"]` while looping `task_loads` at three
+    sites)."""
+    import shutil
+
+    from brainalign_wm.training.train import train_one
+
+    assert set(CFG["gates"]["criterion"].keys()) == {"load1"}  # the scenario this test exists to cover
+    assert CFG["task"]["loads"] == [1, 2, 3]
+
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_gate_a_subset"}
+    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    try:
+        result = train_one(run, {"steps": 6, "scaffold_sleep_s": 0})
+    finally:
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+
+    assert result["status"] == "completed"
+    assert set(result["gates"].keys()) == {"load1>=0.83"}  # not load2/load3 -- no KeyError, no spurious keys either
+
+
+def test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training_continues():
+    """Phase 12 (§3.3): a milestone's `steps_to_<key>_<threshold>` must be
+    recorded at exactly the CONFIRMING evaluation's step
+    (k * eval_every, k = gates.consecutive_evals), and reaching it must NOT
+    stop training -- §3 is explicit that only `gates.max_steps` (here,
+    `cfg["steps"]`, since `gates.max_steps` is still null pre-12.6) ends the
+    loop. Forces accuracy to 1.0 on every periodic eval via a stub (real
+    accuracy this early in training is nowhere near 0.83/0.80, so a
+    milestone would otherwise never fire in a smoke-sized run) and shrinks
+    `eval_every` so multiple evals fit inside a short run."""
+    import copy
+    import shutil
+
+    import brainalign_wm.training.train as train_mod
+
+    fake_cfg = copy.deepcopy(CFG)
+    fake_cfg["train"]["eval_every"] = 2
+    fake_cfg["gates"]["consecutive_evals"] = 3
+    fake_cfg["gates"]["criterion"] = {"load1": 0.83}
+    fake_cfg["gates"]["extra_milestones"] = {"load3": 0.80}
+    eval_every = fake_cfg["train"]["eval_every"]
+    consecutive_evals = fake_cfg["gates"]["consecutive_evals"]
+    total_steps = 10
+
+    def fake_evaluate_accuracy(*args, **kwargs):
+        return {
+            "load1": 1.0, "load1_ci_lo": 1.0, "load1_ci_hi": 1.0,
+            "load2": 1.0, "load2_ci_lo": 1.0, "load2_ci_hi": 1.0,
+            "load3": 1.0, "load3_ci_lo": 1.0, "load3_ci_hi": 1.0,
+        }
+
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_milestone_continue"}
+    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    orig_load_cfg, orig_eval_acc = train_mod._load_full_config, train_mod.evaluate_accuracy
+    train_mod._load_full_config = lambda: fake_cfg
+    train_mod.evaluate_accuracy = fake_evaluate_accuracy
+    try:
+        result = train_mod.train_one(run, {"steps": total_steps, "scaffold_sleep_s": 0})
+        import torch
+
+        ckpt = torch.load(ckpt_dir / "ckpt.pt", map_location="cpu", weights_only=False)
+    finally:
+        train_mod._load_full_config = orig_load_cfg
+        train_mod.evaluate_accuracy = orig_eval_acc
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+
+    expected_step = consecutive_evals * eval_every  # 3rd confirming eval, at step k*eval_every = 6
+    assert result["steps_to_load1_0.83"] == expected_step
+    assert result["steps_to_load3_0.8"] == expected_step
+    assert result["matched"] is True
+    # Training did NOT stop at the milestone: the final checkpoint is at
+    # total_steps (10), not at the milestone step (6).
+    assert ckpt["step"] == total_steps

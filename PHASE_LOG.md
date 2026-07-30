@@ -2324,3 +2324,58 @@ pytest: deferred to end of session per standing user instruction.
 
 ACCEPTANCE: all three sub-item outputs above; `git show --stat HEAD` after
 the commit below.
+
+================================================================================
+Phase 12.2 — warmup length: 30,000 -> 8,000 steps (F4)
+================================================================================
+Applied `task.curriculum.warmup_steps: 30000 -> 8000` (configs/config.yaml).
+Not re-derived here -- already A/B'd (comments.txt Appendix A, 12.2 RESULT),
+value applied as-is, not rounded down to 4,000 (untested). A/B table pasted
+below, from Appendix A, both arms S=0/GRU/seed 0 (`WARMUP8K_s0` vs the
+existing `M00000_pilot_s0`); evaluation is drawn from a call-seeded
+RandomState that never touches `task_gen`'s own RNG, so the two training
+trajectories are comparable despite differing eval cadence (2,000 vs 6,666):
+
+```
+warmup=8,000 (WARMUP8K_s0)      warmup=30,000 (M00000_pilot_s0)
+step  phase  L1    L2    L3     step   phase   L1    L2    L3
+2000  warm   .850  .670  .580    6666  warm    .960  .705  .615
+4000  warm   .980  .630  .660   13332  warm    .990  .605  .615
+6000  warm   .955  .605  .550   19998  warm    .990  .475  .505
+8000  warm   .955  .690  .580   26664  warm    .990  .640  .520
+10000 ramp   .810  .715  .690
+12000 ramp   .835  .755  .725
+14000 ramp   .885  .885  .810
+16000 ramp   .935  .900  .870
+18000 ramp   .930  .885  .845
+20000 ramp   .930  .900  .875
+22000 ramp   .960  .915  .875
+24000 ramp   .965  .930  .865
+26000 ramp   .965  .935  .880
+28000 ramp   .990  .960  .910   <- clears 0.94/0.91/0.86 on all loads
+30000 ramp   .970  .940  .915
+32000 ramp   .990  .940  .890
+```
+
+At step 30,000 the 8k arm is at 0.970/0.940/0.915 (cleared every load) --
+step 30,000 is exactly where the 30k arm's warmup ENDS, i.e. the point at
+which it has trained on loads 2/3 for zero steps. At the nearest matched
+absolute step (24,000 vs 26,664) the 8k arm is at load3=0.865 while the
+30k arm is at load3=0.520 with 3,336 steps of warmup still left. On the
+OLD three-load gate (0.94/0.91/0.86) the 8k arm first clears all three at
+step 22,000 and confirms (3 consecutive evals: 22k/24k/26k) at 26,000,
+against the 30k arm's confirmed 66,660 -- a 2.6x reduction in
+steps-to-criterion from the warmup change alone. The 8k arm was stopped
+at step 32,000 of its 50,000 ceiling (question already answered by a wide
+margin, GPU wanted back); nothing in this spec depends on the missing
+18,000 steps since 12.6 sets `gates.max_steps` from the VANILLA pilot
+(12.5), not this GRU methods run.
+
+CAVEATS (as given in Appendix A): one seed, GRU substrate -- 12.5
+re-measures on vanilla. Not re-derived independently this session; applied
+as measured, per instruction.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: config diff (`git show --stat HEAD` after the commit below)
+plus the A/B table above.

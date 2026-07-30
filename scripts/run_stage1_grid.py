@@ -41,8 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_grid import (  # noqa: E402
     MANIFEST, REPORT, RESULTS, ROOT,
+    _handle_signal,
     build_resolved_config, config_hash, git_commit, load_completed, parse_budget,
-    resolve_train_fn, resolved_config_path, write_report,
+    resolved_config_path, run_grid_loop, write_report,
 )
 
 STAGE1_CELLS = [
@@ -54,14 +55,6 @@ STAGE1_CELLS = [
     for sup in ("SUP", "RL")
     for diet, diet_tag in (("wm_only", "wm"), ("multitask", "mt"))
 ]
-
-_STOP = False
-
-
-def _handle_signal(signum, frame):  # noqa: ARG001
-    global _STOP
-    _STOP = True
-    print(f"\n[run_stage1] caught signal {signum}; will stop after the current run.", flush=True)
 
 
 def enumerate_stage1_runs(seeds: list[int]) -> list[dict]:
@@ -78,6 +71,9 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", type=str, default="72h", help="wall-clock budget, e.g. 48h / 30m / 600s")
     ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
+    ap.add_argument("--workers", type=int, default=1,
+                     help="§12.3: concurrent training processes (ProcessPoolExecutor); see "
+                          "run_grid.py --help for the N sweep result. Keep FIXED for the whole stage.")
     args = ap.parse_args(argv)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -102,38 +98,15 @@ def main(argv=None) -> int:
     cfg_hash = config_hash(resolved_cfg)
     resolved_config_path("stage1").write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
 
-    train_one = resolve_train_fn(args.scaffold)
-
     print(f"[run_stage1] max_steps={args.max_steps} seeds={seeds} budget={budget_s/3600:.2f}h "
-          f"runs={len(runs)} already_completed={len(completed)} config_hash={cfg_hash[:12]}", flush=True)
+          f"workers={args.workers} runs={len(runs)} already_completed={len(completed)} "
+          f"config_hash={cfg_hash[:12]}", flush=True)
 
     t0 = time.time()
-    for run in runs:
-        if _STOP:
-            print("[run_stage1] stop requested; exiting loop.", flush=True)
-            break
-        if run["run_id"] in completed:
-            continue
-        elapsed = time.time() - t0
-        if elapsed >= budget_s:
-            print(f"[run_stage1] budget reached ({elapsed/3600:.2f}h); stopping.", flush=True)
-            break
-
-        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        r0 = time.time()
-        rec = {**run, "config_hash": cfg_hash, "git": commit, "tier": "stage1", "started": started, "phase": "11.3_stage1"}
-        print(f"[run_stage1] >>> {run['run_id']}", flush=True)
-        try:
-            result = train_one(run, cfg)  # isolated, same convention as run_grid.py
-            rec.update(result)
-            rec.setdefault("status", "completed")
-        except Exception as e:  # noqa: BLE001 -- isolation is the point, same as run_grid.py
-            rec.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
-            print(f"[run_stage1] !!! {run['run_id']} errored: {rec['error']}", flush=True)
-        rec["wall_clock_s"] = round(time.time() - r0, 1)
-        rec["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with MANIFEST.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
+    run_grid_loop(
+        runs, completed, cfg, cfg_hash, commit, "stage1", budget_s, t0, MANIFEST,
+        args.scaffold, args.workers, "[run_stage1]", extra_rec_fields={"phase": "11.3_stage1"},
+    )
 
     write_report(MANIFEST, REPORT, budget_s, time.time() - t0)
     return 0

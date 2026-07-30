@@ -142,7 +142,16 @@ task:                                      # image-Sternberg working-memory task
   # a rescaled version of the same three phases -- that is the point of
   # fixing these in absolute steps rather than proportionally.
   curriculum:
-    warmup_steps: 30000   # loads=[1] only, short delay, no lures
+    # Phase 12.2 (F4, comments.txt §9.13): A/B'd against 30,000 (Appendix
+    # A, 12.2 RESULT; both S=0 GRU seed 0). Load 1 plateaus by step 4,000,
+    # so the last ~26,000 steps of a 30k warmup train a load the model
+    # already knows while loads 2/3 sit at chance -- at the nearest
+    # matched absolute step (24k vs 26,664) the 8k arm is at load3=0.865
+    # against the 30k arm's 0.520 (still 3,336 steps of warmup left), and
+    # on the OLD three-load gate the 8k arm confirms at 26,000 steps
+    # against the 30k arm's 66,660 (2.6x). Full A/B table: PHASE_LOG.md's
+    # Phase 12.2 entry. Do not extrapolate to 4,000 -- untested.
+    warmup_steps: 8000    # loads=[1] only, short delay, no lures
     ramp_steps: 90000      # loads=[1,2,3], full delay, lure_fraction ramped 0 -> configured value
     # target phase = remaining steps: full distribution (all loads/delay/lures)
 

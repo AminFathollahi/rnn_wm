@@ -118,7 +118,12 @@ task:                                      # image-Sternberg working-memory task
                                              # (least distorting: more time to encode, no change to memory
                                              # demand) is tried first, before lure_fraction/load-2-stage/
                                              # maintain_steps. Was 10.
-  maintain_steps: 25
+  maintain_steps: 15                        # Phase 12.5 NO-GO fallback lever 4 (comments.txt §12.5): levers 1-3
+                                             # (encode_steps, lure_fraction, load-2 stage) all failed to move S=0
+                                             # off chance -- consistent with an ungated-tanh vanishing-gradient
+                                             # collapse over the full BPTT horizon. Lever 4 shortens that horizon
+                                             # directly by cutting the maintain (delay) epoch. Last lever in the
+                                             # mandated fallback order. Was 25.
   probe_steps: 10
   lure_fraction: 0.2                        # Phase 12.5 NO-GO fallback lever 2 (comments.txt §12.5): lever 1
                                              # (encode_steps 10->15) did not fix S=0's collapse (still frozen

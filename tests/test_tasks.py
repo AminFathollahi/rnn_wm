@@ -108,12 +108,26 @@ def test_curriculum_warmup_load1_no_lures():
     assert p["maintain_steps"] < FULL_CFG["task"]["maintain_steps"]
 
 
+def test_curriculum_load2_stage():
+    # Phase 12.5 lever 3: an optional stage between warmup and ramp that
+    # exposes loads 1-2 (not 3) at full delay, still with no lures.
+    sched = CurriculumSchedule.from_config(FULL_CFG)
+    assert sched.load2_steps > 0, "config no longer sets load2_steps -- update this test"
+    ramp_start = sched.warmup_steps + sched.load2_steps
+    total = ramp_start + sched.ramp_steps + 1000
+    p = sched.params_for(sched.warmup_steps + 1, total)
+    assert p["phase"] == "load2"
+    assert p["loads"] == [1, 2]
+    assert p["lure_fraction"] == 0.0
+    assert p["maintain_steps"] == FULL_CFG["task"]["maintain_steps"]
+
+
 def test_curriculum_ramp_lure_interpolates():
     sched = CurriculumSchedule.from_config(FULL_CFG)
-    warmup_end = sched.warmup_steps
-    ramp_end = sched.warmup_steps + sched.ramp_steps
+    ramp_start = sched.warmup_steps + sched.load2_steps
+    ramp_end = ramp_start + sched.ramp_steps
     total = ramp_end + 1000
-    p_start = sched.params_for(warmup_end + 1, total)
+    p_start = sched.params_for(ramp_start + 1, total)
     p_end = sched.params_for(ramp_end - 1, total)
     assert p_start["lure_fraction"] < 0.1 * sched.full_lure_fraction
     assert p_end["lure_fraction"] > 0.8 * sched.full_lure_fraction
@@ -122,11 +136,18 @@ def test_curriculum_ramp_lure_interpolates():
 
 def test_curriculum_target_matches_full_config():
     sched = CurriculumSchedule.from_config(FULL_CFG)
-    total = sched.warmup_steps + sched.ramp_steps + 1000
+    total = sched.warmup_steps + sched.load2_steps + sched.ramp_steps + 1000
     p = sched.params_for(total - 1, total)
     assert p["phase"] == "target"
     assert p["lure_fraction"] == FULL_CFG["task"]["lure_fraction"]
     assert p["maintain_steps"] == FULL_CFG["task"]["maintain_steps"]
+
+
+def test_phase_at_load2_default_is_noop():
+    # load2_steps defaults to 0 -- old warmup->ramp->target schedule exactly.
+    assert phase_at(200, warmup_steps=200, ramp_steps=600) == "ramp"
+    assert phase_at(200, warmup_steps=200, ramp_steps=600, load2_steps=50) == "load2"
+    assert phase_at(250, warmup_steps=200, ramp_steps=600, load2_steps=50) == "ramp"
 
 
 # ---------------- SternbergGenerator (needs a real ImageTokenBank) ----------------

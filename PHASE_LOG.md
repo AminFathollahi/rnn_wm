@@ -2723,3 +2723,53 @@ S=0 has none, S=1's Gate A + load3 3-eval-streak both reached but load3
 does not hold to max_steps), final accuracy per load with Wilson 95% CI
 and human percentiles (table above), ms/step vs. the pre-12.0 pilot, and
 the verdict: **NO-GO (lever 1)**.
+
+LEVER 2 (`lure_fraction` 0.3 -> 0.2 during ramp, stacked on lever 1's
+`encode_steps`=15): pure config-scalar edit, no code change needed
+(commit 014d296). Archived lever-1 checkpoints/metrics to
+`*_lever1_nogo`, relaunched both arms fresh (PIDs S=0=95143, S=1=95142;
+fresh `config_hash=a6ad7bb317ae...`).
+
+This run was **killed early** (`kill -TERM`, clean exit) at step
+156000/200000 (S=0) / 140000/200000 (S=1), before reaching the 200k
+ceiling -- retroactively logged here since the verdict commit was
+skipped in the moment; archived data restored from
+`results/metrics/M{00000,10000}_pilot_vanilla_s0_lever2_nogo.csv`
+(79 / 71 eval rows respectively) for this entry.
+
+S=0's trace (`M00000_pilot_vanilla_s0_lever2_nogo.csv`, every eval from
+step 2000 to 156000): flat at chance (~0.44-0.58) for the entire run --
+same signature as levers 0 and 1, no improvement from the lower lure
+rate. Gate A's 3-consecutive-eval streak never started.
+
+S=1's trace (`M10000_pilot_vanilla_s0_lever2_nogo.csv`): healthy through
+ramp, peaking `load1`=0.90-0.91 around steps 12000-42000, then noisy
+(dip to 0.645 at step 62000, recovery to 0.86 at step 82000), then a
+**permanent collapse to chance** starting at target-phase entry (step
+108000: 0.475) and staying there for the remaining 16 consecutive evals
+through step 140000 (0.435-0.575, zero upward trend) -- e.g. steps
+110000-140000: 0.70, 0.51, 0.54, 0.53, 0.53, 0.475, 0.495, 0.535, 0.53,
+0.48, 0.505, 0.435, 0.505, 0.50, 0.505, 0.50.
+
+Per the refined early-kill precedent (justified only when a healthy
+reference arm destabilizes/collapses while the flat arm gets zero
+benefit): both conditions held here -- S=1 had converged to a stable
+chance floor (not still evolving) while S=0 remained flat throughout,
+so both processes were killed rather than burning ~50k more steps on an
+already-converged joint failure. Checkpoints/metrics archived to
+`*_lever2_nogo` (never deleted).
+
+VERDICT (S=0, same GO condition as above): S=0 never cleared Gate A
+under lever 2 either, and the run was net negative -- it additionally
+destabilized the previously-healthy S=1 reference arm with zero benefit
+to S=0. **NO-GO (lever 2 fails); worse than lever 1.**
+
+Per the mandated fallback order: applying lever 3 -- add a load-2 stage
+between warmup and ramp -- next, in a separate commit below.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: S=0's full flat trace and S=1's peak/collapse trace (both
+pasted above from the archived CSVs), the early-kill justification
+(joint condition: S=1 destabilized AND S=0 flat with zero benefit), and
+the verdict: **NO-GO (lever 2)**.

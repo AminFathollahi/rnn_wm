@@ -2649,13 +2649,77 @@ finding becomes a documented scientific result ("an ungated tanh core
 cannot do this task at this H") and Stage 1 runs on the GRU with vanilla
 reported as a documented failure -- not a silent substrate switch.
 
-No lever has been applied yet. No commit made for this item. Awaiting
-explicit user go-ahead before applying lever 1, re-running the pilot, or
-proceeding to 12.6/12.7.
+User authorized lever 1. Applied: `task.encode_steps` 10 -> 15 in
+config.yaml (commit b55a823), plus a related fix -- the `ckpt_at_criterion.pt`
+snapshot trigger was firing on "first milestone of any key" (`gates.criterion`
+merged with `gates.extra_milestones`), so a run could snapshot at a load3
+crossing instead of load1; restricted it to Gate A (`criterion`, load1) only
+so the at-criterion checkpoint's meaning is consistent across every Stage-1
+grid run, not just this pilot.
+
+PITFALL HIT AND FIXED: the first lever-1 relaunch attempt resumed from the
+existing `ckpt.pt` (`start_step = ck["step"]`, train.py:1554) left over from
+the lever-0 NO-GO run, which was already at step 200000 -- `range(200000,
+200000)` executed zero training steps and just re-evaluated the same
+collapsed weights (wall_clock_train_s=1.3s, chance-level accuracy again).
+Fixed by moving the stale checkpoints/metrics aside (not deleted, per the
+"never delete results/" constraint) to `*_lever0_nogo` before relaunching:
+  results/checkpoints/M{00000,10000}_pilot_vanilla_s0_lever0_nogo/
+  results/metrics_archive/M{00000,10000}_pilot_vanilla_s0_lever0_nogo.csv
+Relaunched both arms fresh (start_step=0); resolved configs confirmed
+`substrate: vanilla`, `encode_steps: 15`.
+
+NOTE on `results/manifest.jsonl`: each run_id (`M00000_pilot_vanilla_s0`,
+`M10000_pilot_vanilla_s0`) now has 3 lines -- (1) the lever-0 NO-GO result,
+(2) an INVALID entry from the first lever-1 relaunch attempt that hit the
+checkpoint-resume pitfall above (`wall_clock_train_s`~1.3s, chance-level,
+all milestone fields null -- not a real training run, disregard), (3) the
+genuine lever-1 result below. The LAST line per run_id is authoritative.
+
+LEVER 1 RESULT (from `results/manifest.jsonl` last line per run_id,
+`final_evaluation`'s n=500 held-out eval, Wilson 95% CI; both runs ran the
+full 200,000-step ceiling, config_hash `17ae13717b3e...`, git `b55a823`):
+
+```
+run_id                    Gate A(load1>=0.83)  load1(CI)              load2(CI)              load3(CI)              human_pctile(L1/L2/L3)   ms/step  wall_clock_train_s
+M00000_pilot_vanilla_s0   False (never)         0.470 [0.427,0.514]   0.538 [0.494,0.581]    0.538 [0.494,0.581]    0.0  / 0.0    / 0.0        96.635   22911.4
+M10000_pilot_vanilla_s0   True  (step 38000)    0.948 [0.925,0.964]   0.850 [0.816,0.879]    0.742 [0.702,0.778]    0.348/ 0.238  / 0.048       103.881  24274.3
+```
+
+S=0 (vanilla flat, encode_steps=15): identical failure signature to lever
+0. `results/metrics/M00000_pilot_vanilla_s0.csv` (100 evals, step 10000 to
+200000): `train_loss` frozen at 0.1157-0.1160 for the entire 190,000-step
+remainder, `train_acc_load{1,2,3}` oscillating at chance (~0.45-0.60) on
+every eval. Gate A's 3-consecutive-eval streak never started.
+`steps_to_load1_0.83` / `steps_to_load3_0.8`: both `None`. Lever 1 (more
+encode time) did not touch the vanishing-gradient collapse -- consistent
+with the ROOT CAUSE diagnosis above (ungated-tanh full-BPTT vanishing
+gradient), since more encode steps does not shorten or gate the BPTT path
+through delay+probe.
+
+S=1 (vanilla hierarchical, encode_steps=15): improved over lever 0 -- Gate
+A now confirms at step 38000 (`accuracy_at_first_milestone`: load1=0.874,
+load2=0.764, load3=0.714; 4,864,000 trials, 4509.7s wall) and load1 ends at
+0.948. `steps_to_load3_0.8`=76000 (3-consecutive-eval streak did cross
+0.80 at that point), but load3 does not hold: final eval (step 200000) is
+back down to 0.785, with `accuracy_at_max_steps.load3`=0.742 -- oscillating
+0.70-0.85 through the target phase rather than sustaining. Not relevant to
+the GO verdict (S=1 is a reference/comparison arm, not part of the S=0 GO
+condition), but recorded for 12.6's plateau analysis.
+
+VERDICT (S=0, per comments.txt §12.5's GO condition -- Gate A load1>=0.83
+AND load3>=0.80, both 3-consecutive-eval-confirmed, within 200k steps):
+S=0 cleared neither under lever 1 either. **NO-GO (lever 1 fails).**
+
+Per the mandated fallback order and the user's explicit authorization to
+proceed through the full escalation autonomously ("carry on with all
+remaining tasks" / "carry on and complete all tasks"): applying lever 2 --
+`lure_fraction` 0.3 -> 0.2 during ramp -- next, in a separate commit below.
 
 pytest: deferred to end of session per standing user instruction.
 
 ACCEPTANCE: both arms' milestone steps/trials/wall/joules (table above,
-S=0 has none, S=1's Gate A only -- load3 milestone reached by neither),
-final accuracy per load with Wilson 95% CI and human percentiles (table
-above), ms/step vs. the pre-12.0 pilot, and the verdict: **NO-GO**.
+S=0 has none, S=1's Gate A + load3 3-eval-streak both reached but load3
+does not hold to max_steps), final accuracy per load with Wilson 95% CI
+and human percentiles (table above), ms/step vs. the pre-12.0 pilot, and
+the verdict: **NO-GO (lever 1)**.

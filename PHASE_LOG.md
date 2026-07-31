@@ -2767,6 +2767,85 @@ to S=0. **NO-GO (lever 2 fails); worse than lever 1.**
 Per the mandated fallback order: applying lever 3 -- add a load-2 stage
 between warmup and ramp -- next, in a separate commit below.
 
+LEVER 3 (add an optional `load2` curriculum stage between warmup and
+ramp: loads=[1,2] only, full delay, 0 lure fraction -- isolates load
+exposure from the lure ramp; `task.curriculum.load2_steps=8000`,
+stacked on levers 1+2, `encode_steps=15`/`lure_fraction=0.2` retained).
+`curriculum.py` change + new/fixed tests in `tests/test_tasks.py`
+(`pytest -q tests/test_tasks.py`: 18 passed); commit 7612870. Archived
+lever-2 checkpoints/metrics to `*_lever2_nogo`, relaunched both arms
+fresh (PIDs S=0=119538, S=1=119744; fresh `config_hash=e7b15e33d8a7...`,
+confirmed via `results/resolved_config_phase11_pilot_vanilla_s0.yaml`).
+
+Both arms ran to the full 200,000-step ceiling this time (no early
+kill -- S=1 stayed healthy through step 94000 with no sign of the
+lever-2-style collapse until well past the >150k monitoring checkpoint,
+so continued running per the refined precedent).
+
+LEVER 3 RESULT (from `results/manifest.jsonl` last line per run_id,
+`final_evaluation`'s n=500 held-out eval, Wilson 95% CI; both runs ran
+the full 200,000-step ceiling, config_hash `e7b15e33d8a7...`):
+
+```
+run_id                    Gate A(load1>=0.83)  load1(CI)              load2(CI)              load3(CI)              human_pctile(L1/L2/L3)   ms/step  wall_clock_train_s
+M00000_pilot_vanilla_s0   False (never)         0.530 [0.486,0.573]   0.462 [0.419,0.506]    0.462 [0.419,0.506]    0.0  / 0.0    / 0.0        98.394   23132.3
+M10000_pilot_vanilla_s0   False (at max_steps)  0.470 [0.427,0.514]   0.538 [0.494,0.581]    0.538 [0.494,0.581]    0.0  / 0.0    / 0.0        104.669  24612.3
+```
+
+S=0's full trace (`results/metrics/M00000_pilot_vanilla_s0.csv`, 100
+evals every 2000 steps from step 2000 to 200000, spanning
+warmup->load2->ramp->target): `train_acc_load1` flat at chance for the
+entire run -- min=0.410, max=0.575, mean=0.501 across all 100 evals,
+zero trend across any of the four phases. The load2 stage (steps
+8000-16000) gave no head start into ramp. Gate A's 3-consecutive-eval
+streak never started.
+
+S=1's trace (`results/metrics/M10000_pilot_vanilla_s0.csv`) is the same
+"strong then collapses" failure mode as lever 2, just later: Gate A
+confirms at step 14000 (`accuracy_at_first_milestone`: load1=0.884,
+load2=0.726, load3=0.682; 1,792,000 trials, 1313.2s wall -- load2 stage
+gave S=1 a fast start, `load1` reaching 0.91-0.94 by step 16000) and
+stays healthy through ramp and early target, mean load1=0.803 across
+the 47 evals from step 2000-94000. Then, starting at step 96000
+(0.66) and accelerating through target-phase entry, it degrades and
+**never recovers**: mean load1=0.508 across the last 33 evals (step
+136000-200000), oscillating 0.44-0.75 with no sustained recovery,
+ending the run at load1=0.515 (final eval, step 200000) -- effectively
+back to chance, wiping out its earlier Gate A pass by `gates_at_max_steps`.
+
+ROOT CAUSE note: this is the third lever in a row (2 of 3) where S=1
+shows the identical shape -- strong early learning, then a permanent
+collapse to chance once the target phase's full lure rate is reached --
+while S=0 never leaves chance under any lever. This is consistent with
+the standing ROOT CAUSE diagnosis (ungated-tanh vanishing gradient over
+the full BPTT horizon): none of levers 1-3 shorten or gate that path,
+they only change what precedes it (encode time, lure ramp rate, an
+extra pre-ramp stage), so S=0 was never expected to recover under any of
+them and didn't. S=1's late collapse (not seen under lever 0/1, seen
+under levers 2 and 3) suggests the *lower* lure_fraction (0.2, still
+active in this config) trades a harder ramp-phase task for the
+hierarchical arm for a less stable target-phase optimum -- but this is
+a secondary/reference-arm observation, not part of the S=0 verdict.
+
+VERDICT (S=0, same GO condition as above): S=0 never cleared Gate A
+under lever 3 either (`gates['load1>=0.83']`: False; final load1=0.530,
+within the same chance band as lever 1's 0.470). **NO-GO (lever 3
+fails).**
+
+Per the mandated fallback order, this was the last-but-one lever:
+applying lever 4 -- `maintain_steps` 25 -> 15 -- next, in a separate
+commit below. Per comments.txt, if lever 4 also fails, the finding
+becomes a documented scientific result ("an ungated tanh core cannot do
+this task at this H") and Stage 1 runs on the GRU with vanilla reported
+as a documented failure -- not a silent substrate switch.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: both arms' milestone steps/trials/wall/joules and full
+accuracy trace summaries (table + prose above), final accuracy per load
+with Wilson 95% CI and human percentiles (table above), ms/step vs.
+prior levers, and the verdict: **NO-GO (lever 3)**.
+
 pytest: deferred to end of session per standing user instruction.
 
 ACCEPTANCE: S=0's full flat trace and S=1's peak/collapse trace (both

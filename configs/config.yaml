@@ -162,6 +162,13 @@ task:                                      # image-Sternberg working-memory task
     # against the 30k arm's 66,660 (2.6x). Full A/B table: PHASE_LOG.md's
     # Phase 12.2 entry. Do not extrapolate to 4,000 -- untested.
     warmup_steps: 8000    # loads=[1] only, short delay, no lures
+    # Phase 12.5 lever 3 (vanilla pilot NO-GO under levers 1-2, PHASE_LOG.md):
+    # loads=[1,2] only, full delay, still no lures -- isolates load exposure
+    # from the lure ramp, which previously started on day one of `ramp`
+    # together with load 3. Width matches warmup_steps (F4: load1 plateaus
+    # by step ~4,000, so 8,000 gives the same 2x margin for load 2); untested
+    # a priori, first attempt.
+    load2_steps: 8000
     ramp_steps: 90000      # loads=[1,2,3], full delay, lure_fraction ramped 0 -> configured value
     # target phase = remaining steps: full distribution (all loads/delay/lures)
 
@@ -204,7 +211,7 @@ train:
   lr: 1.0e-3                               # Phase 2 (comments.txt §5 item 2.3): was 3e-4, scaled up for the
                                             # batch_size 16->128 bump below; fall back to 3e-4 if Phase 3's
                                             # smoke run is unstable at this rate
-  curriculum: [warmup, ramp, target]
+  curriculum: [warmup, load2, ramp, target]
   checkpoint_every: 200                    # steps between checkpoints
   eval_trials_per_load: 200                # Phase 3 (A3, §3 MEASUREMENT): n>=200/load during training;
                                             # CI half-width +/-0.042 at p=0.90, vs. +/-0.093 at the old n=40

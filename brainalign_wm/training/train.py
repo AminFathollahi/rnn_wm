@@ -63,7 +63,9 @@ procedure:
         `apply_update` is the *fraction of ticks whose greedy action
         matched the ideal target action* -- a denser, smoother proxy than
         bare correct/incorrect.
-      * **ramp + target** (remaining steps): BPTT cells switch to
+      * **load2 (Phase 12.5 lever 3, optional, width 0 unless
+        `task.curriculum.load2_steps` is set) + ramp + target** (remaining
+        steps): BPTT cells switch to
         REINFORCE with a value baseline, backpropagated through time, on
         the trial's real sparse end-of-trial reward -- the same reward
         local-learning cells have always used. Policy-gradient terms are

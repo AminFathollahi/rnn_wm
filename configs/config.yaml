@@ -120,7 +120,12 @@ task:                                      # image-Sternberg working-memory task
                                              # maintain_steps. Was 10.
   maintain_steps: 25
   probe_steps: 10
-  lure_fraction: 0.3
+  lure_fraction: 0.2                        # Phase 12.5 NO-GO fallback lever 2 (comments.txt §12.5): lever 1
+                                             # (encode_steps 10->15) did not fix S=0's collapse (still frozen
+                                             # train_loss/chance accuracy at 200k steps). Lever 2 lowers the
+                                             # ramp/target lure-distractor pressure (curriculum.py's ramp phase
+                                             # interpolates 0 -> this value; target phase uses it directly).
+                                             # Was 0.3.
   n_categories: 4
   categories: [faces, animals, objects, places]
   identity_catch_fraction: 0.0              # §7.1/§9.4a: fraction of trials replacing the probe with an

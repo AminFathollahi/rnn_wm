@@ -167,16 +167,41 @@ class _MetricsLogger:
         "joules_cumulative",  # mJ since training start (pynvml); "" if pynvml/GPU energy counter unavailable
     ]
 
-    def __init__(self, run_id: str):
+    def __init__(self, run_id: str, resume: bool = False):
         self.path = ROOT / "results" / "metrics" / f"{run_id}.csv"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "w", newline="")
+        # A resumed run (comments.txt §16 item 16.1) must not truncate the
+        # accuracy trace Gate B is derived from: append when the caller
+        # tells us this is a genuine resume (a checkpoint was restored) and
+        # the file already has rows. Gated on `resume`, not merely on the
+        # file's existence -- a fresh run (no checkpoint) must still start a
+        # clean trace even if a stale CSV from an earlier aborted run is
+        # sitting on disk, exactly as it did before this fix.
+        resuming = resume and self.path.exists() and self.path.stat().st_size > 0
+        self._last_step = None
+        if resuming:
+            with open(self.path, "r", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+            if rows:
+                self._last_step = int(rows[-1]["step"])
+        self._fh = open(self.path, "a" if resuming else "w", newline="")
         self._writer = csv.DictWriter(self._fh, fieldnames=self.FIELDNAMES)
-        self._writer.writeheader()
+        if not resuming:
+            self._writer.writeheader()
 
     def log(self, row: dict) -> None:
+        # Duplicate guard at the resume boundary: with this repo's config
+        # (eval_every a multiple of checkpoint_every) the resume step is
+        # always >= the last logged step, so this never fires today -- kept
+        # anyway because that relationship is a config invariant, not a code
+        # guarantee, and the guard is one cheap comparison.
+        step = row.get("step")
+        if self._last_step is not None and step is not None and step <= self._last_step:
+            return
         self._writer.writerow({k: row.get(k, "") for k in self.FIELDNAMES})
         self._fh.flush()
+        if step is not None:
+            self._last_step = step
 
     def close(self) -> None:
         self._fh.close()
@@ -1584,7 +1609,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # F3: absolute, from config -- NOT a fraction of total_steps. See the
     # `train.eval_every` comment in configs/config.yaml for why.
     eval_every = int(t_cfg.get("eval_every", max(500, total_steps // 30)))
-    metrics_logger = _MetricsLogger(run_id)
+    metrics_logger = _MetricsLogger(run_id, resume=ckpt_path.exists())
 
     # Phase 2 item 2.4: GPU energy via pynvml, if available. Init once (not
     # per log call) and print the unavailable-fallback message once, not on

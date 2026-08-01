@@ -3223,3 +3223,38 @@ comments.txt §13.4 hold gatedness/initialization/training-signal apart.
 ACCEPTANCE: the diff, both new tests passing, full pytest at 0 failures
 (output above), and a resolved config showing all three keys explicitly
 (output above).
+
+================================================================================
+Pilot runner: --supervision and recurrent-init CLI args (comments.txt item 13.4, runner change)
+================================================================================
+
+`scripts/run_phase11_pilot.py` gains `--supervision {legacy,SUP,RL}` and
+`--recurrent-init-spectral-radius`, both written into the run dict, and a
+`--diagnostic` flag that switches to a self-documenting `run_id`
+(`VANFLAT`/`VANHIER` + `INITnnn` + the signal, e.g. `VANFLAT_INIT100_SUP_s0`)
+instead of the historical `M{s}0000_pilot_{substrate}_s{seed}`. Without
+`--diagnostic`, naming and behavior are byte-for-byte unchanged from before
+this item -- confirmed by re-deriving the naming branch for the original
+invocation (`--s 0 --seed 0` -> `M00000_pilot_vanilla_s0`, matching exactly).
+`build_resolved_config` is now always called with `run=run` (already wired
+in item 13.3), so every invocation's resolved config explicitly shows
+`train.supervision` even on the historical naming path -- closing the same
+omission the 2026-08-01 audit found in the existing
+`results/resolved_config_phase11_pilot_vanilla_s0.yaml`.
+
+VERIFIED (naming logic re-derived standalone, no manifest/checkpoint writes):
+```
+['--s', '0', '--seed', '0'] -> M00000_pilot_vanilla_s0
+['--s', '0', '--seed', '0', '--diagnostic'] -> VANFLAT_INIT062_LEGACY_s0
+['--s', '0', '--seed', '0', '--diagnostic', '--recurrent-init-spectral-radius', '1.0'] -> VANFLAT_INIT100_LEGACY_s0
+['--s', '0', '--seed', '0', '--diagnostic', '--supervision', 'SUP'] -> VANFLAT_INIT062_SUP_s0
+['--s', '0', '--seed', '0', '--diagnostic', '--supervision', 'SUP', '--recurrent-init-spectral-radius', '1.0'] -> VANFLAT_INIT100_SUP_s0
+['--s', '1', '--seed', '0', '--diagnostic', '--recurrent-init-spectral-radius', '1.0'] -> VANHIER_INIT100_LEGACY_s0
+```
+All five match comments.txt §13.4's specified run_ids exactly.
+
+`$PY -m pytest -q`: exit 0 (no test file touched by this item; verified the
+full suite still passes).
+
+ACCEPTANCE: the diff, the five derived run_ids matching spec exactly
+(output above), and full pytest at 0 failures.

@@ -36,6 +36,21 @@ this pilot's result for it.
 Usage:
   python scripts/run_phase11_pilot.py --s 0 --seed 0
   python scripts/run_phase11_pilot.py --s 1 --seed 0
+
+INIT/SUPERVISION DIAGNOSTIC (comments.txt §13.4): `--supervision` and
+`--recurrent-init-spectral-radius` isolate, respectively, the training
+signal and the vanilla recurrent init's spectral radius -- both left
+implicit in the original pilot above, and both flagged by the 2026-08-01
+advisor audit as alternative sufficient causes of the flat-vanilla NO-GO.
+`--diagnostic` switches to a self-documenting `run_id` encoding structure,
+init, and signal (e.g. `VANFLAT_INIT100_SUP_s0`) instead of the historical
+`M{s}0000_pilot_{substrate}_s{seed}`; without it, the original command
+above always resumes/reproduces exactly, regardless of what `--supervision`/
+`--recurrent-init-spectral-radius` happen to be set to.
+
+Usage:
+  python scripts/run_phase11_pilot.py --s 0 --seed 0 --diagnostic \
+      --supervision SUP --recurrent-init-spectral-radius 1.0
 """
 from __future__ import annotations
 
@@ -63,6 +78,18 @@ def main(argv=None) -> int:
     ap.add_argument("--steps", type=int, default=PILOT_STEPS)
     ap.add_argument("--substrate", choices=["vanilla", "gru"], default="vanilla",
                     help="F1: Stage 1 (which this pilot gates) is the vanilla tanh RNN, §4")
+    ap.add_argument("--supervision", choices=["legacy", "SUP", "RL"], default="legacy",
+                    help="training signal; 'legacy' (this script's own default) preserves the original "
+                         "pilot's exact behavior -- CE during warmup only, REINFORCE after")
+    ap.add_argument("--recurrent-init-spectral-radius", type=float, default=None,
+                    help="vanilla recurrent init override; omitted (default) preserves the existing "
+                         "uniform(-1/sqrt(H),1/sqrt(H)) draw, whose spectral radius measures ~0.616 at H=128")
+    ap.add_argument("--diagnostic", action="store_true",
+                    help="use the self-documenting VANFLAT/VANHIER_INITnnn_SIGNAL_s{seed} run_id (comments.txt "
+                         "§13.4) instead of the historical M{s}0000_pilot_{substrate}_s{seed} -- pass this even "
+                         "for a diagnostic arm whose values happen to match the historical defaults (the "
+                         "current-init/legacy control), so it gets its own run_id rather than colliding with "
+                         "the original pilot's")
     ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     args = ap.parse_args(argv)
 
@@ -72,20 +99,34 @@ def main(argv=None) -> int:
     import yaml
 
     full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
-    # run_id carries the substrate: the invalid GRU pilot already occupies
-    # `M{s}0000_pilot_s{seed}` in the manifest and its checkpoints are still
-    # on disk (needed for F5's at-criterion-vs-max_steps geometry check), so
-    # a re-run must not resume from them or overwrite them.
-    model_id = f"M{args.s}0000_pilot_{args.substrate}"
+    if not args.diagnostic:
+        # run_id carries the substrate: the invalid GRU pilot already
+        # occupies `M{s}0000_pilot_s{seed}` in the manifest and its
+        # checkpoints are still on disk (needed for F5's
+        # at-criterion-vs-max_steps geometry check), so a re-run must not
+        # resume from them or overwrite them.
+        model_id = f"M{args.s}0000_pilot_{args.substrate}"
+        resolved_config_name = f"phase11_pilot_{args.substrate}_s{args.s}"
+    else:
+        # Diagnostic naming (comments.txt §13.4): self-documenting so the
+        # manifest never needs a side table to say what a row varied.
+        structure_label = "VANFLAT" if args.s == 0 else "VANHIER"
+        radius = args.recurrent_init_spectral_radius
+        init_label = "INIT062" if radius is None else f"INIT{round(radius * 100):03d}"
+        model_id = f"{structure_label}_{init_label}_{args.supervision.upper()}"
+        resolved_config_name = f"{model_id.lower()}_s{args.seed}"
+    run_id = f"{model_id}_s{args.seed}"
     run = {
         "model_id": model_id, "S": args.s, "M": 0, "P": 0, "T": 0, "D": 0,
-        "substrate": args.substrate,
-        "seed": args.seed, "run_id": f"{model_id}_s{args.seed}",
+        "substrate": args.substrate, "supervision": args.supervision,
+        "seed": args.seed, "run_id": run_id,
     }
+    if args.recurrent_init_spectral_radius is not None:
+        run["recurrent_init_spectral_radius"] = args.recurrent_init_spectral_radius
     cfg = {"steps": args.steps}
     resolved_cfg = build_resolved_config(full_cfg, full_cfg.get("tiers", {}).get("full", {}), "full", run=run)
     cfg_hash = config_hash(resolved_cfg)
-    resolved_config_path(f"phase11_pilot_{args.substrate}_s{args.s}").write_text(
+    resolved_config_path(resolved_config_name).write_text(
         yaml.safe_dump(resolved_cfg, sort_keys=True)
     )
 

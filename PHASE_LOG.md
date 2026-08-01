@@ -2959,3 +2959,90 @@ accuracy trace summaries (table + prose above), final accuracy per load
 with Wilson 95% CI and human percentiles (table above), ms/step (final
 measurement, above), and the verdict: **NO-GO (lever 4); all four
 comments.txt SS12.5 fallback levers exhausted.**
+
+================================================================================
+Gate A inclusion fixed to require holding at the max-steps checkpoint
+(comments.txt item 13.1)
+================================================================================
+
+THE DEFECT. `train_one`'s `matched` flag (`brainalign_wm/training/train.py`)
+was computed from `milestone_reached`, which latches the first time a
+criterion's consecutive-eval streak confirms and never re-evaluates
+afterward. Because every geometry analysis reads the `max_steps` checkpoint,
+a run that confirmed Gate A early and then collapsed was still reported
+`matched: true` with chance behaviour at the checkpoint actually being
+analysed. Confirmed in the existing record: `results/manifest.jsonl`, run
+`M10000_pilot_vanilla_s0` (`config_hash e7b15e33d8a7`), has
+`steps_to_load1_0.83: 14000`, `matched: true`, and a final held-out
+`load1 = 0.470 [0.427, 0.514]`.
+
+THE FIX. Added a second, unlatched streak counter (`criterion_consecutive`)
+that tracks, per criterion key, the number of consecutive periodic
+evaluations immediately preceding (and including) the final one that clear
+the threshold -- reset to zero on any eval that falls below it. `matched` is
+now `all(criterion_consecutive[k] >= consecutive_evals_required for k in
+criterion)`, i.e. "holds and is sustained at the checkpoint geometry reads,"
+not "was ever reached." The pre-existing `milestone_reached`/
+`milestone_consecutive` machinery, and the `steps_to_<key>_<threshold>`
+efficiency DV it backs, are untouched -- they still record the first
+confirming streak even if the run later collapses, exactly as designed.
+
+TEST ADDED: `tests/test_training.py::test_matched_requires_criterion_to_hold_at_final_checkpoint_not_just_ever`.
+Stub accuracy trace clears load1>=0.83 for evaluations 1-3 (confirming the
+milestone at step 6) then drops to chance for evaluations 4-5 (steps 8, 10).
+Asserts `steps_to_load1_0.83 == 6` (unchanged) and `matched is False` (changed
+from the old ever-reached definition, which would have reported `True`).
+
+ACTUAL OUTPUT:
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q tests/test_training.py -k "matched or milestone" -v
+.....                                                                    [100%]
+5 passed, 27 deselected in 11.20s
+$ echo $?
+0
+$ $PY -m pytest -q
+........................................................................ [ 24%]
+........................................................................ [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+.........                                                                [100%]
+(exit code 0; the pytest run prints no "N passed" summary line for the full
+suite, so the exit code is the check, per comments.txt's own noted gotcha)
+```
+
+AUDIT NOTE -- existing manifest rows, recomputed under the new definition.
+Every `pilot_vanilla` run in `results/manifest.jsonl` was checked. The
+S=0 (`M00000`) rows never crossed 0.83 under either definition (`matched`
+stays `False` throughout every lever). Among the S=1 (`M10000`) rows that
+were `matched: true` under the old ever-reached definition:
+
+| run_id | config_hash | lever | old `matched` | recomputed `matched` | basis |
+|---|---|---|---|---|---|
+| M10000_pilot_vanilla_s0 | e7b15e33d8a7 | 3 (load2 stage) | True | **False** | exact: recomputed from `results/metrics/M10000_pilot_vanilla_s0_lever3_nogo.csv`'s full 100-eval trace -- streak confirms at step 14000 but the last 3 evals before step 200000 do not all hold (final held-out `load1=0.470`) |
+| M10000_pilot_vanilla_s0 | f37ead202e9d | 4 (maintain_steps, current) | True | True (unchanged) | exact: recomputed from `results/metrics/M10000_pilot_vanilla_s0.csv` -- streak confirms at step 14000 and the last 3 evals before step 200000 all hold (final held-out `load1=0.906`) |
+| M10000_pilot_vanilla_s0 | 03374ddc8c1b | 0 (pre-lever pilot) | True (steps_to_load1_0.83=20000) | not exactly recomputable -- see note | final held-out `load1=0.842` is consistent with holding but is not the periodic-eval trace |
+| M10000_pilot_vanilla_s0 | 17ae13717b3e | 1 (encode_steps, real relaunch row) | True (steps_to_load1_0.83=38000) | not exactly recomputable -- see note | final held-out `load1=0.948` is consistent with holding but is not the periodic-eval trace |
+
+DATA-LIMITATION NOTE: `results/metrics_archive/M00000_pilot_vanilla_s0_lever0_nogo.csv`,
+`M10000_..._lever0_nogo.csv`, and the matching `_lever1_nogo.csv` files
+contain only their header row -- the periodic-eval trace for the pre-lever
+pilot and for lever 1's real (post-relaunch) run was not preserved, so
+`matched` cannot be exactly recomputed for those two rows the way it was for
+levers 3 and 4. This is a pre-existing gap in those two archived files, not
+something introduced by this fix; flagging it here rather than silently
+treating the un-recomputable rows as unchanged. The final held-out accuracy
+recorded in the manifest for both (0.842, 0.948) is comfortably consistent
+with `matched` remaining `True`, but that is a large-n single evaluation at
+the same checkpoint, not the 3-consecutive-periodic-eval trace the new
+definition actually requires, so it is reported as a consistency check, not
+a recomputation.
+
+Per §9/N9, existing manifest rows are not rewritten -- they remain the
+provenance record of what was reported under the old definition. This note
+is the correction going forward: any future report citing these rows must
+use the recomputed value where given above.
+
+ACCEPTANCE: diff to `brainalign_wm/training/train.py`, new regression test
+passing (output above), full `pytest -q` exit 0 (output above), and the
+audit table above.

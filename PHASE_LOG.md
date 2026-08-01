@@ -3418,3 +3418,133 @@ THEN STOP, per comments.txt §13.5's closing instruction: do not launch Stage
 and do not set Gate B (`gates.max_steps`). Report to the user that the GRU
 route (§12.6/§12.7) is now live pending their approval, with the qualification
 above about what is and is not demonstrated.
+
+================================================================================
+The missing arm: flat GRU trained to convergence (comments.txt item 14.1/14.2)
+================================================================================
+
+Item 14.1 -- run_id labeling fix: `build_diagnostic_model_id` extracted out of
+`run_phase11_pilot.py::main` into its own function so it can be unit-tested
+directly. Non-vanilla diagnostic runs now drop the `INITnnn` segment entirely
+instead of inheriting the vanilla default, since `--recurrent-init-spectral-
+radius` is inert on the GRU path in `_build_model` -- carrying it forward
+would misstate a vanilla-only measurement as if it applied to a different
+substrate (`FLATGRU_LEGACY_s0`, not `FLATGRU_INIT062_LEGACY_s0`). New test
+`tests/test_phase11_pilot_naming.py` asserts both the vanilla path (keeps the
+`INITnnn` segment) and the GRU path (omits it); no pre-existing test covered
+this naming function before now.
+
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q tests/test_phase11_pilot_naming.py
+..                                                                      [100%]
+(exit 0)
+```
+
+Item 14.2 -- the flat GRU arm, launched after `make verify-gpu` confirmed the
+RTX 5070 Ti Laptop GPU free and a manifest check confirmed no `run_id`
+collision:
+
+```
+$PY scripts/run_phase11_pilot.py --s 0 --substrate gru --supervision legacy \
+    --seed 0 --steps 40000 --diagnostic
+```
+
+RESULT (final held-out accuracy at the 40,000-step ceiling, Wilson 95% CI,
+`n=200`/load), alongside the three §13.4 arms it directly contrasts with:
+
+| run_id | structure | substrate | signal | matched | Gate A (load1>=0.83 x3) | step of Gate A | load1 | load2 | load3 | ms/step | wall_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| VANFLAT_INIT100_LEGACY_s0 | flat | vanilla (radius 1.0) | legacy | false | never | -- | 0.530 [0.486,0.573] | 0.462 [0.419,0.506] | 0.462 [0.419,0.506] | 100.2 | 4409.9 |
+| VANHIER_INIT100_LEGACY_s0 | hierarchical | vanilla (radius 1.0, ungated) | legacy | **true** | yes | 14,000 | 0.910 [0.882,0.932] | 0.858 [0.825,0.886] | 0.794 [0.756,0.827] | 98.9 | 4793.7 |
+| **FLATGRU_LEGACY_s0** | flat | **GRU (gated)** | legacy | **true** | yes | **6,000** | **0.984 [0.969,0.992]** | **0.928 [0.902,0.948]** | **0.900 [0.871,0.923]** | 101.7 | 3957.2 |
+
+Off-chance detector (load1>=0.65 x3 within 40,000 steps): fired trivially --
+FLATGRU_LEGACY_s0 cleared the much higher real Gate A bar (load1>=0.83 x3) at
+step 6,000, 2.3x faster than VANHIER's own Gate-A step (14,000) and to a
+higher final accuracy at every load. Train-loss trace: dropped from warmup
+levels to nearly zero (-0.0006 to 0.0006, noise-floor) by step ~22,000 and
+stayed there -- the opposite of every flat-vanilla arm's frozen-at-chance
+trace, and a faster, cleaner drop than VANHIER's. Human percentiles:
+load1=0.576, load2=0.714, load3=0.667 (all mid-range, unlike VANFLAT's floor
+percentiles). PRE-SPECIFIED CONTINGENCY (extend to 80,000 steps if the
+detector didn't fire but the trace showed upward movement): not triggered --
+the detector fired decisively well before the 40,000-step ceiling, so the run
+was accepted at 40,000 steps as planned.
+
+ACCEPTANCE: the manifest row for `FLATGRU_LEGACY_s0` (`results/manifest.jsonl`,
+`config_hash=52e99c3127f0...`, `git=2eee348`, `status=completed`), the
+comparison table above (all three run_ids' manifest rows cross-checked
+directly, not transcribed from memory), and the naming-fix test in item 14.1.
+
+================================================================================
+Verdict: gating alone is sufficient, independent of hierarchical structure (comments.txt item 14.3)
+================================================================================
+
+SCOPE: this verdict applies to S=0 (flat), M=P=T=D=0, H=128, visual Sternberg
+under the current four-lever task calibration, `legacy` supervision, seed 0,
+a 40,000-step ceiling, and the GRU substrate's own (untouched) recurrent
+initialization -- the same scope §13.4/13.5 used for the vanilla arms, with
+substrate as the one remaining free variable. It is a single-seed result.
+
+VERDICT AGAINST THE TWO NAMED BRANCHES (comments.txt §14):
+
+  (a) Gating alone is sufficient, independent of hierarchical structure:
+      **CONFIRMED.** `FLATGRU_LEGACY_s0` is flat (S=0, no manager/worker
+      split, no multi-timescale path) and gated (GRU), and it clears Gate A
+      at step 6,000 -- earlier and to higher final accuracy at every load
+      (0.984/0.928/0.900) than the fully ungated hierarchical control
+      `VANHIER_INIT100_LEGACY_s0` (step 14,000; 0.910/0.858/0.794), which was
+      itself the only arm that had previously rescued learning on this task
+      config. Structure is therefore not necessary for the rescue: gating by
+      itself, with no hierarchical/multi-timescale structure at all, is
+      sufficient.
+  (b) Gating alone is insufficient without hierarchical structure: REJECTED
+      by the same data.
+
+This resolves the open question D17/§7a's gatedness row left standing after
+§13.4: §13.4 showed flat *vanilla* fails at every tested init and signal, and
+that hierarchy alone rescues flat vanilla's failure -- but its own positive
+control was fully ungated, so it could not by itself show whether gating
+would *also* rescue a flat (non-hierarchical) arm if one were actually
+trained. §14.2 is that missing arm. With both `VANHIER_INIT100_LEGACY_s0`
+(ungated, hierarchical, rescues) and `FLATGRU_LEGACY_s0` (gated, flat,
+rescues -- faster and better) now on record against the common failing
+baseline (`VANFLAT_INIT100_LEGACY_s0`, ungated, flat, chance), gating and
+hierarchy are each independently demonstrated sufficient; the diagnostic no
+longer needs to treat them as an unresolved confound. This does not test
+whether they are jointly synergistic, whether GRU-hierarchical would do
+better still, or the two remaining substrate/supervision combinations
+(GRU x SUP, GRU x RL) -- none of those were run and none are claimed here.
+
+ARM G identified: `FLATGRU_LEGACY_s0` (`config_hash=52e99c3127f0...`,
+`git=2eee348`). Per comments.txt §14.3, this licenses the GRU-substrate route
+for Stage 1 **by mechanism** -- the confound §7a's gatedness row flagged is
+resolved, not merely narrowed. It does **not** itself authorize launching
+Stage 1 on GRU: `scripts/run_stage1_grid.py` remains vanilla-hardcoded and
+untouched, and Gate B (`gates.max_steps`) remains unset, pending the user's
+explicit decision on which substrate Stage 1 should use.
+
+DOCUMENTATION updated in this commit: `advisor.md` (new dated §7b entry;
+D17 and the §7a gatedness row updated in place with this verdict marked as
+resolving, not erasing, the prior "still unidentified" language; §9 first-
+actions list updated to point at the current decision point), `executor.md`
+(brought current with the full 14.1-14.3 session). `references.md`: no new
+source was consulted for this item: the existing Lei et al. citation already
+covers the gatedness contrast this arm tests, so no addition was made.
+
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q
+(full suite; exit 0)
+```
+
+ACCEPTANCE: the verdict paragraphs above, the updated documents (this
+commit), and full pytest at 0 failures (output above).
+
+THEN STOP, per comments.txt §14.3's closing instruction: do not launch Stage
+1, `run_stage1_grid.py`, `run_geometry.py`, or `brainalign_wm.analysis.run_all`,
+and do not set Gate B (`gates.max_steps`). Report to the user that gating
+alone is now confirmed sufficient (Arm G identified) and that a GRU-substrate
+Stage 1 is licensed by mechanism but requires their explicit go-ahead to
+launch.

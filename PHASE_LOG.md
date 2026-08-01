@@ -3548,3 +3548,132 @@ and do not set Gate B (`gates.max_steps`). Report to the user that gating
 alone is now confirmed sufficient (Arm G identified) and that a GRU-substrate
 Stage 1 is licensed by mechanism but requires their explicit go-ahead to
 launch.
+
+================================================================================
+The three missing cells: flat GRU under Stage 1's real supervision levels, plus the completing vanilla/RL cell (comments.txt item 15.1)
+================================================================================
+
+comments.txt §15 found that `run_stage1_grid.py::STAGE1_CELLS` restricts
+Stage 1's factorial to `supervision {SUP, RL}`, while every §13/§14 arm
+(including `FLATGRU_LEGACY_s0`, the arm that showed gating alone is
+sufficient) was trained under `legacy` — a third, pre-Phase-7 hybrid signal
+outside that factorial. Coverage before this item:
+
+    | substrate | legacy | SUP    | RL      |
+    |-----------|--------|--------|---------|
+    | vanilla   | NO-GO  | NO-GO  | untested |
+    | gru       | GO     | untested | untested |
+
+Confirmed `$PY -m pytest -q` clean (exit 0) and `make verify-gpu` clean
+before touching anything, per §15.0. Checked `results/manifest.jsonl` for a
+run_id collision on each of the three expected names (none). Launched
+concurrently, same 40,000-step ceiling and seed 0 as every §13/§14 arm:
+
+```
+$PY scripts/run_phase11_pilot.py --s 0 --substrate gru --supervision SUP --seed 0 --steps 40000 --diagnostic
+$PY scripts/run_phase11_pilot.py --s 0 --substrate gru --supervision RL --seed 0 --steps 40000 --diagnostic
+$PY scripts/run_phase11_pilot.py --s 0 --substrate vanilla --supervision RL --seed 0 --steps 40000 --recurrent-init-spectral-radius 1.0 --diagnostic
+```
+
+Each log header confirmed the expected run_id: `FLATGRU_SUP_s0`,
+`FLATGRU_RL_s0`, `VANFLAT_INIT100_RL_s0`. All three ran to the full
+40,000-step ceiling.
+
+RESULT (final held-out accuracy at the 40,000-step ceiling, Wilson 95% CI,
+`n=200`/load):
+
+| run_id | substrate | signal | matched | Gate A (load1>=0.83 x3) | step of Gate A | load1 | load2 | load3 | ms/step | wall_s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **FLATGRU_SUP_s0** | GRU (gated) | SUP | **true** | yes | **6,000** | **1.0 [0.9924,1.0]** | **0.982 [0.9661,0.9905]** | **0.946 [0.9226,0.9626]** | 112.99 | 4531.7 |
+| **FLATGRU_RL_s0** | GRU (gated) | RL | **true** | yes | **14,000** | **0.946 [0.9226,0.9626]** | **0.948 [0.9249,0.9643]** | **0.89 [0.8595,0.9145]** | 111.02 | 4466.9 |
+| VANFLAT_INIT100_RL_s0 | vanilla (radius 1.0) | RL | false | never | -- | 0.48 [0.4365,0.5238] | 0.534 [0.4902,0.5773] | 0.542 [0.4982,0.5852] | 100.81 | 4006.8 |
+
+Off-chance detector (load1>=0.65 x3 within 40,000 steps): moot for both GRU
+arms -- they cleared the much higher real Gate A bar directly, at steps
+6,000 and 14,000 respectively. `VANFLAT_INIT100_RL_s0` never fires the
+detector: train-loss trace is flat at ~0.1156-0.1168 across the entire
+40,000 steps, and the highest load1 *training* accuracy observed at any
+point in the run is 0.59 (single-step noise, not a sustained crossing) --
+the same frozen-at-chance shape as every other flat-vanilla arm in this
+study. PRE-SPECIFIED CONTINGENCY (extend an arm to 80,000 steps if its
+detector doesn't fire but its trace shows visible upward movement unlike
+the §13.4 frozen-at-chance flat-vanilla arms): not triggered for any of the
+three arms -- the two GRU arms cleared decisively well before the ceiling,
+and the vanilla arm's trace is flat within noise, not trending up.
+
+ACCEPTANCE: the manifest rows for `FLATGRU_SUP_s0`
+(`config_hash=31cf1f8bcc2a...`), `FLATGRU_RL_s0`
+(`config_hash=a744d26166c8...`), and `VANFLAT_INIT100_RL_s0`
+(`config_hash=b7d9db91b948...`), all `git=be9d42b`, `status=completed`
+(`results/manifest.jsonl`), the comparison table above (all three run_ids'
+manifest rows cross-checked directly, not transcribed from memory), and the
+per-arm metrics CSVs (`results/metrics/{FLATGRU_SUP_s0,FLATGRU_RL_s0,VANFLAT_INIT100_RL_s0}.csv`).
+
+================================================================================
+Verdict: gating's rescue generalizes across Stage 1's real supervision levels (comments.txt item 15.2)
+================================================================================
+
+SCOPE: this verdict applies to S=0 (flat), M=P=T=D=0, H=128, visual
+Sternberg under the current task calibration, seed 0, a 40,000-step
+ceiling -- the same scope §13.4/13.5/14.3 used, with supervision as the one
+newly-varied factor relative to §14. It is a single-seed result per cell.
+
+VERDICT AGAINST THE NAMED BRANCHES (comments.txt §15.2):
+
+  (a) Both `FLATGRU_SUP_s0` and `FLATGRU_RL_s0` clear the detector or Gate
+      A: **CONFIRMED**, and more strongly than the branch required -- both
+      clear real Gate A directly (load1>=0.83, 3 consecutive evals), not
+      just the weaker off-chance detector. Gating's rescue generalizes
+      across both of Stage 1's real supervision levels (`SUP`, `RL`), not
+      just `legacy`. D21's applicability gap is closed: the GRU-substrate
+      Stage 1 recommendation is now evidence-backed under the regimes it
+      will actually run. Stated plainly as the recommendation; not acted on
+      -- `run_stage1_grid.py`'s hardcoded substrate and Gate B both still
+      require the user's explicit sign-off (D14).
+  (b) One or both GRU arms stay at or near chance: not the observed
+      outcome; no new crack (N4) to name here.
+
+  Separately, on `VANFLAT_INIT100_RL_s0`: it stays at chance (load1=0.48),
+  the same as `legacy` and `SUP` before it. This is the expected outcome
+  §15.2 named (a third NO-GO consistent with the other two signals), not
+  the surprise branch -- it is not folded into a new finding, and it
+  completes 3-for-3 vanilla NO-GO coverage across every supervision signal
+  tested in this study.
+
+CONSEQUENCE: a GRU-substrate Stage 1 is now recommended by mechanism (§14:
+gating alone, independent of hierarchical structure, is sufficient) and by
+regime-matched evidence (§15: that sufficiency holds under both of Stage
+1's actual supervision levels). This is **not** itself an authorization:
+`scripts/run_stage1_grid.py` remains vanilla-hardcoded and untouched, Gate B
+(`gates.max_steps`) remains unset, and no Stage 1, `run_geometry.py`, or
+`brainalign_wm.analysis.run_all` launch happened or is authorized by this
+entry. A closed evidence gap is not the same as the user's sign-off.
+
+DOCUMENTATION updated in this commit: `executor.md` (15.1 launch record,
+15.2 verdict, current-status and next-check-in sections brought current).
+Per explicit user instruction this round, `advisor.md` was **not**
+touched -- advisor notes are maintained by the advisor, not the executor;
+the verdict is recorded here and in `executor.md` instead. `references.md`:
+no new source was consulted for this item.
+
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q
+........................................................................ [ 23%]
+........................................................................ [ 47%]
+........................................................................ [ 71%]
+........................................................................ [ 95%]
+...............                                                          [100%]
+(331 dots, 0 F/E markers, exit 0)
+```
+
+ACCEPTANCE: the verdict paragraphs above, the updated documents (this
+commit), and full pytest at 0 failures (output above).
+
+THEN STOP, per comments.txt §15.2's closing instruction: do not launch
+Stage 1, `run_stage1_grid.py`, `run_geometry.py`, or
+`brainalign_wm.analysis.run_all`, and do not set Gate B (`gates.max_steps`).
+Report to the user that both untested GRU cells clear real Gate A under
+Stage 1's own supervision levels, that D21's applicability gap is closed,
+and that a GRU-substrate Stage 1 is recommended but requires their explicit
+go-ahead to launch.

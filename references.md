@@ -73,6 +73,11 @@ published analogue of what this repo is building.
 
 - The **80/20 E/I split** used by `model.dale_ei_split` — arm **D**.
 - 100–150 unit networks; second parameter anchor.
+- Alongside Yang et al. (2019) above: the natural anchor for the dense
+  per-tick supervised (`SUP`) training regime and a near-unit recurrent-init
+  spectral radius, used as the two isolated variables in `comments.txt`
+  §13.4's vanilla init x supervision diagnostic (advisor.md §7b, 2026-08-01)
+  — it decided which two confounds to test, not the diagnostic's outcome.
 
 ---
 

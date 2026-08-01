@@ -83,8 +83,7 @@ def main(argv=None) -> int:
         "seed": args.seed, "run_id": f"{model_id}_s{args.seed}",
     }
     cfg = {"steps": args.steps}
-    resolved_cfg = build_resolved_config(full_cfg, full_cfg.get("tiers", {}).get("full", {}), "full",
-                                         model_overrides={"substrate": args.substrate})
+    resolved_cfg = build_resolved_config(full_cfg, full_cfg.get("tiers", {}).get("full", {}), "full", run=run)
     cfg_hash = config_hash(resolved_cfg)
     resolved_config_path(f"phase11_pilot_{args.substrate}_s{args.s}").write_text(
         yaml.safe_dump(resolved_cfg, sort_keys=True)

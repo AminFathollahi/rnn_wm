@@ -18,7 +18,13 @@ import torch.nn as nn
 
 
 class VanillaRNNCell(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        mask: Optional[torch.Tensor] = None,
+        recurrent_init_spectral_radius: Optional[float] = None,
+    ):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -32,11 +38,25 @@ class VanillaRNNCell(nn.Module):
             self.register_buffer("mask", mask)
         else:
             self.mask = None
+        # `None` (the default) leaves the uniform(-1/sqrt(H), 1/sqrt(H)) draw
+        # above untouched -- every existing checkpoint, test, and result
+        # depends on that being bit-identical. A target radius rescales
+        # `weight_hh` in place, computed on the EFFECTIVE (mask-applied)
+        # matrix, since that is what the forward/backward pass actually use.
+        if recurrent_init_spectral_radius is not None:
+            self._rescale_recurrent_spectral_radius(recurrent_init_spectral_radius)
 
     def reset_parameters(self) -> None:
         std = 1.0 / (self.hidden_dim ** 0.5)
         nn.init.uniform_(self.weight_ih, -std, std)
         nn.init.uniform_(self.weight_hh, -std, std)
+
+    def _rescale_recurrent_spectral_radius(self, target: float) -> None:
+        with torch.no_grad():
+            effective = self.weight_hh if self.mask is None else self.weight_hh * self.mask
+            radius = torch.linalg.eigvals(effective).abs().max().item()
+            if radius > 1e-12:
+                self.weight_hh.mul_(target / radius)
 
     def init_state(self, batch_size: int, device=None) -> torch.Tensor:
         """Same interface/return shape as `_GatedFlatCore.init_state` --

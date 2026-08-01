@@ -232,6 +232,7 @@ class VanillaHRLCore(nn.Module):
         pool_block: int = 2,
         mask_seed: int = 0,
         manager_every_tick: bool = False,
+        recurrent_init_spectral_radius: Optional[float] = None,
     ):
         super().__init__()
         gh, gw = grid
@@ -247,9 +248,15 @@ class VanillaHRLCore(nn.Module):
 
         mask = make_locality_mask(grid, density, seed=mask_seed)
         self.register_buffer("worker_mask", mask)
-        self.worker = VanillaRNNCell(input_dim + g_dim, worker_units, mask=mask)
+        # Applied to BOTH cells (D19/D20): leaving one arm's init implicit
+        # would just replace one confound with another.
+        self.worker = VanillaRNNCell(
+            input_dim + g_dim, worker_units, mask=mask, recurrent_init_spectral_radius=recurrent_init_spectral_radius,
+        )
         s_dim = self._pooled_dim()
-        self.manager = VanillaRNNCell(s_dim, manager_units, mask=None)
+        self.manager = VanillaRNNCell(
+            s_dim, manager_units, mask=None, recurrent_init_spectral_radius=recurrent_init_spectral_radius,
+        )
         self.g_proj = nn.Linear(manager_units, g_dim)
 
     _pooled_dim = HRLCore._pooled_dim

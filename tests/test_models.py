@@ -229,3 +229,35 @@ def test_pbwm_manager_cell_output_gate_not_r_driven():
     _, _, o_low = cell(x_t, h_prev, c_prev, R_t=torch.zeros(BATCH, 1))
     _, _, o_high = cell(x_t, h_prev, c_prev, R_t=torch.ones(BATCH, 1) * 10.0)
     assert torch.allclose(o_low, o_high), "output gate must not depend on R_t"
+
+
+from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
+
+
+def test_vanilla_rnn_cell_default_init_is_bit_identical_to_no_radius_arg():
+    """`recurrent_init_spectral_radius=None` (the default) must not change
+    the plain uniform(-1/sqrt(H), 1/sqrt(H)) draw at all -- every existing
+    checkpoint, test, and result depends on that."""
+    torch.manual_seed(0)
+    baseline = VanillaRNNCell(8, 16, mask=None)
+    torch.manual_seed(0)
+    explicit_none = VanillaRNNCell(8, 16, mask=None, recurrent_init_spectral_radius=None)
+    assert torch.equal(baseline.weight_hh, explicit_none.weight_hh)
+    assert torch.equal(baseline.weight_ih, explicit_none.weight_ih)
+
+
+def test_vanilla_rnn_cell_recurrent_init_spectral_radius_rescales_dense_and_masked():
+    """A requested radius must land within 0.05 of the target, computed on
+    the EFFECTIVE (mask-applied where present) matrix -- both for a dense
+    cell (mask=None) and a masked one (the hierarchical worker's case)."""
+    target = 1.0
+    torch.manual_seed(0)
+    dense = VanillaRNNCell(8, 16, mask=None, recurrent_init_spectral_radius=target)
+    dense_radius = torch.linalg.eigvals(dense.weight_hh).abs().max().item()
+    assert abs(dense_radius - target) < 0.05
+
+    mask = make_locality_mask((4, 4), density=0.5, seed=0)
+    torch.manual_seed(0)
+    masked = VanillaRNNCell(8, 16, mask=mask, recurrent_init_spectral_radius=target)
+    masked_radius = torch.linalg.eigvals(masked.weight_hh * mask).abs().max().item()
+    assert abs(masked_radius - target) < 0.05

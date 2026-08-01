@@ -3142,3 +3142,84 @@ exits 0 (no test file was touched by this item; the self-check lives in
 
 ACCEPTANCE: the table above, the self-check passing (output above), and the
 branch conclusion stated above, before item 13.4 runs.
+
+================================================================================
+Recurrent-init spectral radius becomes an explicit, logged variable
+(comments.txt item 13.3)
+================================================================================
+
+Every vanilla arm previously drew `weight_hh` from `uniform(-1/sqrt(H),
+1/sqrt(H))` with no way to vary or record its spectral radius -- the exact
+free parameter the advisor audit flagged as confounded with gatedness in
+the Phase 12.5 NO-GO. `VanillaRNNCell.__init__` now takes an optional
+`recurrent_init_spectral_radius`, applied by rescaling `weight_hh` in place
+after the existing draw, computed on the EFFECTIVE (mask-applied) matrix;
+`None` (the default) leaves the draw untouched. `VanillaHRLCore` threads
+the same parameter to both its worker and manager `VanillaRNNCell`s -- one
+arm's init could not be fixed without the other, per D19/D20.
+`configs/config.yaml` adds `model.recurrent_init_spectral_radius: null`.
+`train.py::train_one` folds a run-dict override into `full_cfg` at the same
+site as `substrate`/`flat_units`, and `_build_model` passes it to both
+vanilla paths.
+
+Separately (D20): `run_grid.py::build_resolved_config` now takes an
+optional `run` dict and always writes `model.substrate`,
+`model.recurrent_init_spectral_radius`, and `train.supervision` into the
+resolved config explicitly, using the same fallback order `train_one`
+itself uses -- so an omitted key can no longer silently inherit a config
+default the way it did twice already (F1's substrate omission, and the
+2026-08-01 audit's supervision omission). `scripts/run_phase11_pilot.py`
+now passes `run=run` to `build_resolved_config` instead of a one-off
+`model_overrides={"substrate": ...}` -- its resolved config will start
+recording `train.supervision` explicitly too. `scripts/run_stage1_grid.py`
+is untouched, per standing instruction (its `build_resolved_config` call
+keeps working unchanged since `run` defaults to `None`).
+
+TESTS ADDED (`tests/test_models.py`):
+- `test_vanilla_rnn_cell_default_init_is_bit_identical_to_no_radius_arg`:
+  same seed, with vs. without the new kwarg (both `None`) -> identical
+  `weight_hh`/`weight_ih`.
+- `test_vanilla_rnn_cell_recurrent_init_spectral_radius_rescales_dense_and_masked`:
+  target radius 1.0 achieved within 0.05 on both a dense cell (mask=None)
+  and a masked one (a locality mask, the hierarchical worker's case).
+
+ACTUAL OUTPUT:
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q tests/test_models.py -k "vanilla_rnn_cell" -v
+..                                                                       [100%]
+2 passed, 19 deselected in 0.68s
+$ $PY -m pytest -q
+(full suite; exits 0, no failures)
+```
+
+End-to-end verification (not training, just `_build_model` + a spectral-
+radius measurement on the resulting weights):
+```
+S=0 vanilla, radius override=1.0 -> measured 1.0000005960464478
+S=1 vanilla worker radius -> 1.000001311302185  manager radius -> 1.000002384185791
+S=0 vanilla, default init -> measured 0.6277236342430115
+```
+
+`build_resolved_config` with a representative run dict
+(`substrate=vanilla, supervision=SUP, recurrent_init_spectral_radius=1.0`):
+```
+model.substrate            = vanilla
+model.recurrent_init_spectral_radius = 1.0
+train.supervision           = SUP
+
+no run dict -> model.substrate            = gru
+no run dict -> model.recurrent_init_spectral_radius = None
+no run dict -> train.supervision           = legacy
+```
+(the no-run-dict case is every existing caller other than
+`run_phase11_pilot.py`, and reproduces the prior default output exactly.)
+
+`preregistration.md` amendment appended (2026-08-01): the Core battery's
+`uniform(-1/sqrt(H), +1/sqrt(H))` statement is unchanged; the new
+parameter is default-`None`, vanilla-substrate-only, and exists to let
+comments.txt §13.4 hold gatedness/initialization/training-signal apart.
+
+ACCEPTANCE: the diff, both new tests passing, full pytest at 0 failures
+(output above), and a resolved config showing all three keys explicitly
+(output above).

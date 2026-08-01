@@ -2852,3 +2852,110 @@ ACCEPTANCE: S=0's full flat trace and S=1's peak/collapse trace (both
 pasted above from the archived CSVs), the early-kill justification
 (joint condition: S=1 destabilized AND S=0 flat with zero benefit), and
 the verdict: **NO-GO (lever 2)**.
+
+LEVER 4 (`maintain_steps` 25 -> 15, stacked on levers 1-3: `encode_steps`=15,
+`lure_fraction`=0.2, `load2_steps`=8000) -- the last lever in the mandated
+fallback order. Directly shortens the full-BPTT horizon the ROOT CAUSE
+diagnosis (ungated-tanh vanishing gradient) points at, rather than changing
+what precedes it as levers 1-3 did. Config-scalar edit; commit db2b9be.
+`pytest -q tests/test_tasks.py`: 18 passed (no test hardcodes
+`maintain_steps=25`). Archived lever-3 checkpoints/metrics to
+`*_lever3_nogo`, relaunched both arms fresh (PIDs S=0=191772, S=1=191936;
+confirmed fresh `config_hash=f37ead202e9d...` via
+`results/resolved_config_phase11_pilot_vanilla_s0.yaml`, all four levers
+stacked). Both arms ran to the full 200,000-step ceiling.
+
+LEVER 4 RESULT (from `results/manifest.jsonl` last line per run_id,
+`final_evaluation`'s n=500 held-out eval, Wilson 95% CI; config_hash
+`f37ead202e9d...`):
+
+```
+run_id                    Gate A(load1>=0.83)  load1(CI)              load2(CI)              load3(CI)              human_pctile(L1/L2/L3)   ms/step  wall_clock_train_s
+M00000_pilot_vanilla_s0   False (never)         0.470 [0.427,0.514]   0.538 [0.494,0.581]    0.538 [0.494,0.581]    0.0  / 0.0    / 0.0        99.753   21097.5
+M10000_pilot_vanilla_s0   True  (step 14000)    0.906 [0.877,0.929]   0.856 [0.823,0.884]    0.828 [0.793,0.859]    0.207/ 0.238  / 0.381       101.104  23264.9
+```
+
+S=0's full trace (`results/metrics/M00000_pilot_vanilla_s0.csv`, 100 evals
+every 2000 steps from step 2000 to 200000, spanning
+warmup->load2->ramp->target): `train_acc_load1` flat at chance for the
+*fourth consecutive lever* -- min=0.410, max=0.575, mean=0.501 across all
+100 evals; phase means warmup=0.503, load2=0.466, ramp=0.504, target=0.501
+-- no phase shows any departure from chance. Gate A's 3-consecutive-eval
+streak never started. Shortening `maintain_steps` (the delay epoch, the
+single largest component of the full-BPTT horizon) did not move S=0 off
+chance either.
+
+S=1's trace (`results/metrics/M10000_pilot_vanilla_s0.csv`) is the
+healthiest of all four levers and breaks the levers-2/3 "strong then
+collapse" pattern: Gate A confirms at step 14000
+(`accuracy_at_first_milestone`: load1=0.888, load2=0.738, load3=0.666;
+1,792,000 trials, 1165.5s wall -- the load2 stage again gives a fast
+start), climbs to load1 0.85-0.95 through ramp (phase mean 0.874, n=45),
+dips during steps 88000-106000 (load1 low of 0.675 at step 98000, the same
+target-phase-entry window where levers 2 and 3 collapsed permanently) but
+**does not collapse** -- it recovers starting step 108000 and climbs
+through the rest of target phase (phase mean 0.898, n=47), reaching new
+highs late in the run (load1=0.92 at both step 158000 and step 168000,
+0.945 at step 170000) and ending at final held-out eval load1=0.906,
+load3=0.828 -- `steps_to_load3_0.8`=48000, and unlike every prior lever
+this 0.80 crossing *holds* to `max_steps` (`gates_at_max_steps` still
+True). The shorter delay epoch appears to have stabilized S=1's late-run
+optimum, not just its early learning.
+
+ROOT CAUSE synthesis (across all four levers): S=0 (vanilla flat, ungated
+tanh) never left chance under any of the four fallback levers --
+`encode_steps` 10->15, `lure_fraction` 0.3->0.2, an added load2 stage, and
+`maintain_steps` 25->15 -- individually or stacked. Every lever changed
+either what precedes the delay epoch or (lever 4) the delay epoch's
+length, and none altered the fact that gradients must still flow
+backward through an ungated tanh recurrence across the full trial. This
+is the textbook signature of vanishing gradient in an ungated recurrent
+core, not a curriculum or hyperparameter defect -- consistent with the
+ROOT CAUSE diagnosis recorded after lever 0 and unfalsified across three
+further attempts. S=1 (the hierarchical/gated arm) needed no substrate
+change to eventually reach a stable optimum here, which points at the
+manager/worker gating -- not encode time, lure rate, or delay length --
+as the mechanism that lets a vanilla-tanh-cored architecture succeed on
+this task at all.
+
+FINAL VERDICT for comments.txt SS12.5 (S=0, GO condition: Gate A
+load1>=0.83 AND load3>=0.80, both 3-consecutive-eval-confirmed, within
+200k steps): S=0 cleared neither under any of the four levers. **NO-GO
+(lever 4 fails; all four fallback levers exhausted).**
+
+Per comments.txt SS12.5's explicit instruction for this outcome: this is
+now a documented scientific result -- an ungated tanh core cannot do this
+task at this hidden size (arm S=0, i.e. the flat/non-hierarchical
+structure) -- not an implementation defect to keep chasing. Stage 1 must
+run on the GRU substrate, with the vanilla-substrate result reported
+alongside it as a documented failure. Substrate must not be switched
+quietly, the gate must not be lowered, and a probe-time cue must not be
+reintroduced to manufacture a pass.
+
+ALSO REPORT (comments.txt SS12.5's "real ms/step" requirement, final
+measurement across all four levers): 99.753 ms/step (S=0) / 101.104
+ms/step (S=1) at lever 4, versus the original F1-invalid 11.1 GRU pilot's
+184.427 -- consistent with the ~2x improvement already reported at lever
+0/1, holding stable across all four lever configurations.
+
+BLOCKER surfaced for SS12.6 (Set Gate B): SS12.6's rule ("smallest
+multiple of 10k after which load-3 accuracy gains < 0.01 over the next
+20k, in BOTH arms, and >= 1.2x the later arm's steps_to_load3_0.80")
+presupposes a working vanilla pilot trace for S=0. S=0 has no such trace
+under any lever -- `steps_to_load3_0.8` is `null` in every lever's
+manifest entry, including this final one -- so the rule cannot be
+evaluated as written. Separately, `scripts/run_stage1_grid.py` hardcodes
+every Stage 1 cell to `substrate: vanilla` (by design -- see its own
+docstring, written when SS12.5's premise was "cheap vanilla substrate
+before spending compute on GRU"); that premise is now the documented
+failure above, so the script cannot launch Stage 1 as written regardless
+of what SS12.6 decides. Both points are reported to the user rather than
+resolved unilaterally -- see the report accompanying this commit.
+
+pytest: deferred to end of session per standing user instruction.
+
+ACCEPTANCE: both arms' milestone steps/trials/wall/joules and full
+accuracy trace summaries (table + prose above), final accuracy per load
+with Wilson 95% CI and human percentiles (table above), ms/step (final
+measurement, above), and the verdict: **NO-GO (lever 4); all four
+comments.txt SS12.5 fallback levers exhausted.**

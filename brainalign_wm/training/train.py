@@ -239,13 +239,21 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
     }
     front_end = FrontEnd(m["feature_dim"], m["task_vec_dim"], m["bottleneck"], m["input_noise_sigma"]).to(device)
     substrate = m.get("substrate", "gru")
+    # D19: the recurrent init's spectral radius sets the BPTT gradient
+    # budget for every vanilla arm; None leaves the default uniform draw
+    # untouched. Applied to both vanilla paths below (flat and hierarchical
+    # worker+manager) -- fixing only one would trade one confound for another.
+    recurrent_init_spectral_radius = m.get("recurrent_init_spectral_radius")
     if S == 0:
         if substrate == "vanilla":
             # Stage 1 (§4): vanilla has no reflective-gate/Hebbian hooks
             # wired up yet -- M/P aren't in Stage 1's factorial, so this
             # path only needs to exist, not gate/plasticize (add when a
             # later stage needs M/P on the vanilla substrate).
-            core = VanillaRNNCell(m["bottleneck"], m["flat_units"], mask=None).to(device)
+            core = VanillaRNNCell(
+                m["bottleneck"], m["flat_units"], mask=None,
+                recurrent_init_spectral_radius=recurrent_init_spectral_radius,
+            ).to(device)
         else:
             core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs).to(device)
             if bioinit:
@@ -274,6 +282,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
                 grid=tuple(m["worker_grid"]), density=m["worker_density"], manager_period=m["manager_period"],
                 g_dim=m["g_dim"], pool_block=m["worker_pool_block"],
                 manager_every_tick=bool(m.get("manager_every_tick", False)),
+                recurrent_init_spectral_radius=recurrent_init_spectral_radius,
             ).to(device)
         else:
             core = HRLCore(
@@ -1440,6 +1449,19 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `m.get("substrate", "gru")`.
     if "substrate" in run:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "substrate": str(run["substrate"])}}
+    # D19/D20: the vanilla-substrate diagnostic varies this per run; must be
+    # folded in before `_build_model` reads `m.get("recurrent_init_spectral_radius")`.
+    if "recurrent_init_spectral_radius" in run:
+        full_cfg = {
+            **full_cfg,
+            "model": {
+                **full_cfg["model"],
+                "recurrent_init_spectral_radius": (
+                    None if run["recurrent_init_spectral_radius"] is None
+                    else float(run["recurrent_init_spectral_radius"])
+                ),
+            },
+        }
 
     m, mech_cfg, t_cfg = full_cfg["model"], full_cfg["mechanisms"], full_cfg["train"]
     # Phase 7 (comments.txt §5): SUP/RL run their fixed signal for the whole

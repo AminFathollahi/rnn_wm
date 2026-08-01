@@ -62,6 +62,13 @@ model:
                                             # FrontEnd goes 83,712 -> 37,760 params
   substrate: gru                           # {vanilla|gru}; vanilla is the Stage-1 substrate (§4), GRU is
                                             # Stage 2's -- Core battery below is all GRU, so default stays gru
+  recurrent_init_spectral_radius: null      # vanilla substrate only (both VanillaRNNCell and
+                                             # VanillaHRLCore's worker+manager); null = the plain
+                                             # uniform(-1/sqrt(H), 1/sqrt(H)) draw, whose spectral radius
+                                             # measures 0.616 +/- 0.011 at H=128 over five seeds. Exists
+                                             # because that radius sets the BPTT gradient budget for every
+                                             # tick of the trial, so it must be an explicit, logged variable
+                                             # rather than an accident of the default init.
   input_noise_sigma: 0.05
   recurrent_noise_sigma: 0.0                # bio-plausible ablation battery §4.4 "+noise" (Core default: off)
   core_dropout_p: 0.0                       # performance-matched baseline "flat_gru_dropout" (Core default: off)

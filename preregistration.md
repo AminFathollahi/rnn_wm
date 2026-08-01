@@ -289,3 +289,33 @@ reason, not silently swapped.
 This amendment does not reopen or re-litigate H1-H6, C1-C4, or the
 multi-task/topology/Dale's-law predictions above; it replaces the gate
 mechanics only.
+
+---
+
+## Amendment (2026-08-01): recurrent initialization is now a logged variable
+for the Stage-1 vanilla diagnostic (comments.txt §13.3)
+
+The statement above ("every Core cell initializes uniform(-1/sqrt(H),
++1/sqrt(H))") stays true for the Core battery and is not changed by this
+amendment. What changes: the flat-vanilla NO-GO reported at Phase 12.5 was
+found (advisor audit, 2026-08-01) to confound gatedness with the recurrent
+init's spectral radius, which had never been varied or recorded as an
+explicit run parameter — every vanilla arm silently used whatever radius
+`uniform(-1/sqrt(H), 1/sqrt(H))` happened to draw, measured at 0.616 +/-
+0.011 over five seeds at H=128.
+
+`VanillaRNNCell` (and `VanillaHRLCore`'s worker and manager, both built from
+it) now accept an optional `recurrent_init_spectral_radius`, applied by
+rescaling `weight_hh` after the existing draw, computed on the EFFECTIVE
+(mask-applied) matrix. `None` (the default, and `configs/config.yaml`'s
+`model.recurrent_init_spectral_radius: null`) leaves the draw bit-identical
+to every prior run. A run dict may override it, following the exact pattern
+already used for `substrate`. This exists solely to make Stage 1's vanilla
+diagnostic (comments.txt §13.4) able to hold gatedness, initialization, and
+training signal apart; it is not a change to any Core cell's default and
+does not touch the GRU substrate.
+
+This amendment does not reopen or re-litigate H1-H6, C1-C4, the gate
+mechanics, or the multi-task/topology/Dale's-law predictions above; it adds
+one explicit, logged, default-`None` initialization parameter to the
+vanilla substrate only.

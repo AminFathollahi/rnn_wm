@@ -178,7 +178,9 @@ def load_all_records(manifest: Path) -> list[dict]:
     return list(latest.values())
 
 
-def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str, model_overrides: dict | None = None) -> dict:
+def build_resolved_config(
+    full_cfg: dict, tier_cfg: dict, tier: str, model_overrides: dict | None = None, run: dict | None = None,
+) -> dict:
     """The full merged, resolved config for this grid invocation: every
     project subsystem (model/mechanisms/task/train/gates/neural) plus the
     tier subset actually in effect -- covers every config change that
@@ -195,10 +197,34 @@ def build_resolved_config(full_cfg: dict, tier_cfg: dict, tier: str, model_overr
     a 24-hour campaign. Pass the override whenever it is constant across
     the runs this resolved config covers; a campaign whose cells DISAGREE
     on a model key must write one resolved config per distinct value, not
-    a single misleading one."""
+    a single misleading one.
+
+    `run` (D20): the same run dict passed to `train_one`. Substrate,
+    supervision, and the recurrent-init spectral radius are recorded
+    explicitly here using `train_one`'s own fallback order (`run` value if
+    present, else the config default), regardless of whether the caller
+    remembered to name them in `model_overrides` -- a defect class (F1, and
+    the supervision key that silently inherited `legacy` for a full round)
+    has now hit two of these three keys because an omission was invisible
+    here. `run=None` (every existing caller) reproduces the prior output
+    exactly, reading straight from `full_cfg`'s own defaults."""
     resolved = {k: v for k, v in full_cfg.items() if k != "tiers"}
     if model_overrides:
         resolved["model"] = {**resolved.get("model", {}), **model_overrides}
+    run = run or {}
+    resolved_model = resolved.get("model", {})
+    resolved_train = resolved.get("train", {})
+    resolved["model"] = {
+        **resolved_model,
+        "substrate": run.get("substrate", resolved_model.get("substrate", "gru")),
+        "recurrent_init_spectral_radius": run.get(
+            "recurrent_init_spectral_radius", resolved_model.get("recurrent_init_spectral_radius")
+        ),
+    }
+    resolved["train"] = {
+        **resolved_train,
+        "supervision": run.get("supervision", resolved_train.get("supervision", "legacy")),
+    }
     resolved["tier"] = {"name": tier, **tier_cfg}
     return resolved
 

@@ -206,8 +206,11 @@ def build_resolved_config(
     remembered to name them in `model_overrides` -- a defect class (F1, and
     the supervision key that silently inherited `legacy` for a full round)
     has now hit two of these three keys because an omission was invisible
-    here. `run=None` (every existing caller) reproduces the prior output
-    exactly, reading straight from `full_cfg`'s own defaults."""
+    here. The S/M/P/T/D cell selector is recorded too (`model.cell`): it
+    picks the model class itself, and two runs differing only in it used to
+    resolve to the same config and config_hash. `run=None` (every existing
+    caller) reproduces the prior output exactly, reading straight from
+    `full_cfg`'s own defaults."""
     resolved = {k: v for k, v in full_cfg.items() if k != "tiers"}
     if model_overrides:
         resolved["model"] = {**resolved.get("model", {}), **model_overrides}
@@ -225,6 +228,13 @@ def build_resolved_config(
         **resolved_train,
         "supervision": run.get("supervision", resolved_train.get("supervision", "legacy")),
     }
+    if run:
+        # The S/M/P/T/D cell selector picks the model class itself (flat vs
+        # hierarchical core, plasticity, etc.) but was previously absent
+        # here, so two runs differing only in structure could resolve to
+        # the same config and the same config_hash -- discovered when a
+        # flat and a hierarchical vanilla run collided on one hash.
+        resolved["model"]["cell"] = {k: run[k] for k in ("S", "M", "P", "T", "D") if k in run}
     resolved["tier"] = {"name": tier, **tier_cfg}
     return resolved
 

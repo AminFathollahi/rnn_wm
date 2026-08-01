@@ -3258,3 +3258,163 @@ full suite still passes).
 
 ACCEPTANCE: the diff, the five derived run_ids matching spec exactly
 (output above), and full pytest at 0 failures.
+
+================================================================================
+The init x supervision diagnostic: five runs, 40,000-step ceiling (comments.txt item 13.4)
+================================================================================
+
+All five runs launched concurrently, ran to completion with no collisions,
+OOM, or errors (RTX 5070 Ti Laptop GPU, ~1.7GB/12GB VRAM used, verified via
+`make verify-gpu` before launch). RESULTS TABLE (final held-out accuracy,
+Wilson 95% CI, `n=200`/load):
+
+| run_id | structure | init radius | signal | config_hash | matched | detector (>=0.65 x3 within 40k) | load1 | load2 | load3 | ms/step | wall_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| VANFLAT_INIT062_LEGACY_s0 | flat | 0.616 (default) | legacy | a7758dcd7051ea6f | false | never (max single-eval load1 = 0.555) | 0.530 [0.486,0.573] | 0.538 [0.494,0.581] | 0.462 [0.419,0.506] | 103.3 | 4415.0 |
+| VANFLAT_INIT100_LEGACY_s0 | flat | 1.0 | legacy | b862ff12da28c656 | false | never (max 0.590) | 0.530 [0.486,0.573] | 0.462 [0.419,0.506] | 0.462 [0.419,0.506] | 100.2 | 4409.9 |
+| VANFLAT_INIT062_SUP_s0 | flat | 0.616 (default) | SUP | b9668b0e3ed82138 | false | never (max 0.590) | 0.470 [0.427,0.514] | 0.538 [0.494,0.581] | 0.538 [0.494,0.581] | 106.0 | 4597.3 |
+| VANFLAT_INIT100_SUP_s0 | flat | 1.0 | SUP | cacd46996a307901 | false | never (max 0.590) | 0.470 [0.427,0.514] | 0.538 [0.494,0.581] | 0.538 [0.494,0.581] | 99.6 | 4602.1 |
+| VANHIER_INIT100_LEGACY_s0 | hierarchical | 1.0 | legacy | b862ff12da28c656 | **true** | confirmed step 14,000 | 0.910 [0.882,0.932] | 0.858 [0.825,0.886] | 0.794 [0.756,0.827] | 98.9 | 4793.7 |
+
+Train-loss trace: all four VANFLAT arms held flat (legacy: pinned near
+0.116-0.123 from step ~8,000 on; SUP: pinned near 0.469-0.473) for the full
+34,000+ post-warmup steps inspected -- the same frozen-loss signature §12.5
+reported, reproduced at every one of the four init/signal combinations.
+VANHIER's loss dropped from warmup levels to 0.025-0.033 by step 30,000,
+tracking its accuracy climb.
+
+DEFECT FOUND AND FIXED DURING THIS ITEM: `VANFLAT_INIT100_LEGACY_s0` and
+`VANHIER_INIT100_LEGACY_s0` resolved to the **identical** config_hash
+(`b862ff12da28c656...`) despite being different model classes (flat core vs.
+`VanillaHRLCore` manager/worker) -- `build_resolved_config` recorded
+`substrate`/`supervision`/`recurrent_init_spectral_radius` (D20) but never the
+`S`/`M`/`P`/`T`/`D` cell selector that actually picks the model class, so two
+structurally different runs could silently share one audit hash. This did not
+corrupt the diagnostic's conclusions: each run's `manifest.jsonl` row carries
+its own `S` value directly (`0`/`1`, confirmed above), independent of
+`config_hash`, and the two runs' command lines and run_ids independently
+confirm which structure trained. But it is the same defect class D20 was
+written to close (F1, the 2026-08-01 supervision omission, now this), so
+`run_grid.py::build_resolved_config` now also writes `model.cell = {S, M, P,
+T, D}` from the run dict when one is passed; `run=None` (every caller other
+than `run_phase11_pilot.py`) is unaffected structurally (no `cell` key
+appears) but will see its `config_hash` change on next invocation, which is
+correct -- it now reflects a real audit gap being closed, not a spurious
+diff. New test `tests/test_build_resolved_config.py` asserts a flat and a
+hierarchical run (identical otherwise) now hash differently, and that
+`run=None` still omits the `cell` key entirely (byte-identical to before this
+fix for every caller that doesn't pass `run`).
+
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q tests/test_build_resolved_config.py tests/test_training.py tests/test_models.py -k "resolved_config or config_hash or vanilla_rnn or matched"
+.........                                                               [100%]
+(exit 0)
+```
+
+DETECTOR OUTCOME: the pre-specified off-chance detector (held-out load1 >=
+0.65, three consecutive evaluations within 40,000 steps) never fired for any
+of the four VANFLAT arms -- the highest single-evaluation load1 accuracy seen
+across all 80 evaluations (4 arms x 20 evals) was 0.59, itself within the
+Wilson 95% CI of chance (0.5) at n=200. VANHIER cleared Gate A itself (a much
+higher bar) at step 14,000. PRE-SPECIFIED CONTINGENCY (radius-1.5 arm, only if
+radius 1.0 showed visible upward movement without clearing the detector): not
+triggered -- radius 1.0 showed no upward trend at all in the flat arms (loss
+and accuracy traces are flat noise around chance throughout), so no
+additional arm was run.
+
+ACCEPTANCE: the five-run table, the detector outcome per arm, and the
+manifest rows showing distinct run IDs (all five) and config hashes (four of
+five distinct; the fifth pair's collision is the defect documented and fixed
+above, with independent confirmation from each row's own `S` field that the
+diagnostic's data is not affected).
+
+================================================================================
+Verdict: what the flat-vanilla NO-GO is a NO-GO for (comments.txt item 13.5)
+================================================================================
+
+VERDICT AGAINST THE FOUR NAMED ALTERNATIVES:
+
+  (i)   gatedness — flat vanilla fails at every init and both signals: HOLDS.
+        All four VANFLAT arms (radius 0.616/1.0 x legacy/SUP) stayed at
+        chance through the full 40,000-step ceiling; the off-chance detector
+        never fired in any of them.
+  (ii)  initialization — radius 1.0 rescues it: REJECTED. VANFLAT_INIT100
+        (both signals) stayed at chance, indistinguishable from
+        VANFLAT_INIT062.
+  (iii) training signal — SUP rescues it: REJECTED. VANFLAT_INIT062_SUP
+        stayed at chance, indistinguishable from VANFLAT_INIT062_LEGACY.
+  (iv)  interaction — only the combination rescues it: REJECTED.
+        VANFLAT_INIT100_SUP, the combination arm, also stayed at chance.
+
+Per comments.txt §13.5: (i) holding means §12.5's NO-GO is upheld and is now
+substantially stronger than it was, because it has survived two
+optimization-side controls (initialization, training signal) in addition to
+the four task-side levers already exhausted in Phase 12.5. **What the NO-GO
+is a NO-GO for**: the flat, single-timescale (every-tick recurrent) vanilla
+tanh substrate at H=128, under the current four-lever task configuration,
+regardless of recurrent-init spectral radius (0.616 or 1.0) or training
+signal (`legacy` or `SUP`). D13's original observation stands unmodified; D17's
+confound-scoping is resolved in the "confound ruled out, not resolved into a
+rescue" direction, not the "confound explains it" direction the audit left
+open.
+
+QUALIFICATION, not one of the four predeclared branches but required by the
+fifth (VANHIER) arm and by item 13.2's gradient-flow measurement, and named
+explicitly per the project's standing instruction to chase rather than
+average away a crack:
+
+- This diagnostic never trained a flat GRU arm to convergence (item 13.2
+  measured its gradient-flow profile at initialization only), so "gatedness"
+  as a trained, causally identified rescue is not itself demonstrated here.
+  What is demonstrated is that flat vanilla fails independent of the two
+  confounds the audit named. The historical (audit-noted, F1-invalid-run)
+  observation that a flat GRU learned this task under the same task config
+  is corroborating but not re-verified by 13.4.
+- VANHIER_INIT100_LEGACY_s0 -- radius 1.0, the SAME radius as the still-
+  chance VANFLAT_INIT100 arms, and `legacy` supervision -- reached load1 =
+  0.910 with Gate A confirmed at step 14,000. Its only structural difference
+  from the failing flat arms is hierarchy (`VanillaHRLCore`'s manager/worker
+  split), and the manager/worker cells are themselves vanilla tanh, i.e.
+  ungated. Repairing the flat arm's nominal gradient-magnitude problem
+  (item 13.2 measured radius 1.0 cutting flat vanilla's attenuation by 3-4
+  orders of magnitude at load 1) did not let it catch up to a fully ungated
+  hierarchical arm at the same radius. Per comments.txt's own framing, this
+  answers "whether arm S is measuring hierarchy or measuring path length": it
+  is measuring something hierarchy provides beyond raw path-length repair --
+  consistent with item 13.2's own additional finding that the worker's
+  gradient has a second route through the manager/pooled feedback loop, not
+  captured by either "gatedness" or "worker spectral radius" alone.
+- Net effect: "gatedness" is the label comments.txt's branch (i) uses for
+  the surviving alternative, and the branch holds by its literal wording
+  (flat vanilla fails at every init and signal tested). But the mechanism
+  that is positively known to rescue Sternberg learning on this task config,
+  from data actually collected in this round, is hierarchical/multi-timescale
+  structure, not multiplicative gating -- gating's sufficiency rests on the
+  historical, confound-prone GRU pilot, not on anything trained in 13.4. Any
+  future GRU-route decision should be read as "gating is the traditional
+  candidate and remains untested cleanly here," not as "gating is confirmed."
+
+DOCUMENTATION updated in this commit: `advisor.md` (dated §7b entry, D13/D17
+updated in place with the verdict marked as superseding text -- not erased --
+and the §7a gatedness row updated to reflect what 13.4 actually
+demonstrated), `executor.md` (brought current with the full 13.1-13.5
+session), `references.md` (one-line note under the existing Song 2016 /
+Yang 2019 entries for the SUP/init choice this diagnostic relied on).
+`preregistration.md`'s 13.3 amendment was already appended; 13.5 needs no
+further amendment there.
+
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q
+(full suite; exit 0)
+```
+
+ACCEPTANCE: the verdict paragraphs above, the updated documents (this commit),
+and full pytest at 0 failures (output above).
+
+THEN STOP, per comments.txt §13.5's closing instruction: do not launch Stage
+1, `run_stage1_grid.py`, `run_geometry.py`, or `brainalign_wm.analysis.run_all`,
+and do not set Gate B (`gates.max_steps`). Report to the user that the GRU
+route (§12.6/§12.7) is now live pending their approval, with the qualification
+above about what is and is not demonstrated.

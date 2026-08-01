@@ -63,6 +63,33 @@ def test_enumerate_includes_local_learning_cells_when_requested():
     assert ll_ids == {c["model_id"] for c in rg.LOCAL_LEARNING_CELLS}
 
 
+def test_enumerate_runs_carries_explicit_supervision():
+    """comments.txt §16 item 16.4 / advisor.md D24: every enumerated battery
+    run dict must carry `supervision` explicitly so it reaches `train_one`
+    and `build_resolved_config` from the run, not from config.yaml's
+    `legacy` default (the same fall-through defect class as F1/D21)."""
+    runs = rg.enumerate_runs([0, 1], supervision="RL")
+    assert all(r["supervision"] == "RL" for r in runs)
+    assert len(runs) == 2 * len(rg.CELLS)
+
+
+def test_main_requires_supervision_flag(capsys):
+    """The launcher must fail rather than silently defaulting to `legacy`
+    when `--supervision` is omitted -- this is the actual defect §16.4
+    closes, not just enumerate_runs's plumbing."""
+    import pytest
+
+    with pytest.raises(SystemExit) as exc_info:
+        rg.main(["--scaffold", "--seeds", "1", "--budget", "1s"])
+    assert exc_info.value.code != 0
+    assert "--supervision" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc_info:
+        rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--supervision", "legacy"])
+    assert exc_info.value.code != 0
+    assert "--supervision" in capsys.readouterr().err
+
+
 def test_resume_skips_completed(tmp_path):
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(

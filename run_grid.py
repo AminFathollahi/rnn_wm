@@ -29,8 +29,13 @@ the orchestration logic to be exercised without the model/training
 dependencies installed.
 
 Usage:
-  python run_grid.py --seeds 5 --budget 48h --workers 8 # execute the training grid, 8-way concurrent
-  python run_grid.py --scaffold --seeds 3 --budget 30m  # orchestration-only demonstration
+  python run_grid.py --seeds 5 --budget 48h --workers 8 --supervision RL # execute the training grid, 8-way concurrent
+  python run_grid.py --scaffold --seeds 3 --budget 30m --supervision RL  # orchestration-only demonstration
+
+`--supervision {SUP,RL}` is required, with no default (comments.txt §16
+item 16.4): `CELLS` carry no `supervision` key, so an omitted flag would
+silently fall through to config.yaml's `train.supervision: legacy`, which
+is not one of the study's two preregistered levels.
 """
 from __future__ import annotations
 
@@ -129,19 +134,34 @@ def parse_budget(s: str) -> float:
     return float(s)
 
 
-def enumerate_runs(seeds: list[int], include_local_learning: bool = False) -> list[dict]:
+def enumerate_runs(seeds: list[int], include_local_learning: bool = False, supervision: str | None = None) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
     local-learning cells (§6.3) after the Core cells within each seed --
     off by default, since that study is reported on its own terms and
-    doesn't gate the Core grid (§17 decision 6)."""
+    doesn't gate the Core grid (§17 decision 6).
+
+    `supervision` (comments.txt §16 item 16.4 / advisor.md D24): every
+    enumerated cell's own run dict, not the config default. `CELLS` carry
+    no `supervision` key, so without this every battery run used to fall
+    through to `config.yaml`'s `train.supervision: legacy` -- a pre-Phase-7
+    signal that is not one of the study's preregistered levels ({SUP, RL}).
+    `None` (the default) preserves that historical fall-through exactly, so
+    any other caller of `enumerate_runs` is unaffected; `main` below never
+    passes `None`, because its own `--supervision` flag is required."""
     runs = []
     for seed in seeds:
         for cell in CELLS:
-            runs.append({**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"})
+            run = {**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"}
+            if supervision is not None:
+                run["supervision"] = supervision
+            runs.append(run)
         if include_local_learning:
             for cell in LOCAL_LEARNING_CELLS:
-                runs.append({**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"})
+                run = {**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"}
+                if supervision is not None:
+                    run["supervision"] = supervision
+                runs.append(run)
     return runs
 
 
@@ -508,6 +528,13 @@ def main(argv=None) -> int:
                           "slowdown (Appendix A, 12.3 RESULT); keep N FIXED for a whole stage since "
                           "wall_s_to_*/joules_to_* are not comparable across rows with different "
                           "`workers` (every manifest row records it).")
+    ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
+                     help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
+                          "training signals. Required, with no default, so the battery cannot launch "
+                          "under an implicit choice -- `CELLS` carry no `supervision` key, so an "
+                          "omitted flag used to fall through to config.yaml's `train.supervision: "
+                          "legacy`, a pre-Phase-7 hybrid that is not one of this study's levels. "
+                          "'legacy' is deliberately not an allowed choice here.")
     args = ap.parse_args(argv)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -516,7 +543,7 @@ def main(argv=None) -> int:
     RESULTS.mkdir(exist_ok=True)
     budget_s = parse_budget(args.budget)
     seeds = list(range(args.seeds))
-    runs = enumerate_runs(seeds, include_local_learning=args.local_learning)
+    runs = enumerate_runs(seeds, include_local_learning=args.local_learning, supervision=args.supervision)
     completed = load_completed(MANIFEST)
     commit = git_commit()
 
@@ -547,7 +574,10 @@ def main(argv=None) -> int:
     # subset), computed once per invocation -- every run in this grid
     # invocation shares this one hash, and the resolved config is dumped
     # verbatim so a run is fully reproducible from the manifest alone.
-    resolved_cfg = build_resolved_config(full_cfg, cfg, args.tier) if full_cfg else {"tier": {"name": args.tier, **cfg}}
+    resolved_cfg = (
+        build_resolved_config(full_cfg, cfg, args.tier, run={"supervision": args.supervision})
+        if full_cfg else {"tier": {"name": args.tier, **cfg}}
+    )
     cfg_hash = config_hash(resolved_cfg)
     if full_cfg:
         # Audit fix L1: reuse the `yaml` module imported above rather than

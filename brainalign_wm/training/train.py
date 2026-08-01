@@ -1429,6 +1429,98 @@ def _human_percentiles(accuracy: dict) -> dict:
     return out
 
 
+def _update_milestone_counters(
+    acc: dict, step: int, wall_s: float | None, joules: float | None, batch_size: int,
+    criterion: dict, milestone_thresholds: dict, consecutive_evals_required: int,
+    milestone_consecutive: dict, milestone_reached: dict, criterion_consecutive: dict,
+    milestone_steps_to: dict, milestone_trials_to: dict, milestone_wall_s_to: dict,
+    milestone_joules_to: dict,
+) -> list[str]:
+    """Pure per-evaluation update of the milestone/criterion counters
+    (Phase 12 §3.3), factored out (comments.txt §16A.2) so the live
+    training loop and `_seed_milestone_state_from_history` (a resumed
+    run's pre-resume replay) share one update rule instead of two copies
+    that can drift. Mutates the state dicts in place; returns the
+    milestone keys newly confirmed at this evaluation (checkpoint
+    snapshot, printing, and `final_evaluation` are the caller's
+    responsibility -- replay must NOT perform them, since it has no live
+    model and must not overwrite `ckpt_at_criterion.pt`)."""
+    newly_confirmed: list[str] = []
+    for _ckey, _cthresh in criterion.items():
+        criterion_consecutive[_ckey] = (
+            criterion_consecutive[_ckey] + 1 if acc.get(_ckey, 0.0) >= _cthresh else 0
+        )
+    for _mkey, _mthresh in milestone_thresholds.items():
+        if milestone_reached[_mkey]:
+            continue
+        if acc.get(_mkey, 0.0) >= _mthresh:
+            milestone_consecutive[_mkey] += 1
+        else:
+            milestone_consecutive[_mkey] = 0
+        if milestone_consecutive[_mkey] >= consecutive_evals_required:
+            milestone_reached[_mkey] = True
+            milestone_steps_to[_mkey] = step
+            milestone_trials_to[_mkey] = step * batch_size
+            milestone_wall_s_to[_mkey] = wall_s
+            milestone_joules_to[_mkey] = joules
+            newly_confirmed.append(_mkey)
+    return newly_confirmed
+
+
+def _seed_milestone_state_from_history(
+    csv_path: Path, start_step: int, criterion: dict, milestone_thresholds: dict,
+    consecutive_evals_required: int, batch_size: int,
+) -> dict:
+    """Resume support (comments.txt §16A.2): replay the pre-resume rows of
+    a run's own metrics CSV (preserved by the §16.1 append fix) through
+    `_update_milestone_counters` so a resumed run's milestone state
+    reflects the FULL 0..start_step history, not a restart from zero at
+    the resume point. Without this, `steps_to_<key>_<threshold>` and
+    `first_milestone_step` report the first post-resume confirmation
+    instead of the true one, AND a milestone already reached before the
+    resume gets re-detected live and its `ckpt_at_criterion.pt` snapshot
+    silently overwritten with post-resume weights -- exactly what happened
+    to `FLATGRU_RL_s0`'s 80,000-step resume before this fix (the original
+    step-14,000 snapshot is unrecoverable; see PHASE_LOG.md)."""
+    milestone_consecutive = {k: 0 for k in milestone_thresholds}
+    milestone_reached = {k: False for k in milestone_thresholds}
+    criterion_consecutive = {k: 0 for k in criterion}
+    milestone_steps_to = {k: None for k in milestone_thresholds}
+    milestone_trials_to = {k: None for k in milestone_thresholds}
+    milestone_wall_s_to = {k: None for k in milestone_thresholds}
+    milestone_joules_to = {k: None for k in milestone_thresholds}
+    first_milestone_step = None
+
+    if csv_path.exists():
+        with open(csv_path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        keys = set(criterion) | set(milestone_thresholds)
+        for row in rows:
+            step = int(row["step"])
+            if step > start_step:
+                break
+            acc = {k: (float(row[f"train_acc_{k}"]) if row.get(f"train_acc_{k}") not in ("", None) else 0.0)
+                   for k in keys}
+            wall_s = float(row["wall_s"]) if row.get("wall_s") not in ("", None) else None
+            joules = float(row["joules_cumulative"]) if row.get("joules_cumulative") not in ("", None) else None
+            newly_confirmed = _update_milestone_counters(
+                acc, step, wall_s, joules, batch_size, criterion, milestone_thresholds,
+                consecutive_evals_required, milestone_consecutive, milestone_reached,
+                criterion_consecutive, milestone_steps_to, milestone_trials_to,
+                milestone_wall_s_to, milestone_joules_to,
+            )
+            for _mkey in newly_confirmed:
+                if _mkey in criterion and first_milestone_step is None:
+                    first_milestone_step = milestone_steps_to[_mkey]
+
+    return {
+        "milestone_consecutive": milestone_consecutive, "milestone_reached": milestone_reached,
+        "criterion_consecutive": criterion_consecutive, "milestone_steps_to": milestone_steps_to,
+        "milestone_trials_to": milestone_trials_to, "milestone_wall_s_to": milestone_wall_s_to,
+        "milestone_joules_to": milestone_joules_to, "first_milestone_step": first_milestone_step,
+    }
+
+
 def train_one(run: dict, cfg: dict) -> dict:
     from brainalign_wm.utils.seeding import seed_everything
     from brainalign_wm.utils.device import get_device
@@ -1661,8 +1753,6 @@ def train_one(run: dict, cfg: dict) -> dict:
     # (§3: Gate A is inclusion-only; Gate B, i.e. `total_steps`, is the only
     # ceiling). A milestone never confirmed stays `None` -- a result, not a
     # missing value.
-    milestone_consecutive = {k: 0 for k in milestone_thresholds}
-    milestone_reached = {k: False for k in milestone_thresholds}
     # `milestone_reached`/`milestone_consecutive` latch at the first
     # confirming streak and then stop updating -- they back the efficiency
     # DV `steps_to_<key>_<threshold>`, which must record when a criterion was
@@ -1670,14 +1760,43 @@ def train_one(run: dict, cfg: dict) -> dict:
     # must instead reflect whether the criterion holds at the checkpoint
     # geometry actually reads (max_steps), so track its own trailing streak,
     # updated on every periodic eval with no latch.
-    criterion_consecutive = {k: 0 for k in criterion}
-    milestone_steps_to = {k: None for k in milestone_thresholds}
-    milestone_trials_to = {k: None for k in milestone_thresholds}
-    milestone_wall_s_to = {k: None for k in milestone_thresholds}
-    milestone_joules_to = {k: None for k in milestone_thresholds}
+    # comments.txt §16A.2: on a genuine resume, seed all of this from the
+    # pre-resume metrics history instead of restarting at zero -- otherwise
+    # `steps_to_*`/`first_milestone_step` report the first post-resume
+    # confirmation, and a milestone already reached pre-resume gets
+    # re-detected live and silently overwrites `ckpt_at_criterion.pt` with
+    # post-resume weights.
+    if start_step > 0:
+        _seed = _seed_milestone_state_from_history(
+            metrics_logger.path, start_step, criterion, milestone_thresholds,
+            consecutive_evals_required, batch_size,
+        )
+        milestone_consecutive = _seed["milestone_consecutive"]
+        milestone_reached = _seed["milestone_reached"]
+        criterion_consecutive = _seed["criterion_consecutive"]
+        milestone_steps_to = _seed["milestone_steps_to"]
+        milestone_trials_to = _seed["milestone_trials_to"]
+        milestone_wall_s_to = _seed["milestone_wall_s_to"]
+        milestone_joules_to = _seed["milestone_joules_to"]
+        first_milestone_step = _seed["first_milestone_step"]
+    else:
+        milestone_consecutive = {k: 0 for k in milestone_thresholds}
+        milestone_reached = {k: False for k in milestone_thresholds}
+        criterion_consecutive = {k: 0 for k in criterion}
+        milestone_steps_to = {k: None for k in milestone_thresholds}
+        milestone_trials_to = {k: None for k in milestone_thresholds}
+        milestone_wall_s_to = {k: None for k in milestone_thresholds}
+        milestone_joules_to = {k: None for k in milestone_thresholds}
+        first_milestone_step = None
     # The FIRST milestone (of any key) reached gets a checkpoint + full
     # evaluation snapshot -- what 12.4 compares `ckpt.pt` (max_steps) against.
-    first_milestone_step = None
+    # A milestone seeded as already-reached from resumed history has no
+    # reconstructable `accuracy_at_first_milestone` here -- the periodic log
+    # only stored point accuracy, not the Wilson-CI `final_evaluation` this
+    # field normally holds. The true value is on the run's own pre-resume
+    # manifest row; this stays None rather than fabricate one, and the live
+    # loop below will not re-fire the snapshot for an already-seeded
+    # `first_milestone_step`.
     accuracy_at_first_milestone = None
 
     t0 = time.time()
@@ -1814,57 +1933,48 @@ def train_one(run: dict, cfg: dict) -> dict:
             # checkpoint + full evaluation snapshot -- what 12.4 compares
             # `ckpt.pt` (the max_steps, equal-duration snapshot, unchanged
             # below) against.
-            for _ckey, _cthresh in criterion.items():
-                criterion_consecutive[_ckey] = (
-                    criterion_consecutive[_ckey] + 1 if acc.get(_ckey, 0.0) >= _cthresh else 0
-                )
-
-            for _mkey, _mthresh in milestone_thresholds.items():
-                if milestone_reached[_mkey]:
-                    continue
-                if acc.get(_mkey, 0.0) >= _mthresh:
-                    milestone_consecutive[_mkey] += 1
-                else:
-                    milestone_consecutive[_mkey] = 0
-                if milestone_consecutive[_mkey] >= consecutive_evals_required:
-                    milestone_reached[_mkey] = True
-                    milestone_steps_to[_mkey] = step + 1
-                    milestone_trials_to[_mkey] = milestone_steps_to[_mkey] * batch_size
-                    milestone_wall_s_to[_mkey] = round(time.time() - t0, 1)
-                    milestone_joules_to[_mkey] = (
-                        pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
-                        if _nvml_handle is not None else None
+            # §16A.2: shared with `_seed_milestone_state_from_history`'s
+            # replay of a resumed run's pre-resume rows, so the live update
+            # rule and the replay rule cannot drift apart.
+            newly_confirmed = _update_milestone_counters(
+                acc, step + 1, round(time.time() - t0, 1),
+                (pynvml.nvmlDeviceGetTotalEnergyConsumption(_nvml_handle) - _energy_baseline_mj
+                 if _nvml_handle is not None else None),
+                batch_size, criterion, milestone_thresholds, consecutive_evals_required,
+                milestone_consecutive, milestone_reached, criterion_consecutive,
+                milestone_steps_to, milestone_trials_to, milestone_wall_s_to, milestone_joules_to,
+            )
+            for _mkey in newly_confirmed:
+                print(f"[train] milestone {_mkey}>={milestone_thresholds[_mkey]} confirmed at step "
+                      f"{milestone_steps_to[_mkey]} ({consecutive_evals_required} consecutive evals)",
+                      flush=True)
+                # Checkpoint/eval snapshot fires on Gate A (`criterion`,
+                # load1) only -- NOT on an `extra_milestones` key (e.g.
+                # load3). Extra milestones are pure efficiency DVs with
+                # a threshold sourced from a single dataset (§12.6
+                # comment: "000469, only dataset with load 3"); letting
+                # one trigger ckpt_at_criterion.pt would make its
+                # meaning vary run-to-run across the Stage-1 grid,
+                # breaking the cross-run/cross-dataset comparison this
+                # snapshot exists for.
+                if _mkey in criterion and first_milestone_step is None:
+                    first_milestone_step = milestone_steps_to[_mkey]
+                    print(f"[train] first milestone ({_mkey}); snapshotting ckpt_at_criterion.pt, "
+                          f"continuing to {total_steps} for geometry only.", flush=True)
+                    torch.save(
+                        {
+                            "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
+                            "heads": heads.state_dict(),
+                            "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
+                            "optimizer": optimizer.state_dict() if optimizer else None,
+                            "rung": rung,
+                        },
+                        ckpt_dir / "ckpt_at_criterion.pt",
                     )
-                    print(f"[train] milestone {_mkey}>={_mthresh} confirmed at step "
-                          f"{milestone_steps_to[_mkey]} ({consecutive_evals_required} consecutive evals)",
-                          flush=True)
-                    # Checkpoint/eval snapshot fires on Gate A (`criterion`,
-                    # load1) only -- NOT on an `extra_milestones` key (e.g.
-                    # load3). Extra milestones are pure efficiency DVs with
-                    # a threshold sourced from a single dataset (§12.6
-                    # comment: "000469, only dataset with load 3"); letting
-                    # one trigger ckpt_at_criterion.pt would make its
-                    # meaning vary run-to-run across the Stage-1 grid,
-                    # breaking the cross-run/cross-dataset comparison this
-                    # snapshot exists for.
-                    if _mkey in criterion and first_milestone_step is None:
-                        first_milestone_step = milestone_steps_to[_mkey]
-                        print(f"[train] first milestone ({_mkey}); snapshotting ckpt_at_criterion.pt, "
-                              f"continuing to {total_steps} for geometry only.", flush=True)
-                        torch.save(
-                            {
-                                "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
-                                "heads": heads.state_dict(),
-                                "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
-                                "optimizer": optimizer.state_dict() if optimizer else None,
-                                "rung": rung,
-                            },
-                            ckpt_dir / "ckpt_at_criterion.pt",
-                        )
-                        accuracy_at_first_milestone = final_evaluation(
-                            front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
-                            task_name_for_context=("sternberg" if diet == "multitask" else None),
-                        )
+                    accuracy_at_first_milestone = final_evaluation(
+                        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                        task_name_for_context=("sternberg" if diet == "multitask" else None),
+                    )
 
         if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
             torch.save(

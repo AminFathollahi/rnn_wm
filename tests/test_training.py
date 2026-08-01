@@ -274,6 +274,130 @@ def test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training
     assert ckpt["step"] == total_steps
 
 
+def test_resume_preserves_true_milestone_step_and_does_not_reoverwrite_snapshot():
+    """comments.txt §16A.2 regression: a milestone already confirmed before
+    an interruption must keep its TRUE step after a resume (not the first
+    post-resume confirmation), and its `ckpt_at_criterion.pt` snapshot must
+    not be silently overwritten with post-resume weights the next time the
+    live loop would otherwise re-detect it. This is not hypothetical: it is
+    exactly what happened to `FLATGRU_RL_s0`'s 80,000-step resume before
+    this fix landed."""
+    import copy
+    import shutil
+
+    import torch
+
+    import brainalign_wm.training.train as train_mod
+
+    fake_cfg = copy.deepcopy(CFG)
+    fake_cfg["train"]["eval_every"] = 2
+    fake_cfg["gates"]["consecutive_evals"] = 3
+    fake_cfg["gates"]["criterion"] = {"load1": 0.83}
+    fake_cfg["gates"]["extra_milestones"] = {}
+
+    def fake_evaluate_accuracy(*args, **kwargs):
+        return {
+            "load1": 1.0, "load1_ci_lo": 1.0, "load1_ci_hi": 1.0,
+            "load2": 1.0, "load2_ci_lo": 1.0, "load2_ci_hi": 1.0,
+            "load3": 1.0, "load3_ci_lo": 1.0, "load3_ci_hi": 1.0,
+        }
+
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_resume_milestone"}
+    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    metrics_path = ROOT / "results" / "metrics" / f"{run['run_id']}.csv"
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    if metrics_path.exists():
+        metrics_path.unlink()
+    orig_load_cfg, orig_eval_acc = train_mod._load_full_config, train_mod.evaluate_accuracy
+    train_mod._load_full_config = lambda: fake_cfg
+    train_mod.evaluate_accuracy = fake_evaluate_accuracy
+    try:
+        first = train_mod.train_one(run, {"steps": 10, "scaffold_sleep_s": 0})
+        true_step = first["steps_to_load1_0.83"]  # 3rd confirming eval at eval_every=2
+        assert true_step == 6
+        snapshot_before = torch.load(ckpt_dir / "ckpt_at_criterion.pt", map_location="cpu", weights_only=False)
+        assert snapshot_before["step"] == 6
+
+        second = train_mod.train_one(run, {"steps": 20, "scaffold_sleep_s": 0})  # resumes from step 10
+        snapshot_after = torch.load(ckpt_dir / "ckpt_at_criterion.pt", map_location="cpu", weights_only=False)
+    finally:
+        train_mod._load_full_config = orig_load_cfg
+        train_mod.evaluate_accuracy = orig_eval_acc
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+        if metrics_path.exists():
+            metrics_path.unlink()
+
+    assert second["steps_to_load1_0.83"] == 6
+    assert second["first_milestone_step"] == 6
+    assert snapshot_after["step"] == 6  # not overwritten with post-resume (step 16) weights
+
+
+def test_update_milestone_counters_latches_and_never_refires():
+    """comments.txt §16A.2: the shared per-eval update rule used by both the
+    live loop and history replay. A milestone latches after
+    `consecutive_evals_required` consecutive hits and never re-fires."""
+    import brainalign_wm.training.train as train_mod
+
+    criterion = {"load1": 0.83}
+    thresholds = {"load1": 0.83, "load3": 0.80}
+    mc = {k: 0 for k in thresholds}
+    mr = {k: False for k in thresholds}
+    cc = {k: 0 for k in criterion}
+    mst = {k: None for k in thresholds}
+    mtt = {k: None for k in thresholds}
+    mwt = {k: None for k in thresholds}
+    mjt = {k: None for k in thresholds}
+
+    accs = [
+        {"load1": 0.5, "load3": 0.5}, {"load1": 0.5, "load3": 0.5},
+        {"load1": 0.9, "load3": 0.5}, {"load1": 0.9, "load3": 0.5}, {"load1": 0.9, "load3": 0.5},
+        {"load1": 0.9, "load3": 0.5},  # a fourth consecutive pass must not re-fire
+    ]
+    steps = [2000, 4000, 6000, 8000, 10000, 12000]
+    newly = [
+        train_mod._update_milestone_counters(
+            acc, step, float(step), None, 128, criterion, thresholds, 3,
+            mc, mr, cc, mst, mtt, mwt, mjt,
+        )
+        for acc, step in zip(accs, steps)
+    ]
+    assert newly == [[], [], [], [], ["load1"], []]
+    assert mst["load1"] == 10000
+    assert mr["load1"] is True
+    assert mst["load3"] is None  # load3 never crossed 0.80
+
+
+def test_seed_milestone_state_from_history_reconstructs_true_step(tmp_path):
+    """comments.txt §16A.2: replaying a resumed run's pre-resume CSV rows
+    must recover the true confirmation step, not the first post-resume one."""
+    import csv as csv_mod
+
+    import brainalign_wm.training.train as train_mod
+
+    csv_path = tmp_path / "RUN.csv"
+    fieldnames = train_mod._MetricsLogger.FIELDNAMES
+    with open(csv_path, "w", newline="") as fh:
+        w = csv_mod.DictWriter(fh, fieldnames=fieldnames)
+        w.writeheader()
+        for step, load1 in [(10000, 0.9), (12000, 0.9), (14000, 0.9), (40000, 0.95)]:
+            w.writerow({
+                **{k: "" for k in fieldnames},
+                "step": step, "train_acc_load1": load1, "train_acc_load3": 0.5,
+                "wall_s": step / 10,
+            })
+
+    criterion = {"load1": 0.83}
+    thresholds = {"load1": 0.83, "load3": 0.80}
+    seeded = train_mod._seed_milestone_state_from_history(csv_path, 40000, criterion, thresholds, 3, 128)
+
+    assert seeded["milestone_reached"]["load1"] is True
+    assert seeded["milestone_steps_to"]["load1"] == 14000  # 3rd consecutive eval, not the 4th row (40000)
+    assert seeded["first_milestone_step"] == 14000
+    assert seeded["milestone_reached"]["load3"] is False
+
+
 def test_matched_requires_criterion_to_hold_at_final_checkpoint_not_just_ever():
     """`matched` reports inclusion at the checkpoint accuracy/geometry
     actually use (the final, max_steps evaluation), not merely that the

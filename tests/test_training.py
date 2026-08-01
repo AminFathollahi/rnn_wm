@@ -328,3 +328,77 @@ def test_matched_requires_criterion_to_hold_at_final_checkpoint_not_just_ever():
     # But inclusion at the final checkpoint must be False: the last
     # `consecutive_evals` evaluations (steps 6, 8, 10) do not all clear.
     assert result["matched"] is False
+
+
+def test_metrics_logger_resume_appends_without_truncating(tmp_path, monkeypatch):
+    """comments.txt §16 item 16.1: resuming a run must not destroy its
+    earlier accuracy trace, which is exactly what Gate B (§3.2/12.6) is
+    derived from. A second logger for the same run_id must append, keep
+    the original rows, and write the header exactly once."""
+    import brainalign_wm.training.train as train_mod
+
+    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+
+    logger = train_mod._MetricsLogger("RESUME_TEST")
+    logger.log({"step": 2000, "train_loss": "0.5"})
+    logger.log({"step": 4000, "train_loss": "0.4"})
+    logger.close()
+
+    resumed = train_mod._MetricsLogger("RESUME_TEST", resume=True)
+    resumed.log({"step": 6000, "train_loss": "0.3"})
+    resumed.close()
+
+    text = (tmp_path / "results" / "metrics" / "RESUME_TEST.csv").read_text()
+    lines = [l for l in text.splitlines() if l]
+    assert lines.count(",".join(train_mod._MetricsLogger.FIELDNAMES)) == 1
+    steps = [l.split(",")[0] for l in lines[1:]]
+    assert steps == ["2000", "4000", "6000"]
+
+
+def test_metrics_logger_skips_duplicate_step_at_resume_boundary(tmp_path, monkeypatch):
+    """If a resumed run re-executes a step already logged before the
+    interruption (possible if a future checkpoint cadence outpaces
+    eval_every), it must not double-write that row."""
+    import brainalign_wm.training.train as train_mod
+
+    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+
+    logger = train_mod._MetricsLogger("RESUME_DUP_TEST")
+    logger.log({"step": 4000, "train_loss": "0.4"})
+    logger.close()
+
+    resumed = train_mod._MetricsLogger("RESUME_DUP_TEST", resume=True)
+    resumed.log({"step": 4000, "train_loss": "0.4"})  # re-logged, must be dropped
+    resumed.log({"step": 6000, "train_loss": "0.3"})
+    resumed.close()
+
+    text = (tmp_path / "results" / "metrics" / "RESUME_DUP_TEST.csv").read_text()
+    rows = [l for l in text.splitlines() if l][1:]
+    assert [r.split(",")[0] for r in rows] == ["4000", "6000"]
+
+
+def test_metrics_logger_non_resume_overwrites_stale_file(tmp_path, monkeypatch):
+    """A genuinely fresh run (resume=False, the default -- no checkpoint was
+    restored) must still start a clean trace, even if a stale CSV from an
+    earlier run of the same run_id is sitting on disk. This is the regression
+    the append fix must not introduce: two independent `train_one` calls that
+    reuse a run_id without a checkpoint (e.g. re-running a smoke test) are not
+    a resume and must not accumulate rows."""
+    import csv
+
+    import brainalign_wm.training.train as train_mod
+
+    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+
+    first = train_mod._MetricsLogger("FRESH_TEST")
+    first.log({"step": 1, "train_loss": "0.9"})
+    first.close()
+
+    second = train_mod._MetricsLogger("FRESH_TEST")  # resume=False (default)
+    second.log({"step": 1, "train_loss": "0.1"})
+    second.close()
+
+    with open(tmp_path / "results" / "metrics" / "FRESH_TEST.csv") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1
+    assert rows[0]["train_loss"] == "0.1"

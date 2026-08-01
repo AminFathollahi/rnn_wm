@@ -3677,3 +3677,193 @@ Report to the user that both untested GRU cells clear real Gate A under
 Stage 1's own supervision levels, that D21's applicability gap is closed,
 and that a GRU-substrate Stage 1 is recommended but requires their explicit
 go-ahead to launch.
+
+---
+
+## comments.txt §16 item 16.1 — fix the resumed-run metrics truncation
+
+**Changed:** `_MetricsLogger.__init__` (`brainalign_wm/training/train.py`)
+opened `results/metrics/{run_id}.csv` in `"w"` mode unconditionally, so any
+resumed run destroyed its own earlier accuracy trace and started logging
+from the resume step -- exactly the artifact §3.2/12.6 derives Gate B from.
+Now takes an explicit `resume: bool` (the caller passes
+`ckpt_path.exists()`, the same condition that already governs whether
+`start_step` is restored from the checkpoint): when `True` and the file has
+rows, append and skip the header; otherwise truncate exactly as before, so
+a fresh run reusing a `run_id` without a checkpoint (e.g. a re-run smoke
+test) still starts a clean trace. A duplicate-step guard tracks the last
+written step and drops any row at or before it -- unreachable under this
+repo's current config (`checkpoint_every=200` divides `eval_every=2000`,
+so the checkpoint step at resume is always >= the last logged step) but
+kept because that divisibility is a config invariant, not a code
+guarantee.
+
+**Regression caught during this item:** the first version gated append on
+"file exists" alone, which broke `test_cfg_batch_size_override_takes_effect`
+(two independent `train_one` calls reusing a run_id with no checkpoint --
+not a resume). Fixed by gating on the `resume` flag instead of file
+presence; three tests now cover resume-append, non-resume-overwrite, and
+the resume-boundary duplicate guard.
+
+**Tests:** `test_metrics_logger_resume_appends_without_truncating`,
+`test_metrics_logger_skips_duplicate_step_at_resume_boundary`,
+`test_metrics_logger_non_resume_overwrites_stale_file`
+(`tests/test_training.py`).
+
+**ACCEPTANCE:**
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY -m pytest -q tests/test_training.py -k metrics_logger -v
+..                                                                       [100%]
+2 passed, 32 deselected in 0.81s
+$ $PY -m pytest -q
+(0 failures, exit 0)
+```
+Commit `1406c19`.
+
+---
+
+## comments.txt §16 item 16.2 — the two calibration runs
+
+**Launched**, both under `RL`, seed 0, GRU, `wm_only`, 80,000-step ceiling,
+concurrently, per item 16.1 landing first:
+
+```
+$PY scripts/run_phase11_pilot.py --s 1 --substrate gru --supervision RL --seed 0 --steps 80000 --diagnostic
+$PY scripts/run_phase11_pilot.py --s 0 --substrate gru --supervision RL --seed 0 --steps 80000 --diagnostic
+```
+
+Before Run B (the `FLATGRU_RL_s0` resume), archived the existing 40,000-step
+artifacts under `_40000step_archive` suffixes:
+`results/metrics/FLATGRU_RL_s0_40000step_archive.csv`,
+`results/resolved_config_flatgru_rl_s0_40000step_archive.yaml`. Confirmed no
+manifest collision on `HIERGRU_RL_s0` before launch, and confirmed from the
+first log lines and the checkpoint's own `step` field that Run B resumed at
+40,000 (not 0).
+
+**Run B (`FLATGRU_RL_s0`, resumed) result: completed, GO.** Final held-out
+accuracy at 80,000 steps (Wilson 95% CI, n=200/load): load1=1.000
+[0.9924, 1.0], load2=0.986 [0.9714, 0.9932], load3=0.942 [0.9179, 0.9593].
+`matched=true`. `ms_per_step=100.833`. The archived 40,000-step CSV prefix
+and the live (post-16.1-fix) CSV are byte-identical over their shared 20
+rows -- direct confirmation the append fix works. (`first_milestone_step`/
+`steps_to_*`/`trials_to_*`/`wall_s_to_*` in this run's own manifest row were
+WRONG when it first completed -- see the §16A.2 entry below for the defect
+and the fix.)
+
+**Run A (`HIERGRU_RL_s0`, fresh) result: still running when this entry was
+written** (see the §16A.2/16A.3 entries below for the in-flight finding).
+
+---
+
+## comments.txt §16 item 16.4 — require an explicit supervision level for the battery
+
+**Changed:** `run_grid.py::CELLS` carry no `supervision` key and the
+launcher had no `--supervision` flag, so every one of the 15 battery cells
+would fall through to `configs/config.yaml`'s `train.supervision: legacy`
+-- a pre-Phase-7 hybrid that is not one of the study's two preregistered
+levels (`SUP`, `RL`). Same fall-through defect class as F1/D21/D24, this
+time sitting under the project's headline result.
+
+`enumerate_runs` gained a `supervision: str | None = None` parameter
+(`None` preserves the historical fall-through for any other caller);
+`main`'s new `--supervision` flag has `choices=["SUP", "RL"]` and **no
+default**, is threaded into every enumerated run dict, and is passed to
+`build_resolved_config(..., run={"supervision": args.supervision})` so the
+grid's own resolved config records the choice explicitly rather than
+inheriting it silently. `legacy` is not an allowed choice.
+
+**Tests:** `test_enumerate_runs_carries_explicit_supervision`,
+`test_main_requires_supervision_flag` (`tests/test_scaffold.py`) -- the
+second asserts `SystemExit` both when `--supervision` is omitted and when
+`legacy` is passed.
+
+**ACCEPTANCE:**
+```
+$ $PY -m pytest -q tests/test_scaffold.py -v
+...........                                                              [100%]
+11 passed in 0.05s
+$ $PY -m pytest -q
+(0 failures, exit 0)
+```
+`configs/config.yaml` unchanged; nothing launched. Commit `a3497be`.
+
+---
+
+## comments.txt §16A.2 — resumed-run milestone counters were wrong, and the fix
+
+**Finding (advisor audit, confirmed independently against the manifest):**
+`FLATGRU_RL_s0`'s 80,000-step resume manifest row (`git=1406c19`) recorded
+`first_milestone_step=46000`, `steps_to_load1_0.83=46000`,
+`steps_to_load3_0.8=46000`. All three are artifacts: the milestone/
+criterion counters restarted at zero at the resume point (step 40,000)
+instead of reflecting the 0->40,000 history, so 46,000 is simply the third
+post-resume evaluation. The true values, already correctly recorded in the
+pre-resume manifest row (`git=be9d42b`, when the run first reached them
+live) and independently re-derivable from the complete
+`results/metrics/FLATGRU_RL_s0.csv` trace: `steps_to_load1_0.83=14000`
+(crossings at 10k/12k/14k), `steps_to_load3_0.8=22000` (crossings at
+18k/20k/22k).
+
+**Consequence beyond the manifest fields, discovered while investigating:**
+because `first_milestone_step` was wrongly `None` at the start of the
+resumed process, the live loop re-detected load1's milestone at step 46,000
+and re-ran the `ckpt_at_criterion.pt`-snapshot side effect --
+**overwriting** `results/checkpoints/FLATGRU_RL_s0/ckpt_at_criterion.pt`
+(previously the true step-14,000 weights) with the step-46,000 weights.
+Confirmed via the checkpoint's own `step` field
+(`torch.load(...)["step"] == 46000`). **The original step-14,000 snapshot
+is unrecoverable** -- no earlier copy was archived, since item 16.2's
+archival instruction covered the metrics CSV and resolved config, not
+checkpoints. Recorded here as an honest loss (N3); any analysis that would
+have read the true at-first-milestone geometry for this run cannot.
+
+**Fix:** `_update_milestone_counters` (pure per-evaluation counter update)
+factored out of the live loop; a new `_seed_milestone_state_from_history`
+replays a resumed run's preserved pre-resume CSV rows (from the §16.1 fix)
+through the same function before the training loop starts. `train_one` now
+calls it whenever `start_step > 0`, seeding `milestone_consecutive`,
+`milestone_reached`, `criterion_consecutive`, `milestone_steps_to`,
+`milestone_trials_to`, `milestone_wall_s_to`, `milestone_joules_to`, and
+`first_milestone_step` from history instead of zero/`None`. Because
+`milestone_reached[key]` is seeded `True` for an already-confirmed
+milestone, the live loop's `continue` guard now permanently skips it --
+which is what stops the checkpoint-overwrite side effect from recurring.
+`accuracy_at_first_milestone` intentionally stays `None` on a resume where
+the milestone predates the resume: the periodic CSV log only stored point
+accuracy, not the Wilson-CI `final_evaluation` snapshot that field
+normally holds, and fabricating one was rejected in favor of pointing at
+the run's own pre-resume manifest row, which already has the true value.
+
+**Manifest correction (append, not edit-in-place, per N9):** appended a
+third `FLATGRU_RL_s0` row to `results/manifest.jsonl` -- the true final
+(80,000-step) `accuracy`/`accuracy_at_max_steps`/`matched`/
+`human_percentile_*`/`wall_clock_*` from the resumed run's own completion,
+with `first_milestone_step`/`steps_to_*`/`trials_to_*`/`wall_s_to_*`/
+`accuracy_at_first_milestone` restored from the pre-resume (`be9d42b`) row.
+Carries a `"correction"` field explaining the defect and pointing at this
+entry. The two earlier rows for this `run_id` are untouched.
+
+**Tests:** `test_update_milestone_counters_latches_and_never_refires`,
+`test_seed_milestone_state_from_history_reconstructs_true_step`,
+`test_resume_preserves_true_milestone_step_and_does_not_reoverwrite_snapshot`
+(`tests/test_training.py`) -- the third is the end-to-end regression: it
+runs `train_one` to a fake milestone confirmation, resumes it, and asserts
+both the reported step and the on-disk `ckpt_at_criterion.pt`'s `step`
+field are unchanged by the resume.
+
+**ACCEPTANCE:**
+```
+$ $PY -m pytest -q tests/test_training.py -v
+........................................                                 [100%]
+38 passed in 79.50s
+$ $PY -m pytest -q
+........................................................................ [ 23%]
+........................................................................ [ 46%]
+........................................................................ [ 69%]
+........................................................................ [ 92%]
+.......................                                                  [100%]
+(0 F/E/s/x markers, exit 0)
+```
+Commit `a848256` (code + tests); manifest correction appended separately
+(see `results/manifest.jsonl`, the row carrying `"correction"`).

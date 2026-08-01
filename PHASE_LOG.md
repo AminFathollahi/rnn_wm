@@ -3046,3 +3046,99 @@ use the recomputed value where given above.
 ACCEPTANCE: diff to `brainalign_wm/training/train.py`, new regression test
 passing (output above), full `pytest -q` exit 0 (output above), and the
 audit table above.
+
+================================================================================
+Gradient-flow instrument: measured, not asserted (comments.txt item 13.2)
+================================================================================
+
+`PHASE_LOG.md`'s prior entries called the flat-vanilla failure "the textbook
+signature of vanishing gradient" without measuring it. New instrument
+`scripts/measure_gradient_flow.py` builds each core at initialization (no
+training), runs one 32-trial batch through a full Sternberg trial at load 1
+and load 3, backpropagates a single cross-entropy loss at the first probe
+tick (the only loss that must flow backward through the whole maintenance
+delay to reach the encode epoch), and reads `||dL/dh_t||` at every tick via
+`retain_grad()`. Self-check: a two-tick linear toy recurrence with a known
+analytic gradient ratio (`dL/dh1 / dL/dh2 == w` exactly); the instrument
+recovers it to `1e-6`.
+
+ACTUAL OUTPUT:
+```
+$ PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
+$ $PY scripts/measure_gradient_flow.py
+[measure_gradient_flow] self-check passed (two-tick toy recurrence, analytic gradient ratio recovered)
+core                         path       load ticks   radius  grad@encode1  grad@maintain0  grad@probe   attenuation
+-------------------------------------------------------------------------------------------------------------------
+flat_vanilla_init_default    flat          1    46    0.598     7.420e-10       1.054e-05   8.118e-02     1.420e+04
+flat_vanilla_init_default    flat          3    76    0.598     6.800e-18       1.063e-05   8.180e-02     1.562e+12
+flat_vanilla_radius_1.00     flat          1    46    1.000     2.932e-04       6.311e-03   7.846e-02     2.153e+01
+flat_vanilla_radius_1.00     flat          3    76    1.000     1.114e-06       6.455e-03   7.942e-02     5.794e+03
+hierarchical_vanilla_init_default h_worker      1    46    0.186     1.353e-05       1.033e-04   7.886e-02     7.637e+00
+hierarchical_vanilla_init_default h_manager     1    46    0.566     5.000e-04       3.472e-03   2.352e-02     6.944e+00
+hierarchical_vanilla_init_default h_worker      3    76    0.186     2.619e-07       1.034e-04   7.895e-02     3.948e+02
+hierarchical_vanilla_init_default h_manager     3    76    0.566     9.448e-06       3.484e-03   2.358e-02     3.688e+02
+flat_gru                     flat          1    46 0.590/0.636/0.612     1.325e-07       7.163e-05   8.071e-02     5.407e+02
+flat_gru                     flat          3    76 0.590/0.636/0.612     9.426e-13       7.108e-05   8.041e-02     7.541e+07
+```
+(`attenuation` = `grad@maintain0 / grad@encode1`, i.e. how much the gradient
+shrinks crossing backward from the start of the delay to the first encode
+tick -- the delay the model has to bridge. GRU's `radius` column lists all
+three gate blocks, reset/update/candidate, since `weight_hh` stacks one
+square matrix per gate.)
+
+INTERPRETATION, against the three branches specified before these numbers
+were produced:
+
+- Flat vanilla at its current (measured) init, spectral radius 0.598 (close
+  to the 0.616 +/- 0.011 previously reported over five seeds), attenuates by
+  4-12 orders of magnitude across the delay (1.4e4 at load 1, 1.6e12 at load
+  3), while the hierarchical arm's manager path -- ticking on its
+  period-5 clock, ~9 recurrent applications over the same trial instead of
+  ~46 -- attenuates by only 7-370x over the same loads. The first branch
+  holds: vanishing gradient is a real, measured mechanism, and it is
+  localized to the flat arm's long, every-tick recurrent path, not merely
+  inferred from a flat loss curve.
+- Rescaling flat vanilla's init to spectral radius 1.0, with nothing else
+  changed, cuts the attenuation by 3-4 orders of magnitude at load 1 (1.4e4
+  -> 21.5) and 8-9 orders of magnitude at load 3 (1.6e12 -> 5,794). This
+  does NOT match the second branch ("attenuates comparably to the current
+  init") -- initialization measurably matters for this mechanism, so a
+  radius-1.0 arm in the diagnostic is not a foregone failure on gradient-flow
+  grounds alone.
+- The flat GRU's per-block spectral radii (0.59/0.64/0.61) are close to flat
+  vanilla's 0.598 -- comparable raw recurrent-weight magnitude -- yet its
+  measured attenuation (540x at load 1, 7.5e7 at load 3) is 1-4 orders of
+  magnitude smaller than flat vanilla's at the SAME spectral radius. Per the
+  third branch's instruction ("if the flat GRU's profile looks like flat
+  vanilla's... say so; do not quietly proceed"): it does not look the same,
+  but the reason is informative rather than disqualifying -- multiplicative
+  gating changes the realized gradient path beyond what the raw weight's
+  spectral radius predicts. This means spectral radius alone is not the
+  whole story for GRU-vs-vanilla, but it does not block 13.4: 13.4 diagnoses
+  the flat VANILLA substrate's own init/signal axes, where this instrument
+  shows both matter.
+- Additional finding, not one of the three predeclared branches:
+  hierarchical vanilla's WORKER path (spectral radius 0.186, ticking every
+  step like the flat core) attenuates far LESS (7.6-395x) than its own raw
+  radius would predict for a 46-76 tick chain, because the worker's gradient
+  has a second route through the pooled/manager/g_t feedback loop, not just
+  its own direct recurrence. The hierarchy's advantage over flat vanilla is
+  therefore not fully captured by either "gatedness" or "worker spectral
+  radius" alone; both the manager's slow clock and this second gradient
+  route are candidate contributors, worth a named follow-up but not a
+  blocker for 13.4.
+
+CONCLUSION BEFORE 13.4: proceed. Both flat vanilla's own initialization and
+(pending 13.4's arms) its training signal are live candidates for the
+observed failure -- this instrument gives the first branch's confirmation
+but rules out the second branch's "initialization is irrelevant" reading,
+so the diagnostic is worth running rather than a foregone conclusion in
+either direction.
+
+Self-check and full trial run reproduced above; `$PY -m pytest -q` still
+exits 0 (no test file was touched by this item; the self-check lives in
+`scripts/measure_gradient_flow.py`'s own `__main__`, per comments.txt's
+"runnable as __main__ or a small test_*.py").
+
+ACCEPTANCE: the table above, the self-check passing (output above), and the
+branch conclusion stated above, before item 13.4 runs.

@@ -1616,6 +1616,14 @@ def train_one(run: dict, cfg: dict) -> dict:
     # missing value.
     milestone_consecutive = {k: 0 for k in milestone_thresholds}
     milestone_reached = {k: False for k in milestone_thresholds}
+    # `milestone_reached`/`milestone_consecutive` latch at the first
+    # confirming streak and then stop updating -- they back the efficiency
+    # DV `steps_to_<key>_<threshold>`, which must record when a criterion was
+    # first reached even if it later collapses. Gate A inclusion (`matched`)
+    # must instead reflect whether the criterion holds at the checkpoint
+    # geometry actually reads (max_steps), so track its own trailing streak,
+    # updated on every periodic eval with no latch.
+    criterion_consecutive = {k: 0 for k in criterion}
     milestone_steps_to = {k: None for k in milestone_thresholds}
     milestone_trials_to = {k: None for k in milestone_thresholds}
     milestone_wall_s_to = {k: None for k in milestone_thresholds}
@@ -1759,6 +1767,11 @@ def train_one(run: dict, cfg: dict) -> dict:
             # checkpoint + full evaluation snapshot -- what 12.4 compares
             # `ckpt.pt` (the max_steps, equal-duration snapshot, unchanged
             # below) against.
+            for _ckey, _cthresh in criterion.items():
+                criterion_consecutive[_ckey] = (
+                    criterion_consecutive[_ckey] + 1 if acc.get(_ckey, 0.0) >= _cthresh else 0
+                )
+
             for _mkey, _mthresh in milestone_thresholds.items():
                 if milestone_reached[_mkey]:
                     continue
@@ -1838,7 +1851,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # them specifically breaks.
     # §3.1: Gate A specifically (not the extra efficiency milestones) is the
     # behavioural-matching/inclusion verdict.
-    matched = all(milestone_reached[k] for k in criterion)
+    matched = all(criterion_consecutive[k] >= consecutive_evals_required for k in criterion)
     human_percentile = _human_percentiles(accuracy)
     return {
         "status": "completed",

@@ -272,3 +272,59 @@ def test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training
     # Training did NOT stop at the milestone: the final checkpoint is at
     # total_steps (10), not at the milestone step (6).
     assert ckpt["step"] == total_steps
+
+
+def test_matched_requires_criterion_to_hold_at_final_checkpoint_not_just_ever():
+    """`matched` reports inclusion at the checkpoint accuracy/geometry
+    actually use (the final, max_steps evaluation), not merely that the
+    criterion was reached at some earlier point and then lost. A run whose
+    accuracy clears the threshold for exactly the required streak and then
+    drops back to chance for the rest of training must report `matched`
+    False, even though the streak-based milestone (an efficiency DV, not an
+    inclusion verdict) still records the step where it first confirmed."""
+    import copy
+    import shutil
+
+    import brainalign_wm.training.train as train_mod
+
+    fake_cfg = copy.deepcopy(CFG)
+    fake_cfg["train"]["eval_every"] = 2
+    fake_cfg["gates"]["consecutive_evals"] = 3
+    fake_cfg["gates"]["criterion"] = {"load1": 0.83}
+    fake_cfg["gates"]["extra_milestones"] = {}
+    consecutive_evals = fake_cfg["gates"]["consecutive_evals"]
+    eval_every = fake_cfg["train"]["eval_every"]
+    total_steps = 10  # periodic evals at steps 2, 4, 6, 8, 10
+
+    calls = {"n": 0}
+
+    def fake_evaluate_accuracy(*args, **kwargs):
+        calls["n"] += 1
+        load1 = 1.0 if calls["n"] <= consecutive_evals else 0.5  # clears for evals 1-3, then chance
+        return {
+            "load1": load1, "load1_ci_lo": load1, "load1_ci_hi": load1,
+            "load2": load1, "load2_ci_lo": load1, "load2_ci_hi": load1,
+            "load3": load1, "load3_ci_lo": load1, "load3_ci_hi": load1,
+        }
+
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_matched_at_checkpoint"}
+    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    orig_load_cfg, orig_eval_acc = train_mod._load_full_config, train_mod.evaluate_accuracy
+    train_mod._load_full_config = lambda: fake_cfg
+    train_mod.evaluate_accuracy = fake_evaluate_accuracy
+    try:
+        result = train_mod.train_one(run, {"steps": total_steps, "scaffold_sleep_s": 0})
+    finally:
+        train_mod._load_full_config = orig_load_cfg
+        train_mod.evaluate_accuracy = orig_eval_acc
+        if ckpt_dir.exists():
+            shutil.rmtree(ckpt_dir)
+
+    # The milestone (efficiency DV) still records the step of the 3rd
+    # confirming eval, unaffected by the later collapse.
+    assert result["steps_to_load1_0.83"] == consecutive_evals * eval_every
+    # But inclusion at the final checkpoint must be False: the last
+    # `consecutive_evals` evaluations (steps 6, 8, 10) do not all clear.
+    assert result["matched"] is False

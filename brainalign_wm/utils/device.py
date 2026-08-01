@@ -1,7 +1,8 @@
 """Capability-aware device selection.
 
-`torch.cuda.is_available()` is not enough on this machine: torch 2.5.1 reports a CUDA
-device but cannot run on the RTX 5070 Ti (sm_120). Check the compiled arch list.
+`torch.cuda.is_available()` can be True even when the installed torch build has no
+kernels for the GPU's compute capability. Verify against the compiled arch list
+before trusting it.
 """
 from __future__ import annotations
 

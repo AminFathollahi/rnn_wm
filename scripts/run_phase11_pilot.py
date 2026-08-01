@@ -48,6 +48,11 @@ init, and signal (e.g. `VANFLAT_INIT100_SUP_s0`) instead of the historical
 above always resumes/reproduces exactly, regardless of what `--supervision`/
 `--recurrent-init-spectral-radius` happen to be set to.
 
+Non-vanilla diagnostic runs (comments.txt §14.1) drop the `INITnnn` segment
+entirely instead of inheriting the vanilla default, since the recurrent-init
+radius knob is inert on the GRU path: `FLATGRU_LEGACY_s0`, not
+`FLATGRU_INIT062_LEGACY_s0`.
+
 Usage:
   python scripts/run_phase11_pilot.py --s 0 --seed 0 --diagnostic \
       --supervision SUP --recurrent-init-spectral-radius 1.0
@@ -71,6 +76,21 @@ from run_grid import (  # noqa: E402
 PILOT_STEPS = 200_000
 
 
+def build_diagnostic_model_id(s: int, substrate: str, radius: float | None, supervision: str) -> str:
+    """Self-documenting diagnostic run_id prefix (comments.txt §13.4/§14.1).
+
+    The init-radius segment is vanilla-specific -- `_build_model` never reads
+    `recurrent_init_spectral_radius` on the GRU path, so labeling a non-vanilla
+    run with an `INITnnn` token would misstate a vanilla-only measurement as
+    if it applied to a different substrate.
+    """
+    structure = "FLAT" if s == 0 else "HIER"
+    if substrate == "vanilla":
+        init_label = "INIT062" if radius is None else f"INIT{round(radius * 100):03d}"
+        return f"VAN{structure}_{init_label}_{supervision.upper()}"
+    return f"{structure}{substrate.upper()}_{supervision.upper()}"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--s", type=int, required=True, choices=[0, 1], help="S=0 flat or S=1 hierarchical")
@@ -85,11 +105,12 @@ def main(argv=None) -> int:
                     help="vanilla recurrent init override; omitted (default) preserves the existing "
                          "uniform(-1/sqrt(H),1/sqrt(H)) draw, whose spectral radius measures ~0.616 at H=128")
     ap.add_argument("--diagnostic", action="store_true",
-                    help="use the self-documenting VANFLAT/VANHIER_INITnnn_SIGNAL_s{seed} run_id (comments.txt "
-                         "§13.4) instead of the historical M{s}0000_pilot_{substrate}_s{seed} -- pass this even "
-                         "for a diagnostic arm whose values happen to match the historical defaults (the "
-                         "current-init/legacy control), so it gets its own run_id rather than colliding with "
-                         "the original pilot's")
+                    help="use the self-documenting VANFLAT/VANHIER_INITnnn_SIGNAL_s{seed} run_id for vanilla, or "
+                         "FLAT/HIER{SUBSTRATE}_SIGNAL_s{seed} (no INITnnn segment) for other substrates "
+                         "(comments.txt §13.4/§14.1) -- instead of the historical "
+                         "M{s}0000_pilot_{substrate}_s{seed}. Pass this even for a diagnostic arm whose values "
+                         "happen to match the historical defaults (the current-init/legacy control), so it gets "
+                         "its own run_id rather than colliding with the original pilot's")
     ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     args = ap.parse_args(argv)
 
@@ -110,10 +131,9 @@ def main(argv=None) -> int:
     else:
         # Diagnostic naming (comments.txt §13.4): self-documenting so the
         # manifest never needs a side table to say what a row varied.
-        structure_label = "VANFLAT" if args.s == 0 else "VANHIER"
-        radius = args.recurrent_init_spectral_radius
-        init_label = "INIT062" if radius is None else f"INIT{round(radius * 100):03d}"
-        model_id = f"{structure_label}_{init_label}_{args.supervision.upper()}"
+        model_id = build_diagnostic_model_id(
+            args.s, args.substrate, args.recurrent_init_spectral_radius, args.supervision
+        )
         resolved_config_name = f"{model_id.lower()}_s{args.seed}"
     run_id = f"{model_id}_s{args.seed}"
     run = {

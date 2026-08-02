@@ -30,8 +30,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("cell", choices=RUNS)
     ap.add_argument("steps", type=int)
+    ap.add_argument("--run-suffix", default="", help="Appended to run_id to avoid checkpoint collisions when benchmarking multiple concurrent workers.")
     args = ap.parse_args()
-    run = RUNS[args.cell]
+    run = dict(RUNS[args.cell])
+    if args.run_suffix:
+        run["run_id"] = f"{run['run_id']}_{args.run_suffix}"
     # A stale checkpoint from a prior benchmark run would make train_one
     # RESUME instead of training from scratch, silently truncating the
     # measured step count -- always start clean.

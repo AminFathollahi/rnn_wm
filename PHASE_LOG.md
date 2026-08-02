@@ -3751,8 +3751,16 @@ rows -- direct confirmation the append fix works. (`first_milestone_step`/
 WRONG when it first completed -- see the §16A.2 entry below for the defect
 and the fix.)
 
-**Run A (`HIERGRU_RL_s0`, fresh) result: still running when this entry was
-written** (see the §16A.2/16A.3 entries below for the in-flight finding).
+**Run A (`HIERGRU_RL_s0`, fresh) result: completed, NO-GO.** Ran the full
+80,000-step ceiling as instructed (§16A.3: let it finish, do not intervene).
+Final held-out accuracy (Wilson 95% CI, n=200/load): load1=0.506 [0.4623,
+0.5496], load2=0.518 [0.4742, 0.5615], load3=0.472 [0.4286, 0.5158].
+`matched=false`. Never left chance at any of the 40 evaluations across the
+full trace (load1 range 0.41-0.575, no trend); `first_milestone_step` and
+`gate_a_step` are both `null` -- Gate A (load1>=0.83, 3 consecutive) was
+never approached, let alone reached. See the §16A.3 entry below for the
+full result and the required confound listing before drawing any
+"hierarchy cannot do this" conclusion.
 
 ---
 
@@ -3867,3 +3875,230 @@ $ $PY -m pytest -q
 ```
 Commit `a848256` (code + tests); manifest correction appended separately
 (see `results/manifest.jsonl`, the row carrying `"correction"`).
+
+---
+
+## comments.txt §16A.3 — hierarchical-GRU-under-`RL` result, and a wiring
+   smoke test
+
+`HIERGRU_RL_s0` ran to its full 80,000-step ceiling as instructed (do not
+kill early, do not retune, do not lower the gate, do not add a probe-time
+cue). It never left chance. Final held-out accuracy (Wilson 95% CI,
+n=200/load): load1=0.506 [0.4623, 0.5496], load2=0.518 [0.4742, 0.5615],
+load3=0.472 [0.4286, 0.5158]. `matched=false`, `gate_a_step=null`,
+`first_milestone_step=null`. Across all 40 evaluations from step 2,000 to
+80,000, load1 ranged 0.41-0.575 with no trend. For comparison, flat GRU
+under the identical signal, seed, and step reached load1=0.97 by step
+10,000 (§16.2 Run B). This is not a slow start.
+
+**Confound check before concluding anything (§6 rule).** This is the first
+hierarchical model (`S=1`, `HRLCore`: `manager` + `worker` submodules,
+`brainalign_wm/models/hrl.py`) ever trained in this codebase under any
+supervision signal, at a single seed, under `RL` (no CE warmup — unlike
+`legacy`, which gives hierarchical arms an 8,000-step supervised head
+start). Two claims are live and are not the same claim: "the S=1 scaffold
+is wired wrong" vs. "the S=1 scaffold is wired right but hierarchical
+policy-gradient credit assignment is harder to bootstrap from scratch than
+flat policy-gradient credit assignment." Reporting a NO-GO without ruling
+out the first would risk mislabeling a plumbing bug as a scientific
+finding.
+
+**Wiring smoke test (in scope per §16A.3, run after `HIERGRU_RL_s0`
+finished so it did not contend for the GPU):** built an `S=1` GRU core
+with `seed_everything(0)` + `_build_model(..., S=1, M=0, P=0)`, snapshotted
+`core.state_dict()` as the true pre-training init, then called
+`train_one` directly for 500 steps under the same `RL` signal, seed 0
+(`run_id=SMOKE_HIER_WIRING_s0`, not written to the manifest — this is a
+diagnostic, not a battery cell). Compared the resulting checkpoint's
+`core` state dict against the init snapshot, per submodule:
+
+```
+manager: n_tensors=4 delta_L2=1.145186 init_L2=8.542941  rel_change=0.134051
+worker:  n_tensors=5 delta_L2=3.086816 init_L2=108.959067 rel_change=0.028330
+g_proj:  n_tensors=2 delta_L2=0.496378 init_L2=3.426078  rel_change=0.144882
+```
+
+Both `manager` and `worker` parameters moved substantially over 500 steps
+— `manager`'s relative change (13.4%) is larger than `worker`'s (2.8%), not
+smaller. If the manager were disconnected from the gradient path (a
+wiring defect), its delta would be ~0 while worker moved; that is not what
+happened. **Conclusion: the forward/backward path routes gradients to
+both submodules under `RL`. The flat-at-chance result is not a wiring
+defect** at the level this test can detect (it does not rule out subtler
+defects — e.g. a manager signal that is wired but uninformative — only
+"disconnected").
+
+Reproduction:
+```
+$ PYTHONPATH=$PWD $PY - <<'EOF'
+# see this entry's prose for the exact snapshot/train/diff steps;
+# script not checked in (one-off diagnostic, not a battery cell) --
+# results/checkpoints/SMOKE_HIER_WIRING_s0/ckpt.pt and
+# results/metrics/SMOKE_HIER_WIRING_s0.csv are the retained artifacts.
+EOF
+```
+
+**Verdict: report `HIERGRU_RL_s0` as a NO-GO for hierarchical-GRU under
+`RL` at seed 0** — single seed, one signal, wiring checked and clean,
+matching §16A.3's framing exactly (a finding to diagnose further if the
+user wants more seeds/signals, not yet a verdict on hierarchy in
+general). It does not, on its own, invalidate the preregistered S=1 arm;
+it says this specific cell needs either more seeds, a signal with warmup,
+or both before any general claim about hierarchical credit assignment is
+made.
+
+---
+
+## comments.txt §16.3 — Gate B derivation (S=0 plateau; S=1 clause
+   unsatisfiable, per §16A.4)
+
+Source: `results/metrics/FLATGRU_RL_s0.csv`, column `train_acc_load3` —
+**misleadingly named**: this is the held-out evaluation accuracy from
+`evaluate_accuracy`, not a training-batch curve. Noted here so nobody
+re-derives Gate B from what they think is a training curve.
+
+**(a) LITERAL §3.2/12.6 rule** — smallest M with `acc[M+20000] - acc[M] <
+0.01`, single-point, computed independently from the full 0-80,000 trace:
+
+```
+M       gain(load3)   M       gain(load3)
+2000    +0.280        32000   +0.030
+4000    +0.275        34000   +0.025
+6000    +0.355        36000   +0.085
+8000    +0.355        38000   +0.040
+10000   +0.200        40000   +0.020
+12000   +0.180        42000   -0.005
+14000   +0.170        44000   -0.010
+16000   +0.120        46000   +0.020
+18000   +0.015        48000   +0.005
+20000   +0.055        50000   +0.030
+22000   +0.130        52000   +0.005
+24000   +0.050        54000   -0.005
+26000   +0.050        56000   -0.020
+28000   +0.010        58000   +0.020
+30000   -0.025        60000   +0.025
+```
+First crossing below 0.01 at M=30,000, but it does not hold — M=32000,
+36000, 38000, 46000, 50000, 58000, 60000 all relapse back above 0.01. The
+literal rule is noisy exactly as §16.3 warned it could be.
+
+**(b) NOISE-AWARE rule** (each endpoint = mean of the 3 evaluations ending
+at that step; from the addendum, §16A.4, and cross-checked independently
+against the same CSV): three-evaluation window mean at load3 is 0.803 at
+20k, 0.902 at 30k, 0.867 at 40k, 0.913 at 50k, 0.915 at 60k, 0.923 at 80k.
+Gains over the following 20k fall below 0.01 first at M=30,000 (0.0117,
+marginally *above* — not a true crossing) and unambiguously at M=60,000
+(0.0083), with a non-monotonic dip in between (consistent with the
+independent recomputation above, which finds sustained sub-0.01 windows
+only from M~54,000 onward).
+
+**(a) and (b) disagree**, both on the number (30,000 vs 60,000) and on
+whether 30,000 is a real, sustained crossing at all (it is not, under
+either form, once relapse is checked). Per §16.3's decision rule this
+would normally mean: propose (b)'s number, note the disagreement, and file
+a dated amendment to `preregistration.md`.
+
+**But per §16A.4, that step does not run this round.** The preregistered
+rule (§3.2) requires the load-3 plateau to hold "in BOTH the S=0 and S=1
+pilot arms." `HIERGRU_RL_s0` never left chance (§16A.3 above) — there is
+no S=1 plateau to report, so the rule as written is unsatisfiable with
+the data this round produced. Per explicit instruction: do not drop the
+S=1 clause, do not substitute the `SUP` arm for it, do not propose a Gate
+B from the S=0 arm alone and label it as satisfying the rule.
+
+**So: no Gate B is proposed this round.** The S=0 plateau tables above are
+real and reported. Resolving the S=1 clause requires either a working S=1
+arm (more seeds/signals on the hierarchical cell, informed by the §16A.3
+wiring finding above) or a dated `preregistration.md` amendment relaxing
+the "both arms" requirement — both are the user's call.
+
+**Verification that `RL` remains the correct, conservative calibration
+choice (16A.1's requirement to check rather than assume):**
+`results/metrics/FLATGRU_SUP_s0.csv` has only 21 rows, ending at step
+40,000 (never resumed to 80,000 in this project). Read directly: by its
+own last recorded step (40,000) `SUP`'s load3 is already at parity with or
+ahead of where `RL` was at the same step (`RL`'s load3 at 40k = 0.895,
+window mean at M=40000 = 0.867), consistent with the advisor's stated
+"`RL` is ~2.3x slower to Gate A." `RL` staying the conservative arm to
+calibrate on is confirmed, not assumed.
+
+`configs/config.yaml` is unchanged (`git diff --stat configs/config.yaml`
+is empty) — no Gate B was written anywhere.
+
+---
+
+## comments.txt §16A.6 — concurrency throughput benchmark and campaign
+   budget
+
+Extended `scripts/bench_throughput.py` with an optional `--run-suffix`
+flag so multiple concurrent invocations do not collide on the same
+`bench_s0` checkpoint directory — the only change; the benchmark's own
+timing/subtraction logic is untouched. Measured cell `s0` (`M00000`,
+flat, S=0 — architecturally representative of per-step cost across the
+battery, since §16A.6 already established the loop is overhead-bound, not
+arithmetic-bound, so S/M/P/T bits change little per-step relative to
+concurrency contention), 2,000 steps per run, `OMP_NUM_THREADS=2
+MKL_NUM_THREADS=2` (matching the calibration runs), GPU otherwise idle:
+
+```
+workers   per-run wall_s (all runs)                    per-run ms/step   system throughput
+1         140.353                                        70.18            14.25 steps/s
+4         157.862 / 158.745 / 157.804 / 159.957 (avg 158.59, max 159.96)   79.30    50.01 steps/s
+8         185.999/185.531/183.252/184.285/186.199/       92.36            85.93 steps/s
+          184.847/183.112/184.542 (avg 184.72, max 186.20)
+```
+
+Mild per-run slowdown under contention (70.18 -> 79.30 -> 92.36 ms/step,
++13%/+32% at 4/8 workers) but system throughput keeps climbing (14.25 ->
+50.01 -> 85.93 steps/s) because 8 concurrent runs on 32 cores / 12,227 MiB
+VRAM is nowhere near either ceiling (16A.6's own measurement: ~453 MiB and
+~1.8 cores per run) — confirms the addendum's prediction that
+overhead-bound work parallelizes well, with a real (not fictional) number
+behind the 8-worker column now.
+
+**Campaign budget.** No Gate B was set this round (§16.3 above), so this
+is illustrative at the two S=0-derived candidate M values, not a proposal:
+30 cells/seed (15 cells x {SUP, RL}, §16A.1) x M steps, using the tier-1
+(uncontended) 70.18 ms/step as the serial/GPU-hours basis and the measured
+system throughput per tier for wall-clock:
+
+```
+                          GPU-hours    wall-clock hours
+                          (serial)     1 worker   4 workers   8 workers
+Per seed, M=30,000        17.54 h      17.54 h     5.00 h      2.91 h
+Per seed, M=60,000        35.09 h      35.09 h    10.00 h      5.82 h
+
+x2 seeds,  M=30,000       35.09 h      35.09 h    10.00 h      5.82 h
+x2 seeds,  M=60,000       70.18 h      70.18 h    20.00 h     11.64 h
+x4 seeds,  M=30,000       70.18 h      70.18 h    20.00 h     11.64 h
+x4 seeds,  M=60,000      140.35 h     140.35 h    40.00 h     23.27 h
+x8 seeds*, M=30,000      140.35 h     140.35 h    40.02 h     23.27 h
+x8 seeds*, M=60,000      280.70 h     280.70 h    80.02 h     46.55 h
+```
+(*8 seeds is `preregistration.md`'s stated *target*, not a committed
+count — its own text says the actual grid seed count is "set by the E3
+wall-clock budget," i.e. by this table.)
+
+At 8 workers the campaign is roughly a 1-day job (M=30,000) to a 2-day job
+(M=60,000) per seed-doubling up to 4 seeds, and approaches a week only at
+8 seeds x M=60,000. Cutting hidden width or shrinking the network was
+considered and rejected per 16A.6's own instruction — H=128 is
+load-bearing for the effective-synapse-matched comparison and is not
+where the time goes; concurrency is the lever that matters here, and it
+is not fictional.
+
+**ACCEPTANCE:**
+```
+$ PYTHONPATH=$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 $PY scripts/bench_throughput.py s0 2000 --run-suffix w1a
+RESULT cell=s0 steps=2000 wall_s=140.3531
+$ (four concurrent, --run-suffix w4a..w4d): wall_s = 157.8617, 158.7449, 157.8043, 159.9567
+$ (eight concurrent, --run-suffix w8a..w8h): wall_s = 185.9992, 185.5314, 183.2515, 184.2852,
+  186.1994, 184.8469, 183.1115, 184.5421
+$ $PY -m pytest -q
+........................................................................ [ 23%]
+........................................................................ [ 46%]
+........................................................................ [ 69%]
+........................................................................ [ 92%]
+.......................                                                  [100%]
+(0 F/E/s/x markers, exit 0)
+```

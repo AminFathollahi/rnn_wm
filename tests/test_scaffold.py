@@ -184,3 +184,17 @@ def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatc
     assert gate_b, "gates.max_steps is unset; Gate B must be written before a campaign launch"
     assert captured["steps"] == gate_b
     assert "from gates.max_steps" in capsys.readouterr().out
+
+
+def test_every_cell_states_substrate_and_recurrent_init():
+    """CLAUDE.md non-negotiable / §18.8 item 8: every run dict must state
+    substrate, supervision and the recurrent init explicitly. An omitted key
+    inheriting a config default has invalidated two conclusions in this
+    project (F1; D20, where a `substrate: null` manifest row hid a positive
+    S=1 GRU result), and the manifest records the run dict."""
+    runs = rg.enumerate_runs([0], supervision="SUP", include_local_learning=True)
+    assert len(runs) == len(rg.CELLS) + len(rg.LOCAL_LEARNING_CELLS)
+    for r in runs:
+        assert r["substrate"] == "gru", r["run_id"]
+        assert "recurrent_init_spectral_radius" in r, r["run_id"]
+        assert r["supervision"] == "SUP", r["run_id"]

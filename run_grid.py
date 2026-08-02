@@ -98,8 +98,19 @@ _ABLATION_BITS = [
     (0, 0, 0, 1, 1),  # T+D: spatial smoothness + E/I balance on the flat substrate, isolated from S/M/P
     (1, 0, 0, 0, 1),  # S+D: hierarchy + Dale's law "bio-plausible backbone", isolated from M/P/T
 ]
+# `substrate` and `recurrent_init_spectral_radius` are stated on every cell
+# rather than left to inherit `configs/config.yaml`'s `model.*` defaults.
+# `train_one` reads both from the run dict when present (`train.py:1567,1571`),
+# and the manifest records the run dict -- so an omitted key is a `null`
+# manifest field that says nothing about what actually trained. That exact
+# fall-through has invalidated two conclusions here (F1, and D20, where
+# `M10000_pilot_s0`'s `substrate: null` hid a positive S=1 GRU result for
+# weeks). The values equal today's config defaults; the point is that they are
+# recorded per run and survive a later edit to the config.
+_SUBSTRATE = {"substrate": "gru", "recurrent_init_spectral_radius": None}
+
 CELLS = [
-    {"model_id": f"M{s}{m}{p}{t}{d}", "S": s, "M": m, "P": p, "T": t, "D": d}
+    {"model_id": f"M{s}{m}{p}{t}{d}", "S": s, "M": m, "P": p, "T": t, "D": d, **_SUBSTRATE}
     for (s, m, p, t, d) in _ABLATION_BITS
 ]
 
@@ -108,7 +119,7 @@ CELLS = [
 # key). Distinct model_ids (M**L) so they never collide with the Core
 # P-cells above -- not enumerated by default (see `--local-learning`).
 LOCAL_LEARNING_CELLS = [
-    {"model_id": f"M{s}{m}L", "S": s, "M": m, "L": 1}
+    {"model_id": f"M{s}{m}L", "S": s, "M": m, "L": 1, **_SUBSTRATE}
     for s in (0, 1) for m in (0, 1)
 ]
 
@@ -625,7 +636,8 @@ def main(argv=None) -> int:
     # invocation shares this one hash, and the resolved config is dumped
     # verbatim so a run is fully reproducible from the manifest alone.
     resolved_cfg = (
-        build_resolved_config(full_cfg, cfg, args.tier, run={"supervision": args.supervision})
+        build_resolved_config(full_cfg, cfg, args.tier, model_overrides=dict(_SUBSTRATE),
+                              run={"supervision": args.supervision})
         if full_cfg else {"tier": {"name": args.tier, **cfg}}
     )
     cfg_hash = config_hash(resolved_cfg)

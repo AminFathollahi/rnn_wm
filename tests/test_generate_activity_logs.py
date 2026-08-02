@@ -60,3 +60,27 @@ def test_run_id_extras_detects_perf_matched_baselines():
     assert _run_id_extras("M00000_2x") == (False, 0.0, 2)
     assert _run_id_extras("M00000_l1") == (False, 0.0, 1)
     assert _run_id_extras("M00000_dropout") == (False, 0.0, 1)
+
+
+def test_parse_run_id_handles_supervision_namespaced_ids():
+    """advisor.md D32: campaign run_ids carry the supervision level
+    (`M00000_SUP_s0`). The 5-bit prefix still drives the replay
+    architecture, and `model_id` keeps the full string so the parquet
+    filename stays unambiguous -- same convention as the `_pbwm` suffix."""
+    assert _parse_run_id("M00000_SUP_s0") == ("M00000_SUP", 0, 0, 0, 0, 0, 0)
+    assert _parse_run_id("M11111_RL_s7") == ("M11111_RL", 1, 1, 1, 1, 1, 7)
+    assert _parse_run_id("M01L_RL_s2") == ("M01L_RL", 0, 1, 0, 0, 0, 2)
+
+
+def test_activity_log_path_namespaces_non_default_checkpoints():
+    """advisor.md D33: the Gate A log must not overwrite the Gate B log.
+    `ckpt.pt` keeps the original filename so nothing that already reads
+    these logs changes."""
+    from pathlib import Path
+
+    from brainalign_wm.training.generate_activity_logs import activity_log_path
+
+    out = Path("/tmp/logs")
+    assert activity_log_path("M00000_SUP_s0", "ckpt.pt", out) == out / "M00000_SUP_s0.parquet"
+    assert activity_log_path("M00000_SUP_s0", "ckpt_at_criterion.pt", out) == out / "M00000_SUP_s0_at_criterion.parquet"
+    assert activity_log_path("X", "ckpt.pt", out) != activity_log_path("X", "ckpt_at_criterion.pt", out)

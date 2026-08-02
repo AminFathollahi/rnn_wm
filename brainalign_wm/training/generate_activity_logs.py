@@ -87,8 +87,42 @@ def _parse_run_id(run_id: str) -> tuple[str, int, int, int, int, int, int]:
     S/M/P/T/D still come from the leading 5 (or 2+L) characters via
     `_parse_model_id`."""
     model_part, seed_part = run_id.split("_s")
-    S, M, P, T, D = _parse_model_id(model_part)
+    try:
+        S, M, P, T, D = _parse_model_id(model_part)
+    except ValueError:
+        arch = _arch_from_manifest(run_id)
+        if arch is None:
+            raise
+        S, M, P, T, D = arch
     return model_part, S, M, P, T, D, int(seed_part)
+
+
+def _arch_from_manifest(run_id: str) -> Optional[tuple[int, int, int, int, int]]:
+    """S/M/P/T/D as RECORDED for a run whose run_id does not encode them --
+    the pilot and diagnostic naming (`FLATGRU_SUP_s0`, `HIERGRU_RL_s0`,
+    `VANFLAT_INIT100_SUP_s0`). Returns `None` if there is no such row, so
+    `_parse_model_id`'s original error still surfaces for a genuine typo.
+
+    The manifest row is the authority on what actually trained. This project
+    has twice had a conclusion invalidated by inferring a run's architecture
+    instead of reading the recorded one (F1, and the 2026-08-01 supervision
+    finding); a run_id is a filename, not a record."""
+    manifest = ROOT / "results" / "manifest.jsonl"
+    if not manifest.exists():
+        return None
+    import json
+
+    found = None
+    for line in manifest.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("run_id") == run_id and all(k in rec for k in "SMPTD"):
+            found = tuple(int(rec[k]) for k in "SMPTD")  # last row wins, as elsewhere
+    return found
 
 
 def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
@@ -107,6 +141,22 @@ def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
         0.12 if model_id.endswith("_idcatch") else 0.0,
         2 if model_id.endswith("_2x") else 1,
     )
+
+
+def activity_log_path(run_id: str, checkpoint_name: str = "ckpt.pt", out_dir: Optional[Path] = None) -> Path:
+    """Where one run's activity log lives, for a given checkpoint (D33).
+
+    `ckpt.pt` (Gate B, `max_steps`) keeps the original unsuffixed filename,
+    so nothing that already reads these logs changes. Any other checkpoint
+    -- in practice `ckpt_at_criterion.pt`, the Gate A snapshot -- gets its
+    own file: the two logs describe the same network at different training
+    durations, which is the whole point of §12.4's equal-performance vs
+    equal-duration comparison, and a Gate A log overwriting the Gate B log
+    is worse than not having one. Mirrors `scripts/run_geometry.py::
+    out_csv_for`, which solved the same problem for the topology CSV."""
+    out_dir = out_dir or (ROOT / "results" / "activity_logs")
+    suffix = "" if checkpoint_name == "ckpt.pt" else "_" + Path(checkpoint_name).stem.removeprefix("ckpt_")
+    return out_dir / f"{run_id}{suffix}.parquet"
 
 
 def _load_checkpoint(front_end, core, heads, run_id: str, device, checkpoint_name: str = "ckpt.pt") -> int:
@@ -237,10 +287,19 @@ def replay_session(
     return t
 
 
-def generate_activity_log(run_id: str, dandi_data, out_dir: Optional[Path] = None) -> Path:
+def generate_activity_log(
+    run_id: str, dandi_data, out_dir: Optional[Path] = None, checkpoint_name: str = "ckpt.pt",
+) -> Path:
     """Generates (or overwrites) the activity log for one completed run,
     replaying every session in `dandi_data` for which cached stimulus
-    features exist. Returns the output Parquet path."""
+    features exist. Returns the output Parquet path.
+
+    `checkpoint_name` (D33): which snapshot to replay. Every activity-derived
+    DV in the study -- RSA, alignment, decoding, cross-temporal, dPCA,
+    persistence, dynamics -- is computed from this log, so before this
+    parameter existed all of them were Gate-B-only and the retained Gate A
+    checkpoint reached only `run_geometry.py`'s six weight-derived topology
+    metrics. Output filename comes from `activity_log_path`."""
     cfg = _load_full_config()
     model_id, S, M, P, T, D, seed = _parse_run_id(run_id)  # noqa: F841 -- T/D never affect the frozen forward pass
     device = torch.device("cpu")  # replay is cheap (forward-only, no batching benefit from GPU here)
@@ -253,14 +312,13 @@ def generate_activity_log(run_id: str, dandi_data, out_dir: Optional[Path] = Non
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
     front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
-    _load_checkpoint(front_end, core, heads, run_id, device)
+    _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint_name)
     front_end.eval()
     core.eval()
     heads.eval()
     reflective_gate = ReflectiveGate(cfg["mechanisms"]["reflection_lambda"], cfg["mechanisms"]["reflection_beta"]) if M else None
 
-    out_dir = out_dir or (ROOT / "results" / "activity_logs")
-    out_path = out_dir / f"{run_id}.parquet"
+    out_path = activity_log_path(run_id, checkpoint_name, out_dir)
     trials = dandi_data.trials()
 
     t = 0
@@ -328,7 +386,9 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
     return out_path
 
 
-def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: Optional[Path] = None) -> Path:
+def generate_activity_log_reflection_shuffled(
+    run_id: str, dandi_data, out_dir: Optional[Path] = None, checkpoint_name: str = "ckpt.pt",
+) -> Path:
     """Reflection-shuffle causal control (H2's causal claim):
     re-replays every trial using that SAME trial's own natural R_t sequence
     (read back from the normal activity log, generating it first if
@@ -348,9 +408,12 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
         raise ValueError(f"{run_id} has M=0 (no reflective gate) -- reflection-shuffle lesion is undefined")
     device = torch.device("cpu")
 
-    normal_path = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+    # The lesion is defined against the SAME checkpoint's unshuffled log --
+    # H2's causal claim is within one snapshot, so a Gate A shuffle compared
+    # against a Gate B baseline would confound the lesion with duration.
+    normal_path = activity_log_path(run_id, checkpoint_name)
     if not normal_path.exists():
-        generate_activity_log(run_id, dandi_data)
+        generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint_name)
     normal_df = read_log(normal_path)
 
     # hashlib, NOT Python's built-in hash(): hash() on a str is salted per
@@ -373,14 +436,13 @@ def generate_activity_log_reflection_shuffled(run_id: str, dandi_data, out_dir: 
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
     front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
-    _load_checkpoint(front_end, core, heads, run_id, device)
+    _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint_name)
     front_end.eval()
     core.eval()
     heads.eval()
     reflective_gate = ReflectiveGate(cfg["mechanisms"]["reflection_lambda"], cfg["mechanisms"]["reflection_beta"])
 
-    out_dir = out_dir or (ROOT / "results" / "activity_logs")
-    out_path = out_dir / f"{run_id}__reflection_shuffled.parquet"
+    out_path = activity_log_path(f"{run_id}__reflection_shuffled", checkpoint_name, out_dir)
     trials = dandi_data.trials()
 
     t = 0

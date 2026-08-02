@@ -185,6 +185,11 @@ def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatc
     assert captured["steps"] == gate_b
     assert "from gates.max_steps" in capsys.readouterr().out
 
+    # smoke/dev exist to run short; Gate B is a results-tier commitment.
+    captured.clear()
+    rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP"])
+    assert captured["steps"] != gate_b and captured["steps"] < 1000
+
 
 def test_every_cell_states_substrate_and_recurrent_init():
     """CLAUDE.md non-negotiable / §18.8 item 8: every run dict must state

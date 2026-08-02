@@ -624,7 +624,9 @@ def main(argv=None) -> int:
     # snapshot for every geometry DV, at 1.9x the authorized budget, silently.
     # Only the campaign launcher resolves this -- the pilots and Stage 1 pass
     # their own explicit `steps` and must keep it.
-    gate_b = (full_cfg.get("gates") or {}).get("max_steps")
+    # `full` only: `smoke` and `dev` exist to run short, and Gate B is a
+    # results-tier commitment, not a global one.
+    gate_b = (full_cfg.get("gates") or {}).get("max_steps") if args.tier == "full" else None
     if gate_b:
         cfg["steps"] = int(gate_b)
         print(f"[run_grid] Gate B: steps={cfg['steps']} from gates.max_steps "

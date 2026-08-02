@@ -28,13 +28,18 @@ test: ## run unit tests (scaffold + package)
 	$(PY) -m pytest -q
 
 smoke: ## end-to-end check of the training entrypoint (15 cells x 1 seed, minimal step budget)
-	$(PY) run_grid.py --seeds 1 --budget 20m --tier smoke
+	$(PY) run_grid.py --seeds 1 --budget 20m --tier smoke --supervision SUP
 
 recovery: ## simulated-spike geometry-recovery gate -- must pass before real-data alignment
 	$(PY) -m brainalign_wm.neural.sim_brain.recovery_gate --config configs/config.yaml
 
-run-grid: ## execute the full training grid (resumable, breadth-before-depth over cells x seeds)
-	$(PY) run_grid.py --seeds 8 --budget 48h --tier full
+# The campaign is four passes, not one (comments.txt §18.5): 15 core cells
+# under SUP, the 7 S=0 core cells under RL, the 4 local-learning cells under
+# RL, and the 8 S=1 cells under RL at 2 seeds as a replicated failure arm.
+# This target is the first pass. Run the other three by hand; each is
+# resumable and skips whatever the manifest already records as completed.
+run-grid: ## execute the SUP core pass of the campaign (pass 1 of 4 -- see comments.txt §18.5)
+	$(PY) run_grid.py --seeds 8 --workers 8 --budget 48h --tier full --supervision SUP
 
 run-grid-demo: ## demonstrate the orchestrator with the synthetic stub (no torch required)
 	$(PY) run_grid.py --scaffold --seeds 3 --budget 30m --tier dev

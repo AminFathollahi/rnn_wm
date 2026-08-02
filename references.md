@@ -79,6 +79,56 @@ published analogue of what this repo is building.
   §13.4's vanilla init x supervision diagnostic (advisor.md §7b, 2026-08-01)
   — it decided which two confounds to test, not the diagnostic's outcome.
 
+### Henderson, P., Islam, R., Bachman, P., Pineau, J., Precup, D., & Meger, D. (2018). *Deep reinforcement learning that matters.* AAAI 2018. *(web only)*
+
+- Documents that policy-gradient training outcomes vary materially across
+  runs differing only in random seed and minor implementation choices.
+- Cited in the 2026-08-01 advisor audit (advisor.md §7b, "arm G's evidence
+  does not yet cover Stage 1's own regimes") as a second, independent reason
+  not to generalize from a single-seed `legacy`-supervision result: `legacy`
+  spends the overwhelming majority of its steps on REINFORCE, so
+  `FLATGRU_LEGACY_s0`'s single-seed result carries exactly the
+  policy-gradient seed fragility this paper describes, on top of the
+  separate SUP/RL-applicability gap (D21) `comments.txt` §15 addresses.
+
+### Huang, A., Singh, S.H., Martinelli, F., & Rajan, K. (2025). *Measuring and controlling solution degeneracy across task-trained recurrent neural networks.* NeurIPS 2025. arXiv:2410.03972 *(web only)*
+
+- Trained 3,400 RNNs on four neuroscience-relevant tasks (flip-flop memory,
+  sine generation, delayed discrimination, path integration) varying task
+  complexity, learning regime, network size, and regularization; found that
+  behaviorally-matched networks can still diverge substantially in
+  neural-dynamics and weight-space geometry.
+- Flagged in advisor.md §10 (2026-08-01) as the reason Stage 2's
+  RSA/geometry comparisons cannot assume a matched-behavior cell has a
+  single stable dynamical solution just because Gate A passed — the
+  degeneracy needs to be checked, not assumed away. Not actioned as an
+  immediate diagnostic-seed requirement because `run_stage1_grid.py` already
+  plans 3 seeds/cell and the current substrate-learnability gaps
+  (`FLATGRU_LEGACY_s0` vs flat vanilla) are far outside seed-noise margins.
+
+### Tolmachev, P., & Engel, T.A. (2025). *Single-unit activations confer inductive biases for emergent circuit solutions to cognitive tasks.* Nature Machine Intelligence 7(10), 1742–1754. doi:10.1038/s42256-025-01127-2 *(web only)*
+
+- Trained 100 networks each across six RNN architectures (varying the
+  single-unit activation function, with and without a Dale's-law
+  constraint) on the same cognitive tasks, **"to a similar performance
+  level"**, and only then compared representations. Found qualitatively
+  distinct circuit solutions — different population trajectories,
+  single-unit selectivity, and fixed-point structure — despite the matched
+  behaviour, with tanh networks the most divergent of the set.
+- Used for two decisions (advisor.md §6 guardrail, D23, and the §7b entry of
+  2026-08-01). First, it is the published precedent for equalizing
+  performance *before* a representational comparison, which is why
+  `human_percentile_load{1,2,3}` has to be read into the C1-C4 comparisons
+  rather than only recorded: `FLATGRU_SUP_s0` finished above the human
+  maximum at load 2 (0.982 vs 0.9722) while `FLATGRU_RL_s0` sat
+  mid-distribution, so supervision and position-in-the-human-range currently
+  move together. Second, with Huang et al. (2025) above, it is why the
+  vanilla→GRU substrate migration must be reported as a scope limit on every
+  alignment claim: the gating/activation structure itself biases which
+  solution is found, so a rung-versus-rung result is a claim about
+  mechanisms *within* a gated architecture, not about recurrent computation
+  in general.
+
 ---
 
 ## 2. Behavioral gates and training criteria

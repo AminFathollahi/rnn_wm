@@ -14,7 +14,7 @@ manager carry the inferred task variable more/faster than the worker.
 `nback.sequence_length` is overridden down from the global config default
 (20) to a shorter value here (see `--sequence-length`) purely for this
 run's wall-clock budget -- `ImageTokenBank.sample`'s per-call linear scan
-over the stimuli pool (not this phase's fix, see PHASE_LOG.md) dominates
+over the stimuli pool (not this phase's fix, see executor.md) dominates
 per-step cost far more than the GPU forward/backward, so a shorter n-back
 sequence (fewer stimulus-sample calls per block) buys a proportionally
 faster demonstration run without touching the config default every other

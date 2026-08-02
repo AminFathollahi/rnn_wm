@@ -11,7 +11,7 @@ override (`train_one`'s `run` dict: `energy_cost_weight` /
 `run_grid.py`'s CLI has no notion of per-run overrides. Reuses
 `run_grid.py`'s manifest/report/signal-handling machinery directly so both
 scripts stay resumable and produce a consistent `results/manifest.jsonl`
-and `RUN_REPORT.md`.
+and `results/RUN_REPORT.md`.
 
 Run_id convention (consumed by `training/generate_activity_logs.py::
 _run_id_extras` and `analysis/run_all.py::_is_ablation_or_catch_variant`):

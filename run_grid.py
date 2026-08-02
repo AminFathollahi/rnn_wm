@@ -15,11 +15,12 @@ Design properties:
   * isolated per-run execution: an exception or failed gate in one run is
     recorded and does not halt the remaining runs;
   * enforces a wall-clock budget and terminates cleanly on SIGINT/SIGTERM;
-  * writes `results/manifest.jsonl` and a summary report, `RUN_REPORT.md`;
+  * writes `results/manifest.jsonl` and a summary report,
+    `results/RUN_REPORT.md`;
   * `--workers N` (§12.3): runs N `train_one` calls concurrently via
     `ProcessPoolExecutor` (`run_grid_loop`, shared with
     `scripts/run_stage1_grid.py`). N=8 measured best on this machine
-    (Appendix A / PHASE_LOG.md's Phase 12.3 entry: largest N keeping
+    (Appendix A / executor.md's Phase 12.3 entry: largest N keeping
     per-process ms/step under 1.5x the N=1 value); every manifest row
     records the `workers` value in force so wall-clock/energy DVs are
     never compared across rows with different N.
@@ -57,7 +58,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 MANIFEST = RESULTS / "manifest.jsonl"
-REPORT = ROOT / "RUN_REPORT.md"
+REPORT = RESULTS / "RUN_REPORT.md"
 
 
 def resolved_config_path(campaign: str = "grid") -> Path:

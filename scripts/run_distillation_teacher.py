@@ -5,7 +5,7 @@ to serve as the distillation TEACHER -- "Teacher = a trained full-size cell."
 
 None of Phase 9a's `M00000_H*` checkpoints qualify: they were all trained at
 dev tier (20000 steps, 1 seed) and NONE met the §3 accuracy criterion
-(`criterion_met_frac == 0.0` for every H, see PHASE_LOG.md's Phase 9a entry)
+(`criterion_met_frac == 0.0` for every H, see executor.md's Phase 9a entry)
 -- distilling "behaviour at the criterion" (9.2a) from a teacher that never
 reached the criterion itself would be meaningless. `run_grid.py` itself
 would work but enumerates all 8 ablation-battery cells breadth-first per

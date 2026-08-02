@@ -31,7 +31,7 @@ def test_cell_smoke(cell):
         shutil.rmtree(ckpt_dir)
     # Phase 2 (comments.txt §5): global batch_size=128 OOMs arm P
     # (PlasticGRUCell's per-trial Hebbian trace retained across the full
-    # BPTT unroll) on this 12GB GPU -- see PHASE_LOG.md. A smoke test's
+    # BPTT unroll) on this 12GB GPU -- see executor.md. A smoke test's
     # 6-step run doesn't need production batch fidelity, so it overrides
     # down via `cfg["batch_size"]` rather than shrinking the global default.
     cfg = {"steps": 6, "scaffold_sleep_s": 0}
@@ -120,7 +120,7 @@ def test_run_dict_overrides_bio_plausible_and_identity_catch(extra):
 
 
 def test_cfg_batch_size_override_takes_effect():
-    """Phase 2 (comments.txt §5 item 2.3/PHASE_LOG.md): `cfg["batch_size"]`
+    """Phase 2 (comments.txt §5 item 2.3/executor.md): `cfg["batch_size"]`
     must override `configs/config.yaml`'s global `train.batch_size` -- added
     so arm-P cells (which OOM at the global default on this GPU) can run at
     a smaller batch without touching every other cell's throughput.

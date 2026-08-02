@@ -1,7 +1,6 @@
 # results & caches
 results/
 !results/.gitkeep
-RUN_REPORT.md
 **/feat_cache/
 stimuli/
 

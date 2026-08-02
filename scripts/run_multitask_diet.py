@@ -4,7 +4,7 @@ all 6 tasks in the multi-task diet (image Sternberg + 5 NeuroGym tasks),
 one task drawn uniformly per training step (item 5.2), reporting per-task
 mean reward against a random-policy chance baseline ("learns above chance
 on every task in the diet"). Not a permanent regression test -- a one-off
-acceptance run, output pasted into PHASE_LOG.md.
+acceptance run, output pasted into executor.md.
 
     python scripts/run_multitask_diet.py --steps 2000
 """

@@ -78,7 +78,7 @@ model:
   worker_grid: [14, 14]
   worker_density: 0.10                     # B2 fix: was 0.04 (mean in-degree ~6); now ~14
   manager_units: 24                        # Phase 1: from match_param_budget.py at the gru target given the
-                                            # smaller bottleneck/g_dim above (was 64) -- see PHASE_LOG.md for
+                                            # smaller bottleneck/g_dim above (was 64) -- see executor.md for
                                             # why this differs from the illustrative 48 comments.txt sketches:
                                             # 48 under-shoots the 74,000-synapse target by ~17% with this
                                             # worker_grid/density; the solver's 24 lands within 0.4% of S=0's
@@ -171,10 +171,10 @@ task:                                      # image-Sternberg working-memory task
     # matched absolute step (24k vs 26,664) the 8k arm is at load3=0.865
     # against the 30k arm's 0.520 (still 3,336 steps of warmup left), and
     # on the OLD three-load gate the 8k arm confirms at 26,000 steps
-    # against the 30k arm's 66,660 (2.6x). Full A/B table: PHASE_LOG.md's
+    # against the 30k arm's 66,660 (2.6x). Full A/B table: executor.md's
     # Phase 12.2 entry. Do not extrapolate to 4,000 -- untested.
     warmup_steps: 8000    # loads=[1] only, short delay, no lures
-    # Phase 12.5 lever 3 (vanilla pilot NO-GO under levers 1-2, PHASE_LOG.md):
+    # Phase 12.5 lever 3 (vanilla pilot NO-GO under levers 1-2, executor.md):
     # loads=[1,2] only, full delay, still no lures -- isolates load exposure
     # from the lure ramp, which previously started on day one of `ramp`
     # together with load 3. Width matches warmup_steps (F4: load1 plateaus

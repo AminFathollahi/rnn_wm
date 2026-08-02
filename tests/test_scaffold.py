@@ -161,3 +161,26 @@ def test_write_report(tmp_path):
     rg.write_report(manifest, report, budget_s=36000, elapsed_s=1.2)
     text = report.read_text()
     assert "Training Grid Report" in text and "M000_s0" in text and "completed=1" in text
+
+
+def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatch, capsys):
+    """`train_one` reads its ceiling from `cfg["steps"]` (train.py:1540) and
+    never looks at `gates.max_steps`, so the launcher must resolve Gate B into
+    `steps`. Without this the battery trains to the tier's 150,000 while the
+    config, the manifest and advisor.md's §12 amendment all say Gate B is
+    80,000 -- the wrong equal-duration snapshot for every geometry DV, at
+    1.9x the authorized budget, and silently."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(rg, "REPORT", tmp_path / "RUN_REPORT.md")
+    captured = {}
+    monkeypatch.setattr(rg, "run_grid_loop", lambda runs, completed, cfg, *a, **k: captured.update(cfg))
+
+    rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "full", "--supervision", "SUP"])
+
+    import yaml as _yaml
+
+    gate_b = _yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())["gates"]["max_steps"]
+    assert gate_b, "gates.max_steps is unset; Gate B must be written before a campaign launch"
+    assert captured["steps"] == gate_b
+    assert "from gates.max_steps" in capsys.readouterr().out

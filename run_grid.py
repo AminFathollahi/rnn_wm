@@ -605,6 +605,21 @@ def main(argv=None) -> int:
             print(f"[run_grid] failed to parse {args.config}: {e}", flush=True)
             raise
 
+    # Gate B governs the campaign's run length. `train_one` reads its ceiling
+    # from `cfg["steps"]` (`train.py:1540`) and never looks at
+    # `gates.max_steps`, so without this the battery would run to the tier's
+    # `steps` (150,000 at --tier full) while the config, the manifest and the
+    # §12 amendment all say Gate B is 80,000: the wrong equal-duration
+    # snapshot for every geometry DV, at 1.9x the authorized budget, silently.
+    # Only the campaign launcher resolves this -- the pilots and Stage 1 pass
+    # their own explicit `steps` and must keep it.
+    gate_b = (full_cfg.get("gates") or {}).get("max_steps")
+    if gate_b:
+        cfg["steps"] = int(gate_b)
+        print(f"[run_grid] Gate B: steps={cfg['steps']} from gates.max_steps "
+              f"(tier '{args.tier}' default was {full_cfg.get('tiers', {}).get(args.tier, {}).get('steps')}).",
+              flush=True)
+
     # Audit fix B1: hash the FULL resolved config (not just the tier
     # subset), computed once per invocation -- every run in this grid
     # invocation shares this one hash, and the resolved config is dumped

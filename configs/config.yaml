@@ -342,12 +342,16 @@ neural:
   bin_ms: 50
 
 # Compute tiers. run_grid.py reads tiers.<tier> and merges it over the defaults.
-tiers:                                                          # `steps` is a CEILING (max_steps): training stops as
-                                                                 # soon as the §3 criterion is confirmed (a streak of
-                                                                 # `gates.consecutive_evals` passing evals), not before
-                                                                 # and not after -- see train.py's train-to-criterion
-                                                                 # block. `steps` only governs cells that never confirm
-                                                                 # the criterion at all.
+tiers:                                                          # `steps` is the run length every cell trains for --
+                                                                 # `train.py:1540` reads it as `total_steps` and the
+                                                                 # loop has no early stop. Gate A is an INCLUSION
+                                                                 # criterion, not a stop rule (§3), so confirming it
+                                                                 # does not end a run; the older "training stops as
+                                                                 # soon as the criterion is confirmed" note described
+                                                                 # train-to-criterion behaviour that no longer exists.
+                                                                 # For the campaign, `run_grid.py` overrides `steps`
+                                                                 # with `gates.max_steps` (Gate B) -- these tier values
+                                                                 # govern the other runners and the smoke/dev paths.
   smoke: {steps: 100, scaffold_sleep_s: 0.02}                  # end-to-end pipeline smoke test
   dev:   {steps: 20000, scaffold_sleep_s: 0.05}                 # NOT a results tier -- new-mechanism (topo/dale)
                                                                  # sanity check only: does the loss decrease, no NaNs

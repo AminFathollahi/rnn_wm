@@ -456,8 +456,10 @@ def check_reproducibility():
         print(f"  {g}")
     
     # Check for resolved config
-    resolved = RESULTS / "resolved_config_grid.yaml"
-    print(f"\nResolved config grid: {'EXISTS' if resolved.exists() else 'MISSING'}")
+    # glob: run_grid.py namespaces this by supervision (resolved_config_grid_SUP.yaml
+    # / _RL.yaml) since the two passes resolve to different configs (D32).
+    resolved = sorted(RESULTS.glob("resolved_config_grid*.yaml"))
+    print(f"\nResolved config grid: {', '.join(p.name for p in resolved) if resolved else 'MISSING'}")
     
     # Check if config.yaml is tracked
     config_yaml = ROOT / "configs" / "config.yaml"

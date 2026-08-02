@@ -135,7 +135,24 @@ def parse_budget(s: str) -> float:
     return float(s)
 
 
-def enumerate_runs(seeds: list[int], include_local_learning: bool = False, supervision: str | None = None) -> list[dict]:
+def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
+    """`supervision` is part of the run identity (advisor.md D32), because
+    the checkpoint directory, the metrics CSV and the manifest key are all
+    derived from the run_id. Without it the second supervision pass of the
+    same grid either gets skipped wholesale by `load_completed` or -- worse,
+    because it is silent and produces a plausible-looking row -- resumes the
+    first pass's `ckpt.pt` (`train.py`'s resume path), continuing an
+    SUP-trained network under RL and labelling the result `supervision: RL`.
+
+    `None` reproduces the historical id exactly. Existing run directories are
+    never renamed; ids already on disk keep the old form."""
+    return f"{model_id}_{supervision}_s{seed}" if supervision else f"{model_id}_s{seed}"
+
+
+def enumerate_runs(
+    seeds: list[int], include_local_learning: bool = False, supervision: str | None = None,
+    cells: list[str] | None = None,
+) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
     local-learning cells (§6.3) after the Core cells within each seed --
@@ -149,20 +166,30 @@ def enumerate_runs(seeds: list[int], include_local_learning: bool = False, super
     signal that is not one of the study's preregistered levels ({SUP, RL}).
     `None` (the default) preserves that historical fall-through exactly, so
     any other caller of `enumerate_runs` is unaffected; `main` below never
-    passes `None`, because its own `--supervision` flag is required."""
+    passes `None`, because its own `--supervision` flag is required. It is
+    also part of the run_id -- see `build_run_id`.
+
+    `cells` (comments.txt §18.5): restrict to these `model_id`s. The campaign
+    runs the full 15 under `SUP` but only the 7 S=0 cells under `RL`, plus an
+    8-cell S=1 failure arm at a lower seed count, so the grid needs a subset
+    filter; a second orchestrator would need its own copy of the resume,
+    concurrency and manifest logic. An unknown id raises rather than
+    silently enumerating nothing."""
+    if cells is not None:
+        known = {c["model_id"] for c in CELLS} | {c["model_id"] for c in LOCAL_LEARNING_CELLS}
+        unknown = [c for c in cells if c not in known]
+        if unknown:
+            raise ValueError(f"unknown model_id(s) {unknown}; known: {sorted(known)}")
+    selected = [c for c in CELLS if cells is None or c["model_id"] in cells]
+    selected_local = [c for c in LOCAL_LEARNING_CELLS if cells is None or c["model_id"] in cells]
+
     runs = []
     for seed in seeds:
-        for cell in CELLS:
-            run = {**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"}
+        for cell in selected + (selected_local if include_local_learning else []):
+            run = {**cell, "seed": seed, "run_id": build_run_id(cell["model_id"], seed, supervision)}
             if supervision is not None:
                 run["supervision"] = supervision
             runs.append(run)
-        if include_local_learning:
-            for cell in LOCAL_LEARNING_CELLS:
-                run = {**cell, "seed": seed, "run_id": f"{cell['model_id']}_s{seed}"}
-                if supervision is not None:
-                    run["supervision"] = supervision
-                runs.append(run)
     return runs
 
 
@@ -523,6 +550,11 @@ def main(argv=None) -> int:
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
     ap.add_argument("--local-learning", action="store_true",
                      help="also enumerate the 4 Extended local-learning cells (M**L, §6.3)")
+    ap.add_argument("--cells", type=str, default=None,
+                     help="comments.txt §18.5: comma-separated model_ids to restrict the grid to, e.g. "
+                          "M00000,M01111. Default: every Core cell. The campaign runs all 15 under SUP "
+                          "but only the 7 S=0 cells under RL, plus an 8-cell S=1 failure arm at 2 seeds. "
+                          "An unknown model_id is an error, not an empty grid.")
     ap.add_argument("--workers", type=int, default=1,
                      help="§12.3: concurrent training processes (ProcessPoolExecutor, one run per "
                           "process). N=8 measured 5.9x aggregate throughput for a 1.36x per-process "
@@ -544,7 +576,9 @@ def main(argv=None) -> int:
     RESULTS.mkdir(exist_ok=True)
     budget_s = parse_budget(args.budget)
     seeds = list(range(args.seeds))
-    runs = enumerate_runs(seeds, include_local_learning=args.local_learning, supervision=args.supervision)
+    cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
+    runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
+                          supervision=args.supervision, cells=cells)
     completed = load_completed(MANIFEST)
     commit = git_commit()
 
@@ -584,7 +618,12 @@ def main(argv=None) -> int:
         # Audit fix L1: reuse the `yaml` module imported above rather than
         # re-importing; the JSON fallback below is for a write/serialize
         # failure only, not a missing dependency (already handled above).
-        resolved_path = resolved_config_path("grid")
+        # Namespaced by supervision for the same reason the run_id is (D32):
+        # the two passes resolve to DIFFERENT configs and different
+        # `config_hash`es, and one file cannot be the audit trail for both --
+        # whichever pass ran last would leave the other pass's manifest rows
+        # citing a hash that matches nothing on disk.
+        resolved_path = resolved_config_path(f"grid_{args.supervision}")
         try:
             resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
         except (OSError, yaml.YAMLError) as e:

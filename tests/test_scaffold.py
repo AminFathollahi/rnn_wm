@@ -73,6 +73,38 @@ def test_enumerate_runs_carries_explicit_supervision():
     assert len(runs) == 2 * len(rg.CELLS)
 
 
+def test_run_ids_are_disjoint_across_supervision_levels():
+    """advisor.md D32 / comments.txt §18.2-A: the run_id is what names the
+    checkpoint directory, the metrics CSV and the manifest key, so a SUP run
+    and an RL run of the same cell+seed sharing one id means the second pass
+    either gets skipped as already-completed or RESUMES the first pass's
+    checkpoint and reports the result under the wrong signal. Both silently."""
+    sup = {r["run_id"] for r in rg.enumerate_runs([0, 1], supervision="SUP", include_local_learning=True)}
+    rl = {r["run_id"] for r in rg.enumerate_runs([0, 1], supervision="RL", include_local_learning=True)}
+    assert not (sup & rl)
+    assert len(sup) == len(rl) == 2 * (len(rg.CELLS) + len(rg.LOCAL_LEARNING_CELLS))
+    assert "M00000_SUP_s0" in sup and "M00000_RL_s0" in rl
+    # `None` must still produce the historical id: existing run directories
+    # and manifest rows use that form and are never renamed.
+    assert {r["run_id"] for r in rg.enumerate_runs([0])} >= {"M00000_s0"}
+
+
+def test_cells_filter_restricts_the_grid():
+    """comments.txt §18.5: the RL arm is S=0-only and the failure arm is
+    S=1-only, so the grid needs a subset filter rather than a second
+    orchestrator. A typo'd model_id must raise, not enumerate nothing --
+    an empty grid at hour 0 of a 58-hour campaign looks like success."""
+    import pytest
+
+    s0 = ["M00000", "M01111", "M01000", "M00100", "M00010", "M00001", "M00011"]
+    runs = rg.enumerate_runs([0, 1], supervision="RL", cells=s0)
+    assert len(runs) == 2 * 7
+    assert {r["model_id"] for r in runs} == set(s0)
+    assert rg.enumerate_runs([0], supervision="RL", cells=["M00L"], include_local_learning=True)[0]["L"] == 1
+    with pytest.raises(ValueError, match="unknown model_id"):
+        rg.enumerate_runs([0], supervision="RL", cells=["M00000", "M99999"])
+
+
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
     when `--supervision` is omitted -- this is the actual defect §16.4

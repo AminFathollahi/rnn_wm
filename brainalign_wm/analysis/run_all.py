@@ -751,6 +751,7 @@ def _dpca_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> li
 
 def align_one_run(
     run_id: str, dandi_data, force_regenerate: bool = False, n_permutations: int = 0, permutation_seed: int = 0,
+    checkpoint: str = "ckpt.pt",
 ) -> dict:
     """Generates/loads the run's activity log and computes both the
     per-session maintenance alignment and the pooled probe alignment, at
@@ -761,12 +762,12 @@ def align_one_run(
     `main()`'s headline DV and chance-control gate -- computing it for
     MTL/MFC too would triple an already-expensive per-session permutation
     loop for numbers nothing downstream currently consumes."""
-    from brainalign_wm.training.generate_activity_logs import generate_activity_log
+    from brainalign_wm.training.generate_activity_logs import activity_log_path, generate_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
-    log_path = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+    log_path = activity_log_path(run_id, checkpoint)
     if force_regenerate or not log_path.exists():
-        log_path = generate_activity_log(run_id, dandi_data)
+        log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
     df = read_log(log_path)
 
     maintenance_rows, probe_rows = [], []
@@ -781,7 +782,7 @@ def align_one_run(
     return {"maintenance": maintenance_rows, "probe": probe_rows}
 
 
-def reflection_shuffle_lesion_for_run(run_id: str, dandi_data) -> dict:
+def reflection_shuffle_lesion_for_run(run_id: str, dandi_data, checkpoint: str = "ckpt.pt") -> dict:
     """C1: H2's causal claim ("reflection-shuffle abolishes the M effect").
     Compares pooled-region maintenance alignment between the normal
     activity log and a version replayed with each trial's own R_t sequence
@@ -789,17 +790,19 @@ def reflection_shuffle_lesion_for_run(run_id: str, dandi_data) -> dict:
     generate_activity_log_reflection_shuffled`). Only defined for M=1 runs.
     Returns a summary dict; if H2 holds, `shuffled_normalized_alignment`
     should be markedly lower than `normal_normalized_alignment`."""
-    from brainalign_wm.training.generate_activity_logs import generate_activity_log_reflection_shuffled
+    from brainalign_wm.training.generate_activity_logs import (
+        activity_log_path, generate_activity_log_reflection_shuffled,
+    )
     from brainalign_wm.training.logging_schema import read_log
 
-    normal_log = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+    normal_log = activity_log_path(run_id, checkpoint)
     if not normal_log.exists():
         return {"run_id": run_id, "status": "normal_log_missing"}
     normal_df = read_log(normal_log)
     normal_rows = _maintenance_alignment_for_run(run_id, normal_df, dandi_data, None)
     normal_ok = [r for r in normal_rows if r.get("status") == "ok"]
 
-    shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data)
+    shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
     shuffled_df = read_log(shuffled_path)
     shuffled_rows = _maintenance_alignment_for_run(run_id, shuffled_df, dandi_data, None)
     shuffled_ok = [r for r in shuffled_rows if r.get("status") == "ok"]
@@ -912,6 +915,23 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default=str(ROOT / "configs" / "config.yaml"))
     ap.add_argument("--regenerate", action="store_true", help="force regeneration of activity logs")
     ap.add_argument(
+        "--runs", default=None,
+        help="comma-separated run_ids to analyse instead of every completed run in the manifest. "
+             "Naming a run explicitly also bypasses the local-learning and ablation/catch-variant "
+             "auto-skips below -- those exist to keep variants out of the pooled S x M x P "
+             "regression, and an explicitly named run is not a pooling decision. Used by §18.4's "
+             "pre-launch pipeline check, whose subjects (FLATGRU_*_s0) are variant-named pilots.",
+    )
+    ap.add_argument(
+        "--checkpoint", default="ckpt.pt",
+        help="advisor.md D33 / §12.4: which snapshot to analyse. 'ckpt.pt' is Gate B (max_steps, the "
+             "headline equal-duration reading); 'ckpt_at_criterion.pt' is the Gate A snapshot, giving "
+             "the equal-PERFORMANCE comparison. Non-default checkpoints read and write namespaced "
+             "paths (activity_logs/{run_id}_at_criterion.parquet, results/*_at_criterion.csv) -- the "
+             "two passes must never write one file. A run that never cleared Gate A has no Gate A "
+             "checkpoint and is skipped with its FileNotFoundError reported, not substituted.",
+    )
+    ap.add_argument(
         "--max-sessions-per-dataset", type=int, default=None,
         help="bound the number of sessions loaded per dataset; `dandi_nwb.rates()` recomputes "
              "spike histograms with no caching (unlike sim_brain's), so the full Tier A pool "
@@ -962,8 +982,25 @@ def main(argv=None) -> int:
     if args.skip_permutation_null:
         args.n_permutations = 0
 
+    # D33: a Gate A pass must not overwrite the Gate B pass's results. Same
+    # convention as the activity logs and `run_geometry.py::out_csv_for`:
+    # ckpt.pt keeps every original filename, anything else gets a suffix.
+    from brainalign_wm.training.generate_activity_logs import activity_log_path
+
+    _tag = "" if args.checkpoint == "ckpt.pt" else "_" + Path(args.checkpoint).stem.removeprefix("ckpt_")
+
+    def out_csv(name: str) -> Path:
+        return ROOT / "results" / f"{name}{_tag}.csv"
+
     cfg = yaml.safe_load(Path(args.config).read_text())
     completed = _load_completed_runs(ROOT / "results" / "manifest.jsonl")
+    explicit_runs = {r.strip() for r in args.runs.split(",") if r.strip()} if args.runs else None
+    if explicit_runs is not None:
+        missing = explicit_runs - {r["run_id"] for r in completed}
+        if missing:
+            print(f"[run_all] --runs names run(s) with no completed manifest row: {sorted(missing)}")
+            return 1
+        completed = [r for r in completed if r["run_id"] in explicit_runs]
     if not completed:
         print("[run_all] no completed runs found in results/manifest.jsonl; run `make run-grid` first.")
         return 1
@@ -984,7 +1021,11 @@ def main(argv=None) -> int:
     maintenance_session_rows, probe_rows, lesion_rows, dynamics_rows, encoding_rows, dpca_rows = [], [], [], [], [], []
     for rec in completed:
         run_id = rec["run_id"]
-        if "P" not in rec:
+        # Both auto-skips keep non-Core runs out of the POOLED S x M x P
+        # regression rows. Naming a run with --runs is not a pooling
+        # decision, so it overrides them (and says so in the log).
+        named = explicit_runs is not None and run_id in explicit_runs
+        if "P" not in rec and not named:
             # Extended local-learning cells (M**L, §6.3) carry "L", not "P"
             # -- reported on their own terms (rung reached + accuracy,
             # already in manifest.jsonl) rather than pooled into the Core
@@ -992,66 +1033,70 @@ def main(argv=None) -> int:
             print(f"[run_all]   skipping {run_id} (local-learning cell, not part of the Core S x M x P grid)")
             continue
         if _is_ablation_or_catch_variant(rec):
-            print(f"[run_all]   skipping {run_id} (ablation/identity-catch variant {rec['model_id']!r}, reported separately)")
-            continue
+            if not named:
+                print(f"[run_all]   skipping {run_id} (ablation/identity-catch variant {rec['model_id']!r}, reported separately)")
+                continue
+            print(f"[run_all]   {run_id}: model_id {rec['model_id']!r} is not a Core cell id; included because "
+                  f"--runs named it. Do not pool these rows into the Core S x M x P regression.")
         print(f"[run_all] aligning {run_id} ...")
         try:
-            result = align_one_run(run_id, dandi_data, force_regenerate=args.regenerate, n_permutations=args.n_permutations)
+            result = align_one_run(run_id, dandi_data, force_regenerate=args.regenerate,
+                                   n_permutations=args.n_permutations, checkpoint=args.checkpoint)
         except FileNotFoundError as e:
             print(f"[run_all]   skipped ({e})")
             continue
 
         for row in result["maintenance"]:
             clean_row = {k: v for k, v in row.items() if k != "_perm_raw_alignments"}
-            maintenance_session_rows.append({**clean_row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
+            maintenance_session_rows.append({**clean_row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
         for row in result["probe"]:
-            probe_rows.append({**row, "run_id": run_id, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"],
+            probe_rows.append({**row, "run_id": run_id, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"],
                                 "accuracy_load1": rec.get("accuracy", {}).get("load1"), "accuracy_load3": rec.get("accuracy", {}).get("load3")})
         ok_n = sum(1 for r in result["maintenance"] if r.get("status") == "ok")
         print(f"[run_all]   maintenance: {ok_n}/{len(result['maintenance'])} session-rows ok; "
               f"probe: {[r.get('status') for r in result['probe']]}")
 
         if rec["M"] == 1 and not args.skip_reflection_shuffle:
-            lesion = reflection_shuffle_lesion_for_run(run_id, dandi_data)
-            lesion_rows.append({**lesion, "model_id": rec["model_id"], "S": rec["S"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
+            lesion = reflection_shuffle_lesion_for_run(run_id, dandi_data, checkpoint=args.checkpoint)
+            lesion_rows.append({**lesion, "model_id": rec["model_id"], "S": rec["S"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
             print(f"[run_all]   C1 reflection-shuffle lesion: {lesion.get('status')} "
                   f"(effect={lesion.get('lesion_effect')})" if lesion.get("status") == "ok" else
                   f"[run_all]   C1 reflection-shuffle lesion: {lesion.get('status')}")
 
         if not args.skip_dynamics:
-            log_path = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+            log_path = activity_log_path(run_id, args.checkpoint)
             if log_path.exists():
                 from brainalign_wm.training.logging_schema import read_log
 
                 dyn = dynamics_and_persistence_for_run(run_id, read_log(log_path), dandi_data)
-                dynamics_rows.append({**dyn, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
+                dynamics_rows.append({**dyn, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   H5/H6 dynamics/persistence: {dyn.get('status')}")
 
         if not args.skip_encoding:
-            log_path = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+            log_path = activity_log_path(run_id, args.checkpoint)
             if log_path.exists():
                 from brainalign_wm.training.logging_schema import read_log
 
                 enc_df = read_log(log_path)
                 enc_rows_this_run = _encoding_for_run(run_id, enc_df, dandi_data, None)
                 for row in enc_rows_this_run:
-                    encoding_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
+                    encoding_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   encoding models (pooled): {len(enc_rows_this_run)} session-rows")
 
         if not args.skip_dpca:
-            log_path = ROOT / "results" / "activity_logs" / f"{run_id}.parquet"
+            log_path = activity_log_path(run_id, args.checkpoint)
             if log_path.exists():
                 from brainalign_wm.training.logging_schema import read_log
 
                 dpca_df = read_log(log_path)
                 dpca_rows_this_run = _dpca_for_run(run_id, dpca_df, dandi_data, None)
                 for row in dpca_rows_this_run:
-                    dpca_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
+                    dpca_rows.append({**row, "model_id": rec["model_id"], "S": rec["S"], "M": rec["M"], "P": rec.get("P"), "T": rec["T"], "D": rec["D"], "seed": rec["seed"]})
                 print(f"[run_all]   dPCA (pooled): {len(dpca_rows_this_run)} session-rows")
 
     if lesion_rows:
         lesion_df = pd.DataFrame(lesion_rows)
-        lesion_out = ROOT / "results" / "reflection_shuffle_lesion.csv"
+        lesion_out = out_csv("reflection_shuffle_lesion")
         lesion_df.to_csv(lesion_out, index=False)
         print(f"\n[run_all] wrote {lesion_out}")
 
@@ -1062,7 +1107,7 @@ def main(argv=None) -> int:
         from brainalign_wm.training.logging_schema import read_log
 
         baseline_run_id = completed[0]["run_id"]
-        baseline_log_path = ROOT / "results" / "activity_logs" / f"{baseline_run_id}.parquet"
+        baseline_log_path = activity_log_path(baseline_run_id, args.checkpoint)
         if baseline_log_path.exists():
             baseline_df = read_log(baseline_log_path)
             print(f"\n[run_all] B1/B2 baselines (master protocol §4.2, using {baseline_run_id}'s session coverage) ...")
@@ -1071,7 +1116,7 @@ def main(argv=None) -> int:
                 baseline_rows.extend(_baselines_for_run("baseline", baseline_df, dandi_data, region))
             if baseline_rows:
                 baseline_df_out = pd.DataFrame(baseline_rows)
-                baseline_out = ROOT / "results" / "baselines.csv"
+                baseline_out = out_csv("baselines")
                 baseline_df_out.to_csv(baseline_out, index=False)
                 pooled = baseline_df_out[baseline_df_out.region == "pooled"]
                 for b in ("B1_encoder_only", "B2_task_model"):
@@ -1082,19 +1127,19 @@ def main(argv=None) -> int:
 
     if dynamics_rows:
         dynamics_df = pd.DataFrame(dynamics_rows)
-        dynamics_out = ROOT / "results" / "dynamics_persistence.csv"
+        dynamics_out = out_csv("dynamics_persistence")
         dynamics_df.to_csv(dynamics_out, index=False)
         print(f"[run_all] wrote {dynamics_out}")
 
     if encoding_rows:
         encoding_df = pd.DataFrame(encoding_rows)
-        encoding_out = ROOT / "results" / "encoding_results.csv"
+        encoding_out = out_csv("encoding_results")
         encoding_df.to_csv(encoding_out, index=False)
         print(f"[run_all] wrote {encoding_out}")
 
     if dpca_rows:
         dpca_out_df = pd.DataFrame(dpca_rows)
-        dpca_out = ROOT / "results" / "dpca_results.csv"
+        dpca_out = out_csv("dpca_results")
         dpca_out_df.to_csv(dpca_out, index=False)
         print(f"[run_all] wrote {dpca_out}")
 
@@ -1103,7 +1148,7 @@ def main(argv=None) -> int:
         return 1
 
     session_df = pd.DataFrame(maintenance_session_rows)
-    session_out = ROOT / "results" / "alignment_by_session.csv"
+    session_out = out_csv("alignment_by_session")
     session_df.to_csv(session_out, index=False)
     print(f"\n[run_all] wrote {session_out} ({len(session_df)} rows)\n")
 
@@ -1147,13 +1192,13 @@ def main(argv=None) -> int:
         )
         headline_df = headline_df.merge(probe_pooled, on="run_id", how="outer") if len(headline_df) else probe_pooled
 
-    out_path = ROOT / "results" / "alignment_results.csv"
+    out_path = out_csv("alignment_results")
     headline_df.to_csv(out_path, index=False)
     print(f"[run_all] wrote {out_path}\n")
     if len(headline_df):
         print(headline_df.to_string(index=False))
 
-    probe_out = ROOT / "results" / "alignment_probe_by_region.csv"
+    probe_out = out_csv("alignment_probe_by_region")
     probe_df.to_csv(probe_out, index=False)
     print(f"\n[run_all] wrote {probe_out}")
 
@@ -1270,7 +1315,7 @@ def main(argv=None) -> int:
             print("    maintenance_normalized_alignment (trained-distribution vs chance-distribution): "
                   "insufficient completed cells yet for a distributional test.")
 
-        pd.DataFrame(chance_rows).to_csv(ROOT / "results" / "chance_control.csv", index=False)
+        pd.DataFrame(chance_rows).to_csv(out_csv("chance_control"), index=False)
         print(f"[run_all] wrote {ROOT / 'results' / 'chance_control.csv'}")
 
     if not args.skip_dv_relationship:

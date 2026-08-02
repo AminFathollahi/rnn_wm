@@ -37,7 +37,7 @@ def test_weight_entropy_kde_uniform_exceeds_concentrated():
     Scott's-rule KDE bandwidth and the [min,max] grid both scale with the
     sample's own spread -- so this method is largely SCALE-invariant
     (tightening/widening a Gaussian by 10x barely moves its entropy, see
-    git history/PHASE_LOG.md) and mostly sensitive to distribution SHAPE."""
+    git history/executor.md) and mostly sensitive to distribution SHAPE."""
     rng = np.random.RandomState(0)
     uniform_vals = rng.uniform(-1, 1, size=2000)
     concentrated_vals = rng.randn(2000) * 0.01

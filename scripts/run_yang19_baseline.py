@@ -85,7 +85,7 @@ def run_yang19_trial(adapter, core, heads, batch_env, B: int, max_ticks: int, de
     """One trial rollout + BPTT loss, same tick-weighted cross-entropy
     convention as `train.py::run_multitask_neurogym_trial`'s `has_gt`
     branch (every yang19 task provides a `gt`, verified empirically --
-    see PHASE_LOG.md). Returns (loss, n_decision_ticks_correct, n_decision_ticks,
+    see executor.md). Returns (loss, n_decision_ticks_correct, n_decision_ticks,
     reward_per_trial)."""
     c_t = task_onehot.expand(B, -1)
     state = _init_state(core, 0, 0, B, device)

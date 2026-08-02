@@ -7,7 +7,7 @@ a naive single-run wall-clock conflates the two, and setup cost does not
 shrink with the fix while per-step cost does, so it would bias the ratio.
 Not a permanent regression test -- a one-off benchmark, invoked fresh (own
 process) per (run, steps) pair so no run benefits from another's warm cache;
-output pasted into PHASE_LOG.md."""
+output pasted into executor.md."""
 import argparse
 import shutil
 import time

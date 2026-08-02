@@ -32,7 +32,7 @@ tiny RNN cannot observe which second-stage state a trial is in when it
 must pick a second-stage action -- a structural information gap, not a
 capacity limit (same category as Sternberg's SCOPE LIMIT note). Expect
 this to cap DawTwoStep performance well below what a stimulus-aware policy
-could reach; that is not a tiny-RNN failure finding, see PHASE_LOG.md.
+could reach; that is not a tiny-RNN failure finding, see executor.md.
 
 Usage:
   python scripts/run_tiny_rnn_bandit.py --hidden 1 2 3 4 --ticks 200000
@@ -51,7 +51,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))  # editable install's finder maps to a stale pre-rename path; see PHASE_LOG.md Phase 9b
+sys.path.insert(0, str(ROOT))  # editable install's finder maps to a stale pre-rename path; see executor.md Phase 9b
 
 from brainalign_wm.tasks.multitask import make_env  # noqa: E402
 ACTION_DIM = {"bandit": 2, "dawtwostep": 3}

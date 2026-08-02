@@ -62,7 +62,7 @@ def context_vector(epoch: str, encoded_count: int = 0, aux_family: bool = False)
     generated trials, "answer NO if c[8] else YES iff probe category is in
     the held set" scores **1.000** -- perfect accuracy with no memory of
     item identity whatsoever, which is what produced the 1.0/1.0/1.0
-    accuracies in RUN_REPORT.md. The network is never told a probe is a
+    accuracies in results/RUN_REPORT.md. The network is never told a probe is a
     lure; that is the whole point of a lure. Nothing replaces the slot,
     so C_DIM and every checkpoint shape are unchanged.
     """

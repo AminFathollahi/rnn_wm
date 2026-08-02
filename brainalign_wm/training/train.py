@@ -16,7 +16,7 @@ Contract:
       cfg  = the tier-merged dict `run_grid.py` builds (containing "steps",
              among other tier parameters, and optionally "batch_size" to
              override `configs/config.yaml`'s `train.batch_size` -- see
-             Phase 2/PHASE_LOG.md, needed for arm-P cells at the global
+             Phase 2/executor.md, needed for arm-P cells at the global
              batch_size=128 default); the full project configuration
              (model/mechanisms/task/train sections) is loaded here directly
              from configs/config.yaml, since `run_grid.py` only threads the
@@ -119,7 +119,7 @@ procedure:
     honestly as rung=3, gates=False, rather than silently substituting
     backpropagation.
   - **Gate boundary.** Behavioral gates use `>=` (not `>`), applied
-    consistently here and in `preregistration.md`.
+    consistently here and in `advisor.md`.
 """
 from __future__ import annotations
 
@@ -763,7 +763,7 @@ def run_multitask_neurogym_trial(
 
     Returns `(loss_or_None, reward_per_trial: list[float] len B)` --
     `reward_per_trial` is each trial's total native-env reward, the
-    per-task "accuracy" proxy reported in PHASE_LOG.md (uniform across
+    per-task "accuracy" proxy reported in executor.md (uniform across
     gt-having and gt-less tasks alike, unlike a bespoke match rule)."""
     from brainalign_wm.tasks.multitask import HAS_GT, task_context_vector
 
@@ -807,7 +807,7 @@ def run_multitask_neurogym_trial(
                 # and never learns the actual decision (same imbalance
                 # `_run_trial`'s own `tick_weight` guards against for
                 # Sternberg's fixation-heavy schedule; verified empirically
-                # here too -- see PHASE_LOG.md).
+                # here too -- see executor.md).
                 per_sample_weight = torch.where(gt_t != 0, 1.0, 0.1) * active
                 ce_terms.append((ce_per_sample * per_sample_weight).sum() / per_sample_weight.sum().clamp_min(1e-8))
             else:
@@ -1481,7 +1481,7 @@ def _seed_milestone_state_from_history(
     resume gets re-detected live and its `ckpt_at_criterion.pt` snapshot
     silently overwritten with post-resume weights -- exactly what happened
     to `FLATGRU_RL_s0`'s 80,000-step resume before this fix (the original
-    step-14,000 snapshot is unrecoverable; see PHASE_LOG.md)."""
+    step-14,000 snapshot is unrecoverable; see executor.md)."""
     milestone_consecutive = {k: 0 for k in milestone_thresholds}
     milestone_reached = {k: False for k in milestone_thresholds}
     criterion_consecutive = {k: 0 for k in criterion}
@@ -1625,7 +1625,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # Needed because global batch_size=128 (the value that clears this
     # phase's >=3x throughput acceptance for the non-plastic cells) OOMs
     # arm P (`PlasticGRUCell`'s per-trial Hebbian trace, retained across the
-    # full ~60-tick BPTT unroll) on this 12GB GPU -- see PHASE_LOG.md. Smoke
+    # full ~60-tick BPTT unroll) on this 12GB GPU -- see executor.md. Smoke
     # tests and any future P=1 run in the real grid pass a smaller value here
     # instead of shrinking the default for every cell.
     batch_size = int(cfg.get("batch_size", t_cfg.get("batch_size", 1)))

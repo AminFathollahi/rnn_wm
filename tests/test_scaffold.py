@@ -124,7 +124,8 @@ def test_write_report(tmp_path):
                     "gates": {"load1>=0.95": True}, "accuracy": {"load1": 0.99},
                     "rung": 0, "wall_clock_s": 1.2}) + "\n"
     )
-    report = tmp_path / "RUN_REPORT.md"
+    report = tmp_path / "results" / "RUN_REPORT.md"
+    report.parent.mkdir(exist_ok=True)
     rg.write_report(manifest, report, budget_s=36000, elapsed_s=1.2)
     text = report.read_text()
     assert "Training Grid Report" in text and "M000_s0" in text and "completed=1" in text

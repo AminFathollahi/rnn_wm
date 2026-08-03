@@ -1179,7 +1179,11 @@ def main(argv=None) -> int:
                 continue
             headline_rows.append({
                 "run_id": run_id, "model_id": ok.model_id.iloc[0], "S": ok.S.iloc[0], "M": ok.M.iloc[0], "P": ok.P.iloc[0],
-                "T": ok.T.iloc[0], "D": ok.D.iloc[0], "seed": ok.seed.iloc[0],
+                # ok["T"], NOT ok.T -- `.T` is DataFrame.transpose, so attribute
+                # access silently wrote the transpose's first row (a stringified
+                # run_id Series) into the T column of every headline row. S/M/P/D
+                # have no such collision, which is why only T was wrong.
+                "T": ok["T"].iloc[0], "D": ok.D.iloc[0], "seed": ok.seed.iloc[0],
                 **_aggregate_maintenance(ok.to_dict("records")),
             })
     headline_df = pd.DataFrame(headline_rows)
@@ -1292,7 +1296,16 @@ def main(argv=None) -> int:
             c = chance_control_check(model_id, int(model_row["seed"]), dandi_data)
             chance_rows.append({**c, "role": "chance_maintenance_distribution"})
             if "maintenance_normalized_alignment" in c:
-                arch = model_id[:-1]  # M**0 / M**1 share architecture
+                # Dedup key is (S, M), the bits that actually change the
+                # untrained forward pass. It used to be `model_id[:-1]`,
+                # string surgery that assumed the last character was the P
+                # bit -- true only for bare 5-bit ids. Campaign model_ids
+                # carry a supervision suffix (D32), so `M00000_SUP[:-1]` and
+                # `M00000_RL[:-1]` are different strings for the same
+                # architecture and the dedup silently stopped deduping. The
+                # dry run made that visible: three "independent" chance draws
+                # that were one identical network, all reporting -0.1065.
+                arch = (int(model_row["S"]), int(model_row["M"]))
                 if arch not in chance_by_arch:
                     chance_by_arch[arch] = c["maintenance_normalized_alignment"]
         chance_maintenance = list(chance_by_arch.values())

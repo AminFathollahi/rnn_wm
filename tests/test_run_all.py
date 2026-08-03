@@ -66,3 +66,18 @@ def test_model_epoch_patterns_does_not_merge_trials_across_sessions():
     assert patterns.shape[0] == 2, "sessA#trial0 and sessB#trial0 must NOT be merged into one row"
     assert set(patterns[:, 0].tolist()) == {10.0, 1000.0}
     assert labels == [(1, True, True), (1, True, True)]
+
+
+def test_no_dataframe_transpose_attribute_access_for_the_T_column():
+    """`ok.T` is DataFrame.transpose, not the T ablation-bit column, so
+    attribute access silently wrote the transpose's first row -- a
+    stringified run_id Series -- into every headline row's T field, and
+    `results/alignment_results.csv` mislabelled one of the five preregistered
+    arms. S/M/P/D have no such collision, which is why only T was wrong.
+    Found by reading the dry run's CSV (comments.txt §18.4). Column access
+    for T must be `["T"]`."""
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "brainalign_wm" / "analysis" / "run_all.py").read_text()
+    assert not re.search(r"\b\w+\.T\.(iloc|values|mean|unique)\b", src)

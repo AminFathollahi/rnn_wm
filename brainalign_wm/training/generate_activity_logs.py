@@ -347,7 +347,17 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
     random one -- if a chance model's normalized alignment is NOT clearly
     below trained cells', the alignment DV is still degenerate."""
     cfg = _load_full_config()
-    S, M, P, T, D = _parse_model_id(model_id)  # noqa: F841 -- T/D never affect the untrained forward pass either
+    try:
+        S, M, P, T, D = _parse_model_id(model_id)  # noqa: F841 -- T/D never affect the untrained forward pass either
+    except ValueError:
+        # Same manifest fallback `_parse_run_id` uses, for the pilot/diagnostic
+        # naming (`FLATGRU_SUP`). Without it this raised and took the whole
+        # H5 acceptance gate down with it -- the one check that says whether
+        # the alignment DV discriminates a trained model from a random one.
+        arch = _arch_from_manifest(f"{model_id}_s{seed}")
+        if arch is None:
+            raise
+        S, M, P, T, D = arch
     device = torch.device("cpu")
 
     from brainalign_wm.utils.seeding import seed_everything

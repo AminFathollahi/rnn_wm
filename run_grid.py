@@ -123,6 +123,19 @@ LOCAL_LEARNING_CELLS = [
     for s in (0, 1) for m in (0, 1)
 ]
 
+# D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU because Appendix A's
+# throughput benchmark measured one small S=0 cell replicated 8 ways, not
+# this heterogeneous battery -- two S=1 (hierarchical) cells alone measured
+# 5.78 + 5.38 GiB concurrently. Gate submissions on estimated in-flight GPU
+# memory so S=1 runs serialize against each other while S=0 runs still pack in.
+_MIB_ESTIMATE = {0: 900, 1: 6200}  # measured D38 probe, rounded up for headroom
+DEFAULT_GPU_BUDGET_MIB = 10500  # of 12227 MiB total; leaves headroom for driver/fragmentation
+
+
+def _run_mib(run: dict) -> int:
+    return _MIB_ESTIMATE.get(run.get("S", 0), max(_MIB_ESTIMATE.values()))
+
+
 _STOP = False
 
 
@@ -483,7 +496,7 @@ def _worker_entry(run: dict, cfg: dict, force_scaffold: bool) -> dict:
 def run_grid_loop(
     runs: list[dict], completed: set, cfg: dict, cfg_hash: str, commit: str, tier: str,
     budget_s: float, t0: float, manifest: Path, force_scaffold: bool, workers: int,
-    log_prefix: str, extra_rec_fields: dict | None = None,
+    log_prefix: str, extra_rec_fields: dict | None = None, gpu_budget_mib: int | None = None,
 ) -> None:
     """Shared execution loop for `run_grid.py` and `scripts/run_stage1_grid.py`
     (§12.3): one `train_one` call per OS process (`ProcessPoolExecutor`,
@@ -515,6 +528,10 @@ def run_grid_loop(
                 and (time.time() - t0) < budget_s
             ):
                 run = pending[next_idx]
+                if gpu_budget_mib is not None and in_flight:
+                    in_flight_mib = sum(_run_mib(r) for r, _, _ in in_flight.values())
+                    if in_flight_mib + _run_mib(run) > gpu_budget_mib:
+                        break  # wait for an in-flight run to finish before submitting more
                 next_idx += 1
                 started = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 print(f"{log_prefix} >>> {run['run_id']}", flush=True)
@@ -528,7 +545,8 @@ def run_grid_loop(
                 run, r0, started = in_flight.pop(fut)
                 rec = {
                     **run, "config_hash": cfg_hash, "git": commit, "tier": tier,
-                    "started": started, "workers": workers, **extra_rec_fields,
+                    "started": started, "workers": workers, "gpu_budget_mib": gpu_budget_mib,
+                    **extra_rec_fields,
                 }
                 try:
                     result = fut.result()
@@ -572,6 +590,11 @@ def main(argv=None) -> int:
                           "slowdown (Appendix A, 12.3 RESULT); keep N FIXED for a whole stage since "
                           "wall_s_to_*/joules_to_* are not comparable across rows with different "
                           "`workers` (every manifest row records it).")
+    ap.add_argument("--gpu-budget-mib", type=int, default=DEFAULT_GPU_BUDGET_MIB,
+                     help="D38: cap on estimated concurrent GPU memory (MiB) across in-flight runs "
+                          "(S=1 cells ~6200 MiB, S=0 ~900 MiB); a run that would exceed it waits for "
+                          "one in-flight run to finish before submitting, so `--workers` is a ceiling "
+                          "and not a guarantee. Pass a very large value to disable.")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
@@ -660,12 +683,13 @@ def main(argv=None) -> int:
             resolved_path.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
     print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h workers={args.workers} "
-          f"runs={len(runs)} already_completed={len(completed)} config_hash={cfg_hash[:12]}", flush=True)
+          f"gpu_budget_mib={args.gpu_budget_mib} runs={len(runs)} already_completed={len(completed)} "
+          f"config_hash={cfg_hash[:12]}", flush=True)
 
     t0 = time.time()
     run_grid_loop(
         runs, completed, cfg, cfg_hash, commit, args.tier, budget_s, t0, MANIFEST,
-        args.scaffold, args.workers, "[run_grid]",
+        args.scaffold, args.workers, "[run_grid]", gpu_budget_mib=args.gpu_budget_mib,
     )
 
     write_report(MANIFEST, REPORT, budget_s, time.time() - t0)

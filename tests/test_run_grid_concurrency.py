@@ -74,3 +74,35 @@ def test_worker_exception_yields_error_row_without_killing_others(tmp_path, monk
     assert "boom" in rows["BOOM_s0"]["error"]
     assert rows["OK1_s0"]["status"] == "completed"
     assert rows["OK2_s0"]["status"] == "completed"
+
+
+def test_gpu_budget_mib_serializes_s1_runs_but_not_s0(tmp_path, monkeypatch):
+    """D38: two S=1 (hierarchical) cells alone measured ~11.16 GiB concurrently,
+    almost the whole 12227 MiB card. `--gpu-budget-mib` must keep S=1 runs from
+    overlapping in wall-clock time even when `workers` would otherwise allow it,
+    while S=0 runs (small footprint) still pack in freely."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+
+    def _timed_resolve(force_scaffold):  # noqa: ARG001
+        def _fn(run, cfg):
+            t_start = time.time()
+            time.sleep(cfg.get("scaffold_sleep_s", 0.05))
+            return {"status": "completed", "t_start": t_start, "t_end": time.time()}
+        return _fn
+
+    monkeypatch.setattr(rg, "resolve_train_fn", _timed_resolve)
+    runs = (
+        [{"model_id": f"S1_{i}", "S": 1, "seed": 0, "run_id": f"S1_{i}_s0"} for i in range(3)]
+        + [{"model_id": f"S0_{i}", "S": 0, "seed": 0, "run_id": f"S0_{i}_s0"} for i in range(3)]
+    )
+    manifest = tmp_path / "m.jsonl"
+    rg.run_grid_loop(runs, set(), {"scaffold_sleep_s": 0.4}, "hash", "gitrev", "smoke",
+                      budget_s=3600, t0=time.time(), manifest=manifest, force_scaffold=True,
+                      workers=6, log_prefix="[test]", gpu_budget_mib=rg.DEFAULT_GPU_BUDGET_MIB)
+
+    rows = _rows(manifest)
+    assert len(rows) == 6
+    s1 = [(r["t_start"], r["t_end"]) for r in rows.values() if r["S"] == 1]
+    for i, (s_a, e_a) in enumerate(s1):
+        for s_b, e_b in s1[i + 1:]:
+            assert e_a <= s_b or e_b <= s_a, "two S=1 runs overlapped under the GPU memory budget"

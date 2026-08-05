@@ -135,6 +135,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -486,6 +487,59 @@ def _gate_bias_step(reflective_gate, R_prev, prev_is_feedback, prev_reward, prev
     return gate_bias, R_t
 
 
+def _segment_checkpoint_scan(step_fn, state: tuple, n_ticks: int, segment_len: int):
+    """Runs `step_fn` sequentially for `n_ticks` ticks, `(state, t) ->
+    (state, output)`, in chunks of up to `segment_len` ticks, each chunk run
+    through `torch.utils.checkpoint.checkpoint`: only the state AT SEGMENT
+    BOUNDARIES is kept for backward, and each segment's interior is
+    recomputed there instead of retained. This is the exact full-BPTT
+    gradient -- checkpoint recomputes every op in backward, it never skips
+    one -- just computed at a different time, which is what turns an
+    O(n_ticks) retained activation graph into an O(segment_len) one for a
+    cell whose per-tick state IS the expensive tensor (`PlasticGRUCell`'s
+    Hebbian fast-weight trace, `gru_cell.py`). Segmenting at all
+    (`segment_len > 1`) is required for this to save anything: a segment's
+    retained INPUT is its starting state, so `segment_len=1` would retain
+    every tick's state exactly like no checkpointing at all.
+
+    `state` is a tuple of tensors and/or `None` entries (e.g. a reflective
+    gate's R_t when a run has no reflective gate) -- checkpoint's autograd
+    hook tracks plain tensor arguments directly, so any richer state (a
+    dict, several named tensors) must be packed into this flat form by the
+    caller; `step_fn` itself unpacks/repacks it. `step_fn` may be an
+    arbitrary closure -- nothing here is GRU/plastic-cell specific -- e.g.
+    it may also call other modules (heads, a reflective gate) internally.
+
+    `step_fn`'s per-tick side effects are safe IFF they only touch locals
+    inside `step_fn`'s own call frame: a checkpointed segment's forward
+    runs once for real and (only during backward, to reconstruct
+    gradients) a second time, so anything it mutates OUTSIDE its own frame
+    -- a nonlocal counter, an outer list -- would apply twice. `output`
+    should therefore carry everything a caller needs; nothing here reads a
+    segment's return value more than once.
+
+    Returns `(final_state, outputs)`, `outputs[t]` = the `output` `step_fn`
+    returned at tick t (0-indexed, `t` in `range(n_ticks)`), an arbitrary
+    nested tensor structure."""
+    outputs = []
+    t = 0
+    while t < n_ticks:
+        t_end = min(t + segment_len, n_ticks)
+
+        def _run_segment(*state_tensors, _t0=t, _t1=t_end):
+            seg_state = state_tensors
+            seg_outputs = []
+            for tick in range(_t0, _t1):
+                seg_state, out = step_fn(seg_state, tick)
+                seg_outputs.append(out)
+            return tuple(seg_state), seg_outputs
+
+        state, seg_outputs = checkpoint(_run_segment, *state, use_reentrant=False)
+        outputs.extend(seg_outputs)
+        t = t_end
+    return state, outputs
+
+
 def _run_trial(
     front_end, core, heads, reflective_gate, S: int, M: int, P: int,
     trial_steps_batch: list, image_bank, feature_dim: int, action_dim: int, gate_width: int,
@@ -500,6 +554,7 @@ def _run_trial(
     core_dropout_p: float = 0.0,
     categories: Optional[list] = None,
     task_name_for_context: Optional[str] = None,
+    checkpoint_plastic: bool = False,
 ):
     """Unrolls a batch of B trials sharing one load (see
     `TaskGenerator.sample_batch` -- every trial has identical tick/epoch
@@ -527,7 +582,14 @@ def _run_trial(
     set, `front_end` is assumed to be the diet's own 13-dim `front_end_mt`
     and `ts.c_t` is wrapped through `multitask.task_context_vector` before
     reaching it, instead of passed raw -- `None` (every other cell)
-    preserves the exact original 10-dim behavior."""
+    preserves the exact original 10-dim behavior.
+    `checkpoint_plastic`: run the plastic (P=1) recurrent core through
+    `_segment_checkpoint_scan` instead of the plain per-tick loop -- only
+    takes effect when `P == 1 and mode == "bptt"` (see `use_segment_checkpoint`
+    below); every other run takes the plain loop, unchanged. The exact same
+    BPTT gradient either way (tests/test_plastic_checkpointing.py), traded
+    for ~sqrt(T) retained activation memory instead of O(T) -- see
+    `gru_cell.py`'s `PlasticGRUCell`."""
     B = len(trial_steps_batch)
     T = len(trial_steps_batch[0])
     state = _init_state(core, S, P, B, device)
@@ -591,110 +653,246 @@ def _run_trial(
     non_catch = torch.tensor([not f for f in catch_flags], dtype=torch.float32, device=device)
     non_catch_n = float(len(catch_flags) - sum(catch_flags))
 
-    for i in range(T):
-        epoch = trial_steps_batch[0][i].epoch  # shared across the batch: same load => same schedule
-        v_t = all_v[i]
-        c_t = all_c[i]
+    # Gradient checkpointing over the plastic recurrent core (comments.txt's
+    # gradient-checkpointing fix): `PlasticGRUCell`'s per-tick Hebbian trace
+    # (gru_cell.py) makes the retained activation graph grow linearly with
+    # trial length, large enough at the curriculum's longest load to exceed
+    # the whole GPU for the S=1/S=0 plastic cells. `checkpoint_plastic`
+    # (default on for P=1, see `train_one`) routes those cells' ticks
+    # through `_segment_checkpoint_scan` instead of the plain loop below --
+    # restricted to P==1 (P=0 cells never build the expensive tensor, so
+    # checkpointing them buys nothing) and mode=="bptt" (eval never
+    # backpropagates, so it always uses the plain loop and never needs
+    # this). The two branches must produce identical `total_loss`/
+    # `policy_terms`/etc. -- see `tests/test_plastic_checkpointing.py` for
+    # the gradient-equivalence acceptance test this rests on.
+    use_segment_checkpoint = checkpoint_plastic and mode == "bptt" and P == 1
+    if not use_segment_checkpoint:
+        for i in range(T):
+            epoch = trial_steps_batch[0][i].epoch  # shared across the batch: same load => same schedule
+            v_t = all_v[i]
+            c_t = all_c[i]
 
-        gate_bias = None
-        if reflective_gate is not None:
-            gate_bias, R_prev = _gate_bias_step(
-                reflective_gate, R_prev, prev_is_feedback, prev_reward, prev_value, prev_action_logp,
-                gate_width, B, device,
+            gate_bias = None
+            if reflective_gate is not None:
+                gate_bias, R_prev = _gate_bias_step(
+                    reflective_gate, R_prev, prev_is_feedback, prev_reward, prev_value, prev_action_logp,
+                    gate_width, B, device,
+                )
+
+            z_t = front_end(v_t, c_t)
+            h_star, new_state, u_t = _step_core(
+                core, S, M, P, z_t, state, t=i, gate_bias=gate_bias, recurrent_noise_sigma=recurrent_noise_sigma,
+                R_t=R_prev, core_dropout_p=core_dropout_p, training=(mode == "bptt"),
             )
+            policy, value, logits = heads(h_star)  # policy/logits: [B, action_dim]; value: [B]
 
-        z_t = front_end(v_t, c_t)
-        h_star, new_state, u_t = _step_core(
-            core, S, M, P, z_t, state, t=i, gate_bias=gate_bias, recurrent_noise_sigma=recurrent_noise_sigma,
-            R_t=R_prev, core_dropout_p=core_dropout_p, training=(mode == "bptt"),
-        )
-        policy, value, logits = heads(h_star)  # policy/logits: [B, action_dim]; value: [B]
+            if mode == "bptt" and energy_cost_weight > 0:
+                energy_terms.append(h_star.pow(2).mean())
 
-        if mode == "bptt" and energy_cost_weight > 0:
-            energy_terms.append(h_star.pow(2).mean())
+            if mode == "bptt" and topo_loss_weight > 0:
+                # RECURRENT population activity, not h_star -- S=1's worker
+                # lives on its own intrinsic grid (`core.grid`); S=0 has no
+                # intrinsic grid, so `flat_grid` imposes one (arbitrary unit
+                # ordering; the loss is what makes the map meaningful over
+                # training, standard All-TNNs method).
+                if S == 0:
+                    gh, gw = flat_grid
+                    grid_act = new_state["h"].view(-1, gh, gw)
+                else:
+                    gh, gw = core.grid
+                    grid_act = new_state["h_worker"].view(-1, gh, gw)
+                topo_terms.append(
+                    torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
+                )
 
-        if mode == "bptt" and topo_loss_weight > 0:
-            # RECURRENT population activity, not h_star -- S=1's worker
-            # lives on its own intrinsic grid (`core.grid`); S=0 has no
-            # intrinsic grid, so `flat_grid` imposes one (arbitrary unit
-            # ordering; the loss is what makes the map meaningful over
-            # training, standard All-TNNs method).
-            if S == 0:
-                gh, gw = flat_grid
-                grid_act = new_state["h"].view(-1, gh, gw)
+            # Identity-report catch trials (§9.4a) have no real in/out judgment
+            # (`in_set=None`) -- excluded from the policy/value loss below via
+            # `non_catch` (hoisted above the loop: per-trial, not per-tick), so
+            # they contribute only through the auxiliary identity-report loss
+            # (added after the tick loop would otherwise discard it under
+            # "reinforce" -- see end of function). `non_catch` is a no-op
+            # (all-ones) mask whenever no catch trial is in this batch, i.e.
+            # always in Core (`identity_catch_fraction=0`).
+            if mode == "bptt" and signal == "ce" and non_catch_n > 0:
+                # The trivial "predict fixation" target
+                # outnumbers the real decision ~5:1 in tick count and dominates
+                # the loss unless upweighted.
+                tick_weight = 1.0 if epoch == "probe" else 0.1
+                ce_per_sample = F.cross_entropy(logits, all_targets[i], reduction="none")
+                total_loss = total_loss + tick_weight * (ce_per_sample * non_catch).sum() / non_catch_n
+                n_ce_terms += tick_weight
+
+            if mode == "eval":
+                action = torch.argmax(policy, dim=-1)
             else:
-                gh, gw = core.grid
-                grid_act = new_state["h_worker"].view(-1, gh, gw)
-            topo_terms.append(
-                torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
+                action = torch.multinomial(policy.detach(), 1).squeeze(-1)  # [B]; sampling policy is load-bearing under REINFORCE (B5)
+
+            if mode == "bptt" and signal == "reinforce" and epoch == "probe" and non_catch_n > 0:
+                logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))  # keeps graph
+                policy_terms.append((logp_a, value, non_catch))
+                probs = policy.clamp_min(1e-8)
+                entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
+
+            if heads.identity_aux is not None and epoch == "probe" and any_catch:
+                catch_mask = 1.0 - non_catch
+                id_logits = heads.identity_logits(h_star)
+                target_idx = torch.tensor(
+                    [categories.index(trial_steps_batch[b][i].identity_catch_category) if catch_flags[b] else 0
+                     for b in range(B)],
+                    device=device,
+                )
+                if mode == "bptt":
+                    id_ce_per_sample = F.cross_entropy(id_logits, target_idx, reduction="none")
+                    identity_aux_terms.append((id_ce_per_sample * catch_mask).sum() / catch_mask.sum())
+                id_pred = torch.argmax(id_logits, dim=-1).detach()
+                identity_catch["correct"] += int(((id_pred == target_idx).float() * catch_mask).sum().item())
+                identity_catch["total"] += int(catch_mask.sum().item())
+
+            if epoch == "probe":
+                last_probe_action_t = action
+
+            prev_policy = policy.detach()
+            prev_value = value.detach().unsqueeze(-1)
+            prev_action_logp = torch.log(policy.detach().gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8)).unsqueeze(-1)
+            prev_is_feedback = torch.full((B, 1), 1.0 if epoch == "feedback" else 0.0, device=device)
+
+            state = new_state
+
+            if epoch == "feedback":
+                # Pure tensor op, no host sync -- `correct_now_t` feeds the
+                # reflective gate's causal R_t chain for the remaining ticks
+                # (iti), so it must be available mid-loop, not deferred.
+                correct_now_t = (last_probe_action_t == 1) == true_in_set_t
+                if mode == "bptt" and signal == "ce":
+                    value_target = correct_now_t.float()
+                    total_loss = total_loss + value_weight * F.mse_loss(value, value_target)
+                    prev_reward = value_target.unsqueeze(-1)
+                else:
+                    prev_reward = correct_now_t.float().unsqueeze(-1)
+                    if mode == "bptt" and signal == "reinforce":
+                        value_only_terms.append((value, non_catch))  # target added post-loop once reward is final
+    else:
+        # Same recurrence as the plain loop above, restructured so the
+        # expensive per-tick state (core state, including the plastic
+        # trace) is threaded through `_segment_checkpoint_scan` as a flat
+        # tensor tuple, while the loss/bookkeeping side effects (Python
+        # list appends, the identity_catch dict, `.item()` calls) stay
+        # OUTSIDE the checkpointed region -- required because a checkpointed
+        # segment's forward runs twice (once for real, once more during
+        # backward to reconstruct the graph), so anything it mutated
+        # outside its own call frame would double-apply (verified in
+        # `tests/test_plastic_checkpointing.py`'s underlying utility).
+        # `mode == "bptt"` always here (see `use_segment_checkpoint` above),
+        # so every `if mode == "bptt"` guard the plain loop needed is
+        # unconditionally true and dropped below.
+        core_state_keys = tuple(state.keys())
+        init_state_tuple = tuple(state[k] for k in core_state_keys) + (
+            R_prev, prev_is_feedback, prev_reward, prev_value, prev_action_logp, last_probe_action_t,
+        )
+        n_core = len(core_state_keys)
+
+        def _tick(state_tuple, i):
+            core_vals = state_tuple[:n_core]
+            r_prev, is_fb, reward_prev, value_prev, action_logp_prev, last_probe = state_tuple[n_core:]
+            tick_state = dict(zip(core_state_keys, core_vals))
+            epoch = trial_steps_batch[0][i].epoch
+            v_t, c_t = all_v[i], all_c[i]
+
+            gate_bias = None
+            if reflective_gate is not None:
+                gate_bias, r_prev = _gate_bias_step(
+                    reflective_gate, r_prev, is_fb, reward_prev, value_prev, action_logp_prev, gate_width, B, device,
+                )
+            z_t = front_end(v_t, c_t)
+            h_star, new_tick_state, _u_t = _step_core(
+                core, S, M, P, z_t, tick_state, t=i, gate_bias=gate_bias,
+                recurrent_noise_sigma=recurrent_noise_sigma, R_t=r_prev,
+                core_dropout_p=core_dropout_p, training=True,
             )
+            policy, value, logits = heads(h_star)
+            action = torch.multinomial(policy.detach(), 1).squeeze(-1)
 
-        # Identity-report catch trials (§9.4a) have no real in/out judgment
-        # (`in_set=None`) -- excluded from the policy/value loss below via
-        # `non_catch` (hoisted above the loop: per-trial, not per-tick), so
-        # they contribute only through the auxiliary identity-report loss
-        # (added after the tick loop would otherwise discard it under
-        # "reinforce" -- see end of function). `non_catch` is a no-op
-        # (all-ones) mask whenever no catch trial is in this batch, i.e.
-        # always in Core (`identity_catch_fraction=0`).
-        if mode == "bptt" and signal == "ce" and non_catch_n > 0:
-            # The trivial "predict fixation" target
-            # outnumbers the real decision ~5:1 in tick count and dominates
-            # the loss unless upweighted.
-            tick_weight = 1.0 if epoch == "probe" else 0.1
-            ce_per_sample = F.cross_entropy(logits, all_targets[i], reduction="none")
-            total_loss = total_loss + tick_weight * (ce_per_sample * non_catch).sum() / non_catch_n
-            n_ce_terms += tick_weight
+            if epoch == "probe":
+                last_probe = action
+            new_is_fb = torch.full((B, 1), 1.0 if epoch == "feedback" else 0.0, device=device)
+            new_value_prev = value.detach().unsqueeze(-1)
+            new_action_logp_prev = torch.log(
+                policy.detach().gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8)
+            ).unsqueeze(-1)
+            new_reward_prev = reward_prev
+            if epoch == "feedback":
+                correct_now_t = (last_probe == 1) == true_in_set_t
+                new_reward_prev = correct_now_t.float().unsqueeze(-1)
 
-        if mode == "eval":
-            action = torch.argmax(policy, dim=-1)
-        else:
-            action = torch.multinomial(policy.detach(), 1).squeeze(-1)  # [B]; sampling policy is load-bearing under REINFORCE (B5)
-
-        if mode == "bptt" and signal == "reinforce" and epoch == "probe" and non_catch_n > 0:
-            logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))  # keeps graph
-            policy_terms.append((logp_a, value, non_catch))
-            probs = policy.clamp_min(1e-8)
-            entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
-
-        if heads.identity_aux is not None and epoch == "probe" and any_catch:
-            catch_mask = 1.0 - non_catch
-            id_logits = heads.identity_logits(h_star)
-            target_idx = torch.tensor(
-                [categories.index(trial_steps_batch[b][i].identity_catch_category) if catch_flags[b] else 0
-                 for b in range(B)],
-                device=device,
+            new_core_vals = tuple(new_tick_state[k] for k in core_state_keys)
+            new_state_tuple = new_core_vals + (
+                r_prev, new_is_fb, new_reward_prev, new_value_prev, new_action_logp_prev, last_probe,
             )
-            if mode == "bptt":
+            return new_state_tuple, (h_star, policy, value, logits, action)
+
+        segment_len = max(1, round(T ** 0.5))
+        final_state_tuple, tick_outputs = _segment_checkpoint_scan(_tick, init_state_tuple, T, segment_len)
+
+        core_vals = final_state_tuple[:n_core]
+        (R_prev, prev_is_feedback, prev_reward, prev_value, prev_action_logp,
+         last_probe_action_t) = final_state_tuple[n_core:]
+        state = dict(zip(core_state_keys, core_vals))
+
+        for i in range(T):
+            epoch = trial_steps_batch[0][i].epoch
+            h_star, policy, value, logits, action = tick_outputs[i]
+
+            if energy_cost_weight > 0:
+                energy_terms.append(h_star.pow(2).mean())
+
+            if topo_loss_weight > 0:
+                if S == 0:
+                    gh, gw = flat_grid
+                    grid_act = h_star.view(-1, gh, gw)
+                else:
+                    gh, gw = core.grid
+                    grid_act = h_star[..., :core.worker_units].view(-1, gh, gw)  # h_worker is h_star's first worker_units columns (HRLCore.readout_state)
+                topo_terms.append(
+                    torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
+                )
+
+            if signal == "ce" and non_catch_n > 0:
+                tick_weight = 1.0 if epoch == "probe" else 0.1
+                ce_per_sample = F.cross_entropy(logits, all_targets[i], reduction="none")
+                total_loss = total_loss + tick_weight * (ce_per_sample * non_catch).sum() / non_catch_n
+                n_ce_terms += tick_weight
+
+            if signal == "reinforce" and epoch == "probe" and non_catch_n > 0:
+                logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))
+                policy_terms.append((logp_a, value, non_catch))
+                probs = policy.clamp_min(1e-8)
+                entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
+
+            if heads.identity_aux is not None and epoch == "probe" and any_catch:
+                catch_mask = 1.0 - non_catch
+                id_logits = heads.identity_logits(h_star)
+                target_idx = torch.tensor(
+                    [categories.index(trial_steps_batch[b][i].identity_catch_category) if catch_flags[b] else 0
+                     for b in range(B)],
+                    device=device,
+                )
                 id_ce_per_sample = F.cross_entropy(id_logits, target_idx, reduction="none")
                 identity_aux_terms.append((id_ce_per_sample * catch_mask).sum() / catch_mask.sum())
-            id_pred = torch.argmax(id_logits, dim=-1).detach()
-            identity_catch["correct"] += int(((id_pred == target_idx).float() * catch_mask).sum().item())
-            identity_catch["total"] += int(catch_mask.sum().item())
+                id_pred = torch.argmax(id_logits, dim=-1).detach()
+                identity_catch["correct"] += int(((id_pred == target_idx).float() * catch_mask).sum().item())
+                identity_catch["total"] += int(catch_mask.sum().item())
 
-        if epoch == "probe":
-            last_probe_action_t = action
+            if epoch == "probe":
+                last_probe_action_t = action
 
-        prev_policy = policy.detach()
-        prev_value = value.detach().unsqueeze(-1)
-        prev_action_logp = torch.log(policy.detach().gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8)).unsqueeze(-1)
-        prev_is_feedback = torch.full((B, 1), 1.0 if epoch == "feedback" else 0.0, device=device)
-
-        state = new_state
-
-        if epoch == "feedback":
-            # Pure tensor op, no host sync -- `correct_now_t` feeds the
-            # reflective gate's causal R_t chain for the remaining ticks
-            # (iti), so it must be available mid-loop, not deferred.
-            correct_now_t = (last_probe_action_t == 1) == true_in_set_t
-            if mode == "bptt" and signal == "ce":
-                value_target = correct_now_t.float()
-                total_loss = total_loss + value_weight * F.mse_loss(value, value_target)
-                prev_reward = value_target.unsqueeze(-1)
-            else:
-                prev_reward = correct_now_t.float().unsqueeze(-1)
-                if mode == "bptt" and signal == "reinforce":
-                    value_only_terms.append((value, non_catch))  # target added post-loop once reward is final
+            if epoch == "feedback":
+                correct_now_t = (last_probe_action_t == 1) == true_in_set_t
+                if signal == "ce":
+                    value_target = correct_now_t.float()
+                    total_loss = total_loss + value_weight * F.mse_loss(value, value_target)
+                elif signal == "reinforce":
+                    value_only_terms.append((value, non_catch))
 
     # NOTE (§9.4a): for an identity-catch trial, `true_in_set` at `probe_i`
     # is None (no real in/out judgment was made), so its `correct`/`reward`
@@ -1617,6 +1815,15 @@ def train_one(run: dict, cfg: dict) -> dict:
     flat_grid = tuple(run.get("flat_grid", m.get("flat_grid", [16, 16])))
     recurrent_noise_sigma = float(m.get("recurrent_noise_sigma", 0.0))
     core_dropout_p = float(run.get("core_dropout_p", m.get("core_dropout_p", 0.0)))
+    # Gradient checkpointing over the plastic recurrent core (comments.txt's
+    # fix for the S=1/S=0 P=1 cells whose per-tick Hebbian trace made the
+    # retained activation graph exceed the GPU at the curriculum's longest
+    # load): defaults on for every P=1 cell -- `_run_trial` only actually
+    # uses it when P==1 and mode=="bptt" (see `use_segment_checkpoint`
+    # there), so this is a no-op for the 9 non-plastic cells whether the
+    # flag is on or off. `mechanisms.plastic_gradient_checkpointing: false`
+    # is the escape hatch to fall back to the plain (pre-fix) loop.
+    checkpoint_plastic = bool(P) and bool(mech_cfg.get("plastic_gradient_checkpointing", True))
     # M7 fix: the per-run override key now matches the config key
     # (`l1_weight_penalty`) instead of the old ad hoc `l1_weight` shortname.
     l1_weight = float(run.get("l1_weight_penalty", t_cfg.get("l1_weight_penalty", 0.0)))
@@ -1829,6 +2036,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                     recurrent_noise_sigma=recurrent_noise_sigma,
                     core_dropout_p=core_dropout_p, categories=full_cfg["task"]["categories"],
                     task_name_for_context=("sternberg" if diet == "multitask" else None),
+                    checkpoint_plastic=checkpoint_plastic,
                 )
             else:
                 batch_env = NeuroGymBatchEnv(task, batch_size=batch_size, seed=seed * 1_000_003 + step)

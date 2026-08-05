@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import signal
@@ -123,17 +124,51 @@ LOCAL_LEARNING_CELLS = [
     for s in (0, 1) for m in (0, 1)
 ]
 
-# D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU because Appendix A's
-# throughput benchmark measured one small S=0 cell replicated 8 ways, not
-# this heterogeneous battery -- two S=1 (hierarchical) cells alone measured
-# 5.78 + 5.38 GiB concurrently. Gate submissions on estimated in-flight GPU
-# memory so S=1 runs serialize against each other while S=0 runs still pack in.
-_MIB_ESTIMATE = {0: 900, 1: 6200}  # measured D38 probe, rounded up for headroom
+# D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
+# estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
+#
+# D41: that estimate must be DERIVED, not tabulated. `PlasticGRUCell` keeps three
+# [B, 3H, H] tensors per tick alive for backward, so a plastic cell's activation
+# graph is LINEAR IN TRIAL LENGTH -- which the curriculum lengthens underneath the
+# scheduler mid-run. A per-cell constant therefore cannot be right at both ends of
+# a run, and D39's pair were wrong in both directions at once: a non-plastic S=1
+# run measures ~320 MiB here (it was budgeted 6200), while a plastic S=1 run needs
+# 12.53 GiB at load 3 -- more than this entire card, which is why serializing to
+# --workers 1 did not save it. Every input below is read from the resolved config
+# so a config edit cannot silently desynchronise the scheduler from the model
+# again; that desynchronisation is the whole content of D39 and D40.
+_BASE_MIB = 500  # params + optimiser + CUDA context + frozen front-end. Measured:
+                 # four concurrent non-plastic runs occupied 1275 MiB in total.
+_LEGACY_MIB = {0: 900, 1: 6200}  # only when no resolved config is available (scaffold/tests)
 DEFAULT_GPU_BUDGET_MIB = 10500  # of 12227 MiB total; leaves headroom for driver/fragmentation
 
 
-def _run_mib(run: dict) -> int:
-    return _MIB_ESTIMATE.get(run.get("S", 0), max(_MIB_ESTIMATE.values()))
+def _trial_ticks(cfg: dict) -> int:
+    """Ticks in the longest trial the curriculum will reach, from the task config."""
+    t = cfg.get("task", {})
+    loads = t.get("loads") or [3]
+    return (int(t.get("fixation_steps", 3))
+            + int(t.get("encode_steps", 15)) * int(max(loads))
+            + int(t.get("maintain_steps", 15))
+            + int(t.get("probe_steps", 10))
+            + int(t.get("feedback_steps", 1))
+            + int(t.get("iti_steps", 2)))
+
+
+def _run_mib(run: dict, cfg: dict | None = None) -> int:
+    if not cfg or "model" not in cfg:
+        return _LEGACY_MIB.get(run.get("S", 0), max(_LEGACY_MIB.values()))
+    if not run.get("P"):
+        return _BASE_MIB  # no fast weights, so no [B, 3H, H] graph at all
+    model = cfg.get("model", {})
+    hidden = int(model.get("worker_units", 196) if run.get("S") else model.get("flat_units", 128))
+    batch = int(cfg.get("train", {}).get("batch_size", 128))
+    ticks = _trial_ticks(cfg)
+    if cfg.get("mechanisms", {}).get("plastic_gradient_checkpointing", True):
+        # Only segment boundaries survive backward; interiors are recomputed.
+        ticks = 2 * math.ceil(math.sqrt(ticks))
+    per_tick_mib = 3 * batch * 3 * hidden * hidden * 4 / 2 ** 20  # three fp32 [B, 3H, H] tensors
+    return int(_BASE_MIB + per_tick_mib * ticks)
 
 
 _STOP = False
@@ -497,6 +532,7 @@ def run_grid_loop(
     runs: list[dict], completed: set, cfg: dict, cfg_hash: str, commit: str, tier: str,
     budget_s: float, t0: float, manifest: Path, force_scaffold: bool, workers: int,
     log_prefix: str, extra_rec_fields: dict | None = None, gpu_budget_mib: int | None = None,
+    mem_cfg: dict | None = None,
 ) -> None:
     """Shared execution loop for `run_grid.py` and `scripts/run_stage1_grid.py`
     (§12.3): one `train_one` call per OS process (`ProcessPoolExecutor`,
@@ -529,8 +565,8 @@ def run_grid_loop(
             ):
                 run = pending[next_idx]
                 if gpu_budget_mib is not None and in_flight:
-                    in_flight_mib = sum(_run_mib(r) for r, _, _ in in_flight.values())
-                    if in_flight_mib + _run_mib(run) > gpu_budget_mib:
+                    in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
+                    if in_flight_mib + _run_mib(run, mem_cfg) > gpu_budget_mib:
                         break  # wait for an in-flight run to finish before submitting more
                 next_idx += 1
                 started = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -690,6 +726,7 @@ def main(argv=None) -> int:
     run_grid_loop(
         runs, completed, cfg, cfg_hash, commit, args.tier, budget_s, t0, MANIFEST,
         args.scaffold, args.workers, "[run_grid]", gpu_budget_mib=args.gpu_budget_mib,
+        mem_cfg=resolved_cfg if full_cfg else None,
     )
 
     write_report(MANIFEST, REPORT, budget_s, time.time() - t0)

@@ -116,6 +116,15 @@ mechanisms:
   hebb_eta_decay: 0.9                      # Knob P (§6.2): Hebb_ij(t) decay
   hebb_eta_hebb: 0.05                      # Knob P: Hebb_ij(t) update rate on x_j(t-1)*h_i(t)
   hebb_clip: 2.0                           # Knob P: Hebb_ij clipped to [-hebb_clip, hebb_clip]
+  plastic_gradient_checkpointing: true     # P=1 cells retain three [B,3H,H] Hebbian-trace tensors PER TICK
+                                            # (gru_cell.py's PlasticGRUCell), a graph that grows linearly with
+                                            # trial length -- exceeds the GPU for the S=1/S=0 plastic cells at
+                                            # the curriculum's longest load. true (default) runs those cells'
+                                            # recurrence through train.py's `_segment_checkpoint_scan` (~sqrt(T)
+                                            # segments of torch.utils.checkpoint) instead of a plain loop -- the
+                                            # exact same BPTT gradient (tests/test_plastic_checkpointing.py),
+                                            # traded for ~30-40% more wall clock on plastic cells only. No effect
+                                            # on P=0 cells either way. false reverts to the plain (pre-fix) loop.
 
 task:                                      # image-Sternberg working-memory task
   loads: [1, 2, 3]

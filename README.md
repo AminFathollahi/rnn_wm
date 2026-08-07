@@ -39,6 +39,7 @@ day-to-day usage.
 ```bash
 make help                 # list available targets
 make setup                # install PyTorch (CUDA 12.8 / sm_120 build) and analysis dependencies
+make audit-campaign       # manifest/config/CSV self-consistency check -- run this FIRST, it is the cheapest
 make verify-gpu           # confirm the GPU is usable by PyTorch
 make fetch-encoder        # download the ResNet-18 ImageNet weights
 make test                 # run the test suite

@@ -4,7 +4,7 @@ PY ?= /home/amin/miniconda3/envs/wm_dynamics/bin/python
 CU_INDEX := https://download.pytorch.org/whl/cu128
 
 .DEFAULT_GOAL := help
-.PHONY: help setup verify-gpu fetch-encoder features test smoke recovery run-grid run-grid-demo reproduce clean
+.PHONY: help setup verify-gpu audit-campaign fetch-encoder features test smoke recovery run-grid run-grid-demo reproduce clean
 
 help: ## show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -17,6 +17,9 @@ verify-gpu: ## confirm the RTX 5070 Ti (sm_120) is usable by torch
 	$(PY) -c "import torch; al=torch.cuda.get_arch_list(); print('torch',torch.__version__,'cuda',torch.version.cuda,'archs',al); \
 x=torch.zeros(1,device='cuda'); print('GPU OK:',torch.cuda.get_device_name(0)); \
 assert any(a.startswith('sm_120') for a in al), 'sm_120 not in arch_list -> upgrade torch (make setup)'"
+
+audit-campaign: ## mechanical manifest/config/CSV self-consistency check (run before verify-gpu/pytest)
+	$(PY) scripts/audit_campaign.py
 
 fetch-encoder: ## download + checksum ResNet-18 ImageNet weights into torch hub cache
 	$(PY) scripts/fetch_encoder.py

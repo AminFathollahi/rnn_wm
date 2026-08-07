@@ -165,3 +165,22 @@ def test_estimate_falls_back_to_constants_without_a_resolved_config():
     estimating from defaults."""
     assert rg._run_mib({"S": 1}, None) == rg._LEGACY_MIB[1]
     assert rg._run_mib({"S": 0}, {"steps": 5}) == rg._LEGACY_MIB[0]
+
+
+def test_load_completed_ignores_a_row_from_another_tier(tmp_path):
+    """A smoke-tier diagnostic must not retire a full-tier campaign cell.
+
+    Regression for the real `M11011_SUP_s0` row: D38's `--tier smoke` OOM
+    probe left `status: completed` at 100 steps and chance accuracy, and
+    `load_completed` keyed on `run_id` alone would have skipped that core
+    cell in every later full-tier pass."""
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"run_id": "M11011_SUP_s0", "status": "completed", "tier": "smoke"}) + "\n"
+        + json.dumps({"run_id": "M00000_SUP_s0", "status": "completed", "tier": "full"}) + "\n"
+        + json.dumps({"run_id": "M01111_SUP_s0", "status": "error", "tier": "full"}) + "\n"
+    )
+    assert rg.load_completed(manifest, "full") == {"M00000_SUP_s0"}
+    assert rg.load_completed(manifest, "smoke") == {"M11011_SUP_s0"}
+    # No tier given: unfiltered, as before, for callers with no tier concept.
+    assert rg.load_completed(manifest) == {"M11011_SUP_s0", "M00000_SUP_s0"}

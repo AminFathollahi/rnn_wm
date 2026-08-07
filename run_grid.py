@@ -14,7 +14,11 @@ Design properties:
     individual run from its last checkpoint (see `training/train.py`);
   * isolated per-run execution: an exception or failed gate in one run is
     recorded and does not halt the remaining runs;
-  * enforces a wall-clock budget and terminates cleanly on SIGINT/SIGTERM;
+  * enforces a wall-clock budget and terminates cleanly on SIGINT/SIGTERM,
+    recording every in-flight run as `status: interrupted` (with its last
+    step from the metrics CSV) at the moment the signal arrives, so a
+    killed pass leaves a record even if it never reaches the graceful
+    shutdown path (D44);
   * writes `results/manifest.jsonl` and a summary report,
     `results/RUN_REPORT.md`;
   * `--workers N` (§12.3): runs N `train_one` calls concurrently via
@@ -41,6 +45,7 @@ is not one of the study's two preregistered levels.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -172,12 +177,55 @@ def _run_mib(run: dict, cfg: dict | None = None) -> int:
 
 
 _STOP = False
+# Set by `run_grid_loop` to the live `in_flight` dict (and the fields needed
+# to build a manifest row) for the duration of the loop, so `_handle_signal`
+# can write a record for whatever is in flight AT THE MOMENT the signal
+# arrives -- not after the loop next reaches Python code, which the 2026-08-05
+# P=0 pass showed cannot be relied on: it was killed with four runs 8,000-
+# 76,000 steps in and left zero manifest rows for any of them (D44).
+_ACTIVE_LOOP_STATE: dict | None = None
+
+
+def _last_step_from_csv(run_id: str) -> int | None:
+    """The interrupted row's only source of "how far did it get": the
+    metrics CSV, written incrementally during training and therefore already
+    on disk regardless of how the process ends."""
+    csv_path = RESULTS / "metrics" / f"{run_id}.csv"
+    if not csv_path.exists():
+        return None
+    last = None
+    with csv_path.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            if row.get("step"):
+                last = int(row["step"])
+    return last
+
+
+def _write_interrupted_rows(state: dict) -> None:
+    manifest = state["manifest"]
+    for run, r0, started in state["in_flight"].values():
+        rec = {
+            **run, "config_hash": state["cfg_hash"], "git": state["commit"], "tier": state["tier"],
+            "started": started, "workers": state["workers"], "gpu_budget_mib": state["gpu_budget_mib"],
+            **state["extra_rec_fields"],
+            "status": "interrupted", "last_step": _last_step_from_csv(run["run_id"]),
+            "wall_clock_s": round(time.time() - r0, 1),
+            "finished": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        with manifest.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
 
 
 def _handle_signal(signum, frame):  # noqa: ARG001
     global _STOP
+    if _STOP:
+        return  # already handled -- a second SIGINT/SIGTERM must not double-write rows
     _STOP = True
     print(f"\n[run_grid] caught signal {signum}; will stop after the current run.", flush=True)
+    if _ACTIVE_LOOP_STATE is not None and _ACTIVE_LOOP_STATE["in_flight"]:
+        n = len(_ACTIVE_LOOP_STATE["in_flight"])
+        print(f"[run_grid] recording {n} in-flight run(s) as status=interrupted.", flush=True)
+        _write_interrupted_rows(_ACTIVE_LOOP_STATE)
 
 
 # ----------------------------- pure helpers (unit-tested) -----------------------------
@@ -564,59 +612,76 @@ def run_grid_loop(
     12.3 test locks in. A worker that raises is caught per-future and
     recorded as a `status: error` row; it does not stop the others or
     poison the pool. SIGINT/SIGTERM/budget: stop SUBMITTING new futures,
-    let in-flight ones finish, then return."""
+    let in-flight ones finish, then return. SIGINT/SIGTERM additionally
+    writes a `status: interrupted` row for every run still in flight AT THE
+    MOMENT the signal is caught (D44, comments.txt §20.4): a killed pass
+    previously left completed-but-uncommitted training invisible to the
+    manifest, because the graceful "let it finish" path never got the chance
+    to run. A run that does go on to finish normally after that still gets
+    its usual `completed`/`error` row; `load_completed` only ever treats
+    `completed` as done, so the extra `interrupted` row is inert once that
+    happens."""
+    global _ACTIVE_LOOP_STATE
     extra_rec_fields = extra_rec_fields or {}
     pending = [r for r in runs if r["run_id"] not in completed]
-    with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer) as ex:
-        in_flight: dict = {}
-        next_idx = 0
+    try:
+        with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer) as ex:
+            in_flight: dict = {}
+            next_idx = 0
+            _ACTIVE_LOOP_STATE = {
+                "manifest": manifest, "in_flight": in_flight, "cfg_hash": cfg_hash, "commit": commit,
+                "tier": tier, "workers": workers, "gpu_budget_mib": gpu_budget_mib,
+                "extra_rec_fields": extra_rec_fields,
+            }
 
-        def _try_submit() -> None:
-            nonlocal next_idx
-            while (
-                next_idx < len(pending)
-                and len(in_flight) < workers
-                and not _STOP
-                and (time.time() - t0) < budget_s
-            ):
-                run = pending[next_idx]
-                if gpu_budget_mib is not None and in_flight:
-                    in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
-                    if in_flight_mib + _run_mib(run, mem_cfg) > gpu_budget_mib:
-                        break  # wait for an in-flight run to finish before submitting more
-                next_idx += 1
-                started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                print(f"{log_prefix} >>> {run['run_id']}", flush=True)
-                fut = ex.submit(_worker_entry, run, cfg, force_scaffold)
-                in_flight[fut] = (run, time.time(), started)
+            def _try_submit() -> None:
+                nonlocal next_idx
+                while (
+                    next_idx < len(pending)
+                    and len(in_flight) < workers
+                    and not _STOP
+                    and (time.time() - t0) < budget_s
+                ):
+                    run = pending[next_idx]
+                    if gpu_budget_mib is not None and in_flight:
+                        in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
+                        if in_flight_mib + _run_mib(run, mem_cfg) > gpu_budget_mib:
+                            break  # wait for an in-flight run to finish before submitting more
+                    next_idx += 1
+                    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    print(f"{log_prefix} >>> {run['run_id']}", flush=True)
+                    fut = ex.submit(_worker_entry, run, cfg, force_scaffold)
+                    in_flight[fut] = (run, time.time(), started)
 
-        _try_submit()
-        while in_flight:
-            done, _ = futures_wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
-            for fut in done:
-                run, r0, started = in_flight.pop(fut)
-                rec = {
-                    **run, "config_hash": cfg_hash, "git": commit, "tier": tier,
-                    "started": started, "workers": workers, "gpu_budget_mib": gpu_budget_mib,
-                    **extra_rec_fields,
-                }
-                try:
-                    result = fut.result()
-                    rec.update(result)
-                    rec.setdefault("status", "completed")
-                except Exception as e:  # noqa: BLE001 -- isolation is the point
-                    rec.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
-                    print(f"{log_prefix} !!! {run['run_id']} errored: {rec['error']}", flush=True)
-                rec["wall_clock_s"] = round(time.time() - r0, 1)
-                rec["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                with manifest.open("a") as f:
-                    f.write(json.dumps(rec) + "\n")
-            if _STOP:
-                print(f"{log_prefix} stop requested; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
-            elif (time.time() - t0) >= budget_s:
-                print(f"{log_prefix} budget reached; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
-            else:
-                _try_submit()
+            _try_submit()
+            while in_flight:
+                done, _ = futures_wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    run, r0, started = in_flight.pop(fut)
+                    rec = {
+                        **run, "config_hash": cfg_hash, "git": commit, "tier": tier,
+                        "started": started, "workers": workers, "gpu_budget_mib": gpu_budget_mib,
+                        **extra_rec_fields,
+                    }
+                    try:
+                        result = fut.result()
+                        rec.update(result)
+                        rec.setdefault("status", "completed")
+                    except Exception as e:  # noqa: BLE001 -- isolation is the point
+                        rec.update({"status": "error", "error": f"{type(e).__name__}: {e}"})
+                        print(f"{log_prefix} !!! {run['run_id']} errored: {rec['error']}", flush=True)
+                    rec["wall_clock_s"] = round(time.time() - r0, 1)
+                    rec["finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    with manifest.open("a") as f:
+                        f.write(json.dumps(rec) + "\n")
+                if _STOP:
+                    print(f"{log_prefix} stop requested; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
+                elif (time.time() - t0) >= budget_s:
+                    print(f"{log_prefix} budget reached; letting {len(in_flight)} in-flight run(s) finish.", flush=True)
+                else:
+                    _try_submit()
+    finally:
+        _ACTIVE_LOOP_STATE = None
 
 
 # ----------------------------- main loop -----------------------------

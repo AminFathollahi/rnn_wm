@@ -4,7 +4,10 @@ N workers produce the same set of manifest rows as `--workers 1`, and a
 worker raising an exception must not take down the others (isolated,
 recorded as a `status: error` row)."""
 import json
+import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -184,3 +187,40 @@ def test_load_completed_ignores_a_row_from_another_tier(tmp_path):
     assert rg.load_completed(manifest, "smoke") == {"M11011_SUP_s0"}
     # No tier given: unfiltered, as before, for callers with no tier concept.
     assert rg.load_completed(manifest) == {"M11011_SUP_s0", "M00000_SUP_s0"}
+
+
+def test_stop_signal_writes_interrupted_rows_for_in_flight_runs(tmp_path, monkeypatch):
+    """D44 (comments.txt §20.4): a killed pass left four runs 8,000-76,000
+    steps in with checkpoints on disk and NO manifest row at all, invisible
+    to `load_completed` and every manifest-based audit. A caught stop signal
+    must record every in-flight run as `status: interrupted` at the moment
+    it arrives, not only if the process later reaches its graceful
+    shutdown path."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    runs = [{"model_id": f"M{i}", "S": 0, "seed": 0, "run_id": f"M{i}_s0"} for i in range(3)]
+    manifest = tmp_path / "m.jsonl"
+
+    old_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, rg._handle_signal)
+    rg._STOP = False
+    try:
+        thread = threading.Thread(
+            target=rg.run_grid_loop,
+            args=(runs, set(), {"scaffold_sleep_s": 2.0}, "hash", "gitrev", "smoke"),
+            kwargs=dict(budget_s=3600, t0=time.time(), manifest=manifest,
+                        force_scaffold=True, workers=3, log_prefix="[test]"),
+        )
+        thread.start()
+        time.sleep(0.3)  # let all three futures start (well inside the 2.0s scaffold sleep)
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.3)  # let the handler run and append rows, without waiting for completion
+
+        rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+        interrupted = [r for r in rows if r["status"] == "interrupted"]
+        assert {r["run_id"] for r in interrupted} == {r["run_id"] for r in runs}
+        assert rg.load_completed(manifest) == set()  # interrupted must not count as completed
+
+        thread.join(timeout=10)
+    finally:
+        signal.signal(signal.SIGTERM, old_handler)
+        rg._STOP = False

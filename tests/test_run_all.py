@@ -49,6 +49,14 @@ def _fake_log_row(session, trial_id, epoch, load, in_set, correct, h_val):
     }
 
 
+def _fake_hier_log_row(session, trial_id, epoch, load, in_set, correct, worker_val, manager_val):
+    return {
+        "session": session, "trial_id": trial_id, "epoch": epoch, "load": load,
+        "in_set": in_set, "correct": correct, "h_flat": None,
+        "h_worker": [worker_val, worker_val], "h_manager": [manager_val],
+    }
+
+
 def test_model_epoch_patterns_does_not_merge_trials_across_sessions():
     """`trial_id` is assigned PER SESSION by `generate_activity_logs.
     replay_session` (reset to 0 for every session) and is NOT globally
@@ -81,3 +89,51 @@ def test_no_dataframe_transpose_attribute_access_for_the_T_column():
 
     src = (Path(__file__).resolve().parents[1] / "brainalign_wm" / "analysis" / "run_all.py").read_text()
     assert not re.search(r"\b\w+\.T\.(iloc|values|mean|unique)\b", src)
+
+
+def test_model_epoch_patterns_subpop_selects_the_right_hidden_units():
+    """comments.txt §20.2 (D43): H1's worker<->MTL / manager<->MFC
+    dissociation needs the model side restricted to one subpopulation.
+    subpop="worker" must return only h_worker, "manager" only h_manager,
+    and "all" their concatenation -- exactly what every existing (pooled)
+    caller still gets by not passing subpop at all."""
+    rows = [
+        _fake_hier_log_row("sessA", 0, "maintain", load=1, in_set=True, correct=True, worker_val=1.0, manager_val=100.0),
+        _fake_hier_log_row("sessA", 1, "maintain", load=1, in_set=True, correct=True, worker_val=2.0, manager_val=200.0),
+    ]
+    df = pd.DataFrame(rows)
+    cond_fn = lambda row: (1, int(row.trial_id))  # noqa: E731 -- trivial per-trial label for this test only
+
+    worker_patterns, _ = _model_epoch_patterns(df, "maintain", cond_fn, subpop="worker")
+    manager_patterns, _ = _model_epoch_patterns(df, "maintain", cond_fn, subpop="manager")
+    all_patterns, _ = _model_epoch_patterns(df, "maintain", cond_fn, subpop="all")
+
+    assert worker_patterns.shape == (2, 2)  # h_worker is 2-dim in the fixture
+    assert manager_patterns.shape == (2, 1)  # h_manager is 1-dim in the fixture
+    assert all_patterns.shape == (2, 3)  # concatenation of both
+    np.testing.assert_array_equal(worker_patterns, [[1.0, 1.0], [2.0, 2.0]])
+    np.testing.assert_array_equal(manager_patterns, [[100.0], [200.0]])
+    np.testing.assert_array_equal(all_patterns, np.concatenate([worker_patterns, manager_patterns], axis=1))
+
+
+def test_model_epoch_patterns_subpop_not_applicable_on_a_flat_log():
+    """A flat run has no worker/manager subpopulation. Requesting one must
+    return the same empty sentinel as no data at this epoch -- callers turn
+    that into status="not_applicable", never a fabricated 0.0 -- while
+    subpop="all" (the default every pre-existing caller uses) is completely
+    unaffected, protecting the frozen pooled DV."""
+    rows = [_fake_log_row("sessA", 0, "maintain", load=1, in_set=True, correct=True, h_val=5.0)]
+    df = pd.DataFrame(rows)
+    cond_fn = lambda row: (1, int(row.trial_id))  # noqa: E731
+
+    worker_patterns, worker_labels = _model_epoch_patterns(df, "maintain", cond_fn, subpop="worker")
+    manager_patterns, manager_labels = _model_epoch_patterns(df, "maintain", cond_fn, subpop="manager")
+    assert worker_patterns.shape == (0, 0) and worker_labels == []
+    assert manager_patterns.shape == (0, 0) and manager_labels == []
+
+    # subpop="all" (default, unchanged) still works exactly as before.
+    all_patterns_explicit, all_labels_explicit = _model_epoch_patterns(df, "maintain", cond_fn, subpop="all")
+    all_patterns_default, all_labels_default = _model_epoch_patterns(df, "maintain", cond_fn)
+    np.testing.assert_array_equal(all_patterns_explicit, all_patterns_default)
+    assert all_labels_explicit == all_labels_default == [(1, 0)]
+    np.testing.assert_array_equal(all_patterns_default, [[5.0, 5.0]])

@@ -252,7 +252,23 @@ def enumerate_runs(
     return runs
 
 
-def load_completed(manifest: Path) -> set[str]:
+def load_completed(manifest: Path, tier: str | None = None) -> set[str]:
+    """Run ids already completed *at this tier*.
+
+    The tier filter is load-bearing, not cosmetic.  `M11011_SUP_s0` was left
+    in the manifest as `status: completed` by D38's `--tier smoke` OOM probe:
+    100 steps, 14.6 s wall clock, chance accuracy, a different `config_hash`.
+    Keyed on `run_id` alone, that row silently removed one of the fifteen core
+    cells from every subsequent full-tier pass and published its chance
+    accuracies as that cell's campaign result.  A diagnostic run and a
+    campaign run share a run_id by design (same cell, same seed, same
+    supervision); the tier is what tells them apart.  Same defect class as
+    F1/D20/D24/D32/D35 -- the recorded value and the value in effect diverge,
+    and every artifact looks right.
+
+    `tier=None` preserves the old unfiltered behaviour for callers that have
+    no tier concept.
+    """
     done: set[str] = set()
     if not manifest.exists():
         return done
@@ -264,7 +280,7 @@ def load_completed(manifest: Path) -> set[str]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if rec.get("status") == "completed":
+        if rec.get("status") == "completed" and (tier is None or rec.get("tier") == tier):
             done.add(rec["run_id"])
     return done
 
@@ -649,7 +665,7 @@ def main(argv=None) -> int:
     cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
     runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
                           supervision=args.supervision, cells=cells)
-    completed = load_completed(MANIFEST)
+    completed = load_completed(MANIFEST, args.tier)
     commit = git_commit()
 
     # Config load (YAML optional; scaffold defaults if unavailable). Audit
@@ -719,7 +735,12 @@ def main(argv=None) -> int:
             resolved_path.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
     print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h workers={args.workers} "
-          f"gpu_budget_mib={args.gpu_budget_mib} runs={len(runs)} already_completed={len(completed)} "
+          f"gpu_budget_mib={args.gpu_budget_mib} runs={len(runs)} "
+          # Progress against THIS grid, not the size of the whole completed
+          # set: the manifest also holds pilots, vanilla arms and Stage-1
+          # diagnostics, so the unfiltered count read `already_completed=26`
+          # at the P=0 launch when 3 of 120 enumerated runs were done.
+          f"already_completed={len(completed & {r['run_id'] for r in runs})} "
           f"config_hash={cfg_hash[:12]}", flush=True)
 
     t0 = time.time()

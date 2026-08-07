@@ -42,3 +42,24 @@ def test_tier_poisoning_fires_once_for_the_smoke_row(tmp_path):
     assert len(tier_violations) == 1
     assert "M11011_SUP_s0" in tier_violations[0]
     assert "M00000_SUP_s0" not in tier_violations[0]
+
+
+def test_baseline_only_suppresses_listed_violations(tmp_path):
+    """§21.5: a whitelist that whitelists everything is worse than no
+    whitelist -- a violation NOT in the baseline must still count, and
+    removing an entry from the baseline must turn its violation back on."""
+    baseline_path = tmp_path / "audit_baseline.json"
+    baseline_path.write_text(json.dumps({
+        "known_violations": [{"message": "[tier-poisoning] known one", "reason": "D42"}],
+    }))
+    all_violations = ["[tier-poisoning] known one", "[max-steps] a brand new defect"]
+
+    baseline = ac.load_baseline(baseline_path)
+    known, new = ac.partition_against_baseline(all_violations, baseline)
+    assert known == ["[tier-poisoning] known one"]
+    assert new == ["[max-steps] a brand new defect"]
+
+    # Confirmed red first: with an EMPTY baseline, both are new.
+    empty_known, empty_new = ac.partition_against_baseline(all_violations, {})
+    assert empty_known == []
+    assert empty_new == all_violations

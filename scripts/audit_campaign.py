@@ -24,9 +24,19 @@ is sound.
     $ python scripts/audit_campaign.py
     $ python scripts/audit_campaign.py --tier full --seeds 8
 
-Exit code is 1 if any VIOLATION is found, 0 otherwise.  WARNINGs never
+Exit code is 1 if any new VIOLATION is found, 0 otherwise.  WARNINGs never
 change the exit code -- they are things to look at, not things that are
 wrong.
+
+`--baseline results/audit_baseline.json` (comments.txt §21.5, D-number per
+entry) lists violations that are known, accepted, and permanent -- e.g. the
+D42 smoke-tier row kept on purpose (D15: archive, never delete) and D25's
+three historical resume-counter corrections.  Fixing any of those means
+deleting or rewriting history, so without a baseline this script exits 1
+forever and the one NEW violation that actually matters arrives
+indistinguishable from the five that are supposed to be there (this is how
+`already_completed=26` went unnoticed for three days).  A baseline entry
+prints as `KNOWN`; anything not in it prints as `VIOLATION` and exits 1.
 """
 from __future__ import annotations
 
@@ -230,32 +240,91 @@ def check_activity_log_provenance(rows: list[dict]) -> None:
             violation("activity-logs", f"{log.name} exists but {rid} has no completed manifest row")
 
 
-def check_storage(rows: list[dict], seeds: int) -> None:
-    """D36: measure one log, multiply, and stop -- rather than fill the disk
-    at hour 40."""
+def _campaign_runs(rg) -> list[dict]:
+    """The four real launch commands (`executor.md` §18.8), replicated
+    exactly via `enumerate_runs` rather than re-derived as a seed x cell
+    arithmetic, so a storage/count projection can never disagree with what
+    actually launches again (§21.5b): 120 SUP (15 cells x 8 seeds) + 56 RL
+    flat (7 S=0 cells x 8 seeds) + 32 RL local-learning (4 cells x 8 seeds)
+    + 16 RL S=1 failure arm (8 cells x 2 seeds) = 224, not 240."""
+    return (
+        rg.enumerate_runs(list(range(8)), supervision="SUP")
+        + rg.enumerate_runs(
+            list(range(8)), supervision="RL",
+            cells=["M00000", "M01111", "M01000", "M00100", "M00010", "M00001", "M00011"],
+        )
+        + rg.enumerate_runs(
+            list(range(8)), supervision="RL", include_local_learning=True,
+            cells=["M00L", "M01L", "M10L", "M11L"],
+        )
+        + rg.enumerate_runs(
+            list(range(2)), supervision="RL",
+            cells=["M11111", "M10111", "M11011", "M11101", "M11110", "M10000", "M10010", "M10001"],
+        )
+    )
+
+
+def check_storage() -> None:
+    """D36's arithmetic, on the real 224-run composition rather than a
+    seeds-generic 15-cells-x2-supervision count.  An S=1 log stores
+    h_worker(196) + h_manager(24) against a flat run's 128, so ~1.7x; every
+    M=1 run additionally writes a SECOND log for H2's reflection-shuffle
+    control, at the same size class as its own S bit.  The prior version
+    assumed 120 SUP + 120 RL = 240 runs (the campaign is 224: RL only runs 7
+    S=0 cells at full seed count, plus the local-learning and S=1-failure
+    arms at their own seed counts) -- conservative in the safe direction,
+    but a safety number that's wrong is still wrong (§21.5b)."""
     if not ACTIVITY_DIR.exists():
         return
     logs = [p for p in ACTIVITY_DIR.glob("*.parquet")]
     if not logs:
         warn("storage", "no activity logs to measure yet; storage projection skipped")
         return
+    sys.path.insert(0, str(ROOT))
+    import run_grid as rg
+
+    runs = _campaign_runs(rg)
     biggest = max(logs, key=lambda p: p.stat().st_size)
     per_log_gb = biggest.stat().st_size / 1e9
-    # D36's arithmetic, not a flat multiply: an S=1 log stores h_worker(196)
-    # + h_manager(24) against a flat run's 128, so ~1.7x; and every M=1 run
-    # writes a SECOND log for H2's reflection-shuffle control.  Omitting the
-    # partner logs is what made the first estimate of this 120 GB instead of
-    # 170 GB -- the number that decided the question.
-    n_s1, n_s0 = 8 * 2 * seeds, 7 * 2 * seeds
-    n_partners = 8 * 2 * seeds  # the M=1 cells
-    projected = per_log_gb * (n_s0 + 1.7 * n_s1 + n_partners)
+    factor_sum = 0.0
+    n_s1 = 0
+    for r in runs:
+        size_factor = 1.7 if r.get("S") else 1.0
+        n_s1 += 1 if r.get("S") else 0
+        factor_sum += size_factor  # this run's own primary log
+        if r.get("M"):
+            factor_sum += size_factor  # its reflection-shuffle partner log (D36)
+    projected = per_log_gb * factor_sum
     free_gb = shutil.disk_usage(ACTIVITY_DIR).free / 1e9
-    line = (f"largest log {biggest.name} = {per_log_gb:.2f} GB; {n_s0} S=0 + {n_s1} S=1 (x1.7) "
-            f"+ {n_partners} reflection-shuffle partners = {projected:.0f} GB against {free_gb:.0f} GB free")
+    line = (f"largest log {biggest.name} = {per_log_gb:.2f} GB; {len(runs)} campaign runs "
+            f"({n_s1} S=1 x1.7 + {len(runs) - n_s1} S=0) + a reflection-shuffle partner log for "
+            f"every M=1 run = {projected:.0f} GB against {free_gb:.0f} GB free")
     if projected > free_gb:
         violation("storage", line + " -- does not fit")
     else:
         print(f"  ok: {line}")
+
+    presymlink = RESULTS / "activity_logs.bak_presymlink"
+    if presymlink.exists():
+        size_gb = sum(p.stat().st_size for p in presymlink.rglob("*") if p.is_file()) / 1e9
+        warn("storage", f"{presymlink} is {size_gb:.1f} GB, pending manual deletion since 2026-08-03 "
+             "-- NOT deleted (D36/§20.11: the user's call, not this script's)")
+
+
+def check_workers_consistency(rows: list[dict], tier: str) -> None:
+    """D51: `wall_s_to_*`/`joules_to_*` are not comparable across rows with
+    different `workers` (run_grid.py:705-709).  A completed campaign is
+    expected to span exactly one `workers` value; more than one means a
+    cross-cell wall-clock comparison would silently mix scheduling regimes.
+    Scoped to `tier` like `check_tier_poisoning` -- a smoke-tier probe run at
+    a different `--workers` (e.g. the D42 row) says nothing about the
+    campaign's own wall-clock comparability."""
+    at_tier = [r for r in rows if r.get("status") == "completed" and r.get("tier") == tier and CAMPAIGN_RE.match(r.get("run_id", ""))]
+    values = {r.get("workers") for r in at_tier}
+    if len(values) > 1:
+        named = {v: sorted(r["run_id"] for r in at_tier if r.get("workers") == v) for v in values}
+        warn("workers-consistency", f"completed tier={tier!r} campaign rows carry {len(values)} distinct "
+             f"`workers` values, not wall-clock comparable across them: {named}")
 
 
 def check_max_steps_completion(rows: list[dict]) -> None:
@@ -299,10 +368,27 @@ def check_max_steps_completion(rows: list[dict]) -> None:
             )
 
 
+def load_baseline(path: Path) -> dict[str, str]:
+    """`message -> reason`.  `{}` if the file doesn't exist -- nothing is
+    known yet, so every violation is new."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    return {entry["message"]: entry["reason"] for entry in data.get("known_violations", [])}
+
+
+def partition_against_baseline(all_violations: list[str], baseline: dict[str, str]) -> tuple[list[str], list[str]]:
+    known = [v for v in all_violations if v in baseline]
+    new = [v for v in all_violations if v not in baseline]
+    return known, new
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tier", default="full", help="campaign tier these run_ids belong to (default: full)")
     ap.add_argument("--seeds", type=int, default=8, help="seed count the campaign is authorized for (default: 8)")
+    ap.add_argument("--baseline", type=Path, default=RESULTS / "audit_baseline.json",
+                     help="known/accepted violations that don't affect the exit code (default: %(default)s)")
     args = ap.parse_args(argv)
 
     rows = load_rows()
@@ -317,19 +403,25 @@ def main(argv=None) -> int:
         ("duplicate completions", lambda: check_duplicate_completions(rows)),
         ("resume counters", lambda: check_resume_counters(rows)),
         ("activity log provenance", lambda: check_activity_log_provenance(rows)),
-        ("storage arithmetic", lambda: check_storage(rows, args.seeds)),
+        ("storage arithmetic", lambda: check_storage()),
         ("max_steps completion (D35)", lambda: check_max_steps_completion(rows)),
+        ("workers consistency (D51)", lambda: check_workers_consistency(rows, args.tier)),
     ]:
         print(f"- {name}")
         fn()
 
+    baseline = load_baseline(args.baseline)
+    known, new = partition_against_baseline(violations, baseline)
+
     print()
     for w in warnings:
         print(f"WARNING  {w}")
-    for v in violations:
+    for v in known:
+        print(f"KNOWN    {v}  [{baseline[v]}]")
+    for v in new:
         print(f"VIOLATION {v}")
-    print(f"\n{len(violations)} violation(s), {len(warnings)} warning(s)")
-    return 1 if violations else 0
+    print(f"\n{len(new)} violation(s), {len(known)} known/accepted (baseline={args.baseline}), {len(warnings)} warning(s)")
+    return 1 if new else 0
 
 
 if __name__ == "__main__":

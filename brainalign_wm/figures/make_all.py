@@ -16,11 +16,23 @@ Implemented so far:
   F5 -- persistent-activity index distributions, model vs. brain (H6).
   F6 -- dynamic-vs-stable delay coding (cross-temporal stability index),
         model vs. brain (H5).
+  F9  -- subpopulation x region dissociation: normalized maintenance
+         alignment for {worker, manager} x {MTL, MFC}, hierarchical runs
+         only, per-session points overlaid, flat runs drawn as an explicit
+         not-applicable band. Numbered F9, not F1 -- F1 is already reserved
+         below for the design schematic.
+  F10 -- model-tick x neural-bin alignment heatmap: one panel per run,
+         matched-time diagonal marked, argmax annotated.
+  F11 -- behavioural position against the human distribution: per-load
+         violin of the deduplicated human session pool with model runs
+         overlaid, `FLATGRU_RL_s0`'s early and late training snapshots
+         connected by an arrow.
 
 Explicitly scoped out of this pass, not silently dropped:
 F1 (design schematic -- purely illustrative, no analysis dependency) and F8
 (cross-dataset replication against Tier B/001187 -- needs its own adapter
-validation pass, out of scope here).
+validation pass, out of scope here). A seed-spread figure is also not
+implemented here -- it needs a multi-seed run that has not been launched.
 """
 from __future__ import annotations
 
@@ -77,11 +89,14 @@ def make_f2_behavior(manifest_df: pd.DataFrame, out_path: Path, gates_cfg: dict)
     width = 0.25
     for i, load in enumerate(("load1", "load2", "load3")):
         ax.bar([xi + (i - 1) * width for xi in x], agg[load], width=width, label=load)
-    # Phase 3 (A3): one criterion, all three loads (comments.txt §3).
-    criterion = gates_cfg["criterion"]
-    ax.axhline(criterion["load1"], color="C0", linestyle="--", linewidth=1, alpha=0.6)
-    ax.axhline(criterion["load2"], color="C1", linestyle="--", linewidth=1, alpha=0.6)
-    ax.axhline(criterion["load3"], color="C2", linestyle="--", linewidth=1, alpha=0.6)
+    # Gate A's `criterion` is load-1-only; `extra_milestones` covers loads
+    # tracked descriptively rather than gated. Draw a threshold line only
+    # for loads present in either config block.
+    thresholds = {**gates_cfg.get("criterion", {}), **gates_cfg.get("extra_milestones", {})}
+    load_colors = {"load1": "C0", "load2": "C1", "load3": "C2"}
+    for load, color in load_colors.items():
+        if load in thresholds:
+            ax.axhline(thresholds[load], color=color, linestyle="--", linewidth=1, alpha=0.6)
     ax.set_xticks(list(x))
     ax.set_xticklabels(agg.index, rotation=0)
     ax.set_ylabel("accuracy")
@@ -307,6 +322,166 @@ def make_f7_dv_relationship(dv_csv: Path, out_path: Path) -> bool:
     return True
 
 
+def make_f9_subpop_dissociation(alignment_by_session_csv: Path, out_path: Path) -> bool:
+    """Normalized maintenance alignment for {worker, manager} x {MTL, MFC},
+    hierarchical runs only, with per-session points overlaid. A flat run has
+    no subpopulations and is drawn as an explicit not-applicable band rather
+    than omitted or zeroed."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not alignment_by_session_csv.exists():
+        print("[figures] F9: no alignment_by_session.csv yet; run `analysis/run_all.py` first. Skipping.")
+        return False
+    df = pd.read_csv(alignment_by_session_csv)
+    if "subpop" not in df.columns:
+        print("[figures] F9: alignment_by_session.csv has no `subpop` column; skipping.")
+        return False
+
+    hier = df[(df.region.isin(["MTL", "MFC"])) & (df.subpop.isin(["worker", "manager"]))]
+    flat_na = df[(df.region.isin(["MTL", "MFC"])) & (df.status == "not_applicable")]
+    if len(hier) == 0 and len(flat_na) == 0:
+        print("[figures] F9: no hierarchical subpop rows and no flat not_applicable rows; skipping.")
+        return False
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    cells = [("worker", "MTL"), ("manager", "MTL"), ("worker", "MFC"), ("manager", "MFC")]
+    means, xs = [], []
+    for i, (subpop, region) in enumerate(cells):
+        g = hier[(hier.region == region) & (hier.subpop == subpop) & (hier.status == "ok")]
+        vals = g["normalized_alignment"].dropna().to_numpy()
+        means.append(float(np.mean(vals)) if len(vals) else np.nan)
+        xs.append(i)
+        if len(vals):
+            jitter = (np.random.RandomState(0).rand(len(vals)) - 0.5) * 0.15
+            ax.scatter(np.full(len(vals), i) + jitter, vals, s=10, alpha=0.4, color="black", zorder=3)
+    colors = ["C0", "C1", "C0", "C1"]
+    ax.bar(xs, means, color=colors, alpha=0.7, zorder=2)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{sp}\n{reg}" for sp, reg in cells])
+    ax.set_ylabel("maintenance normalized_alignment")
+    ax.set_title("F9: worker↔MTL / manager↔MFC subpopulation dissociation")
+    if len(flat_na):
+        ax.text(0.5, 0.02, f"flat runs: not_applicable ({len(flat_na)} rows, no subpopulation to plot)",
+                transform=ax.transAxes, ha="center", fontsize=8, style="italic", color="gray")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[figures] wrote {out_path}")
+    return True
+
+
+def make_f10_tick_bin_heatmap(results_dir: Path, out_path: Path) -> bool:
+    """One heatmap panel per run with a `tick_bin_alignment_{run_id}.csv` on
+    disk (see `scripts/diagnose_maintenance_sign.py`), matched-time diagonal
+    marked, argmax annotated."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    csvs = sorted(results_dir.glob("tick_bin_alignment_*.csv"))
+    if not csvs:
+        print("[figures] F10: no tick_bin_alignment_*.csv yet; run `scripts/diagnose_maintenance_sign.py` first. Skipping.")
+        return False
+
+    fig, axes = plt.subplots(1, len(csvs), figsize=(5.5 * len(csvs), 4.5), squeeze=False)
+    for ax, csv_path in zip(axes[0], csvs):
+        run_id = csv_path.stem.replace("tick_bin_alignment_", "")
+        mat = pd.read_csv(csv_path, index_col=0).to_numpy()
+        n_ticks, n_bins = mat.shape
+        vmax = np.nanmax(np.abs(mat))
+        im = ax.imshow(mat, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, origin="lower")
+        diag_bins = [int(round(t * (n_bins - 1) / max(n_ticks - 1, 1))) for t in range(n_ticks)]
+        ax.plot(diag_bins, range(n_ticks), color="black", linewidth=1, linestyle="--", label="matched time")
+        argmax_t, argmax_b = np.unravel_index(int(np.nanargmax(mat)), mat.shape)
+        ax.scatter([argmax_b], [argmax_t], marker="*", s=150, color="gold", edgecolors="black", zorder=5, label="argmax")
+        ax.set_xlabel("neural bin (50 ms)")
+        ax.set_ylabel("model tick")
+        ax.set_title(f"{run_id}\nargmax={mat[argmax_t, argmax_b]:.3f}")
+        ax.legend(fontsize=7, loc="upper right")
+        fig.colorbar(im, ax=ax, shrink=0.8)
+    fig.suptitle("F10: model-tick x neural-bin alignment")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[figures] wrote {out_path}")
+    return True
+
+
+def make_f11_behavioral_position(human_behavior_csv: Path, manifest_df: pd.DataFrame, out_path: Path) -> bool:
+    """Human per-session accuracy as a violin per load (deduplicated
+    session pool), model runs overlaid, with `FLATGRU_RL_s0`'s early
+    (`ckpt_at_criterion.pt`) and late (`ckpt.pt`) checkpoints connected by
+    an arrow to show how its behavioural position shifts over training."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not human_behavior_csv.exists():
+        print("[figures] F11: no human_behavior.csv yet; run `scripts/human_behavior_gates.py` first. Skipping.")
+        return False
+    hdf = pd.read_csv(human_behavior_csv).drop_duplicates(subset=["session", "load"], keep="first")
+    if len(hdf) == 0 or len(manifest_df) == 0:
+        print("[figures] F11: human_behavior.csv or manifest is empty; skipping.")
+        return False
+
+    completed = manifest_df[manifest_df.status == "completed"]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    loads = [1, 2, 3]
+    violin_data = [hdf[hdf.load == load]["accuracy"].dropna().to_numpy() for load in loads]
+    parts = ax.violinplot([v for v in violin_data if len(v)], positions=[l for l, v in zip(loads, violin_data) if len(v)],
+                          widths=0.7, showmedians=True)
+    for pc in parts["bodies"]:
+        pc.set_alpha(0.3)
+
+    for _, row in completed.iterrows():
+        acc = row.get("accuracy")
+        if not isinstance(acc, dict):
+            continue
+        ys = [acc.get(f"load{l}") for l in loads]
+        xs = [l + (np.random.RandomState(hash(row["run_id"]) % 2**31).rand() - 0.5) * 0.3 for l in loads]
+        ax.scatter(xs, ys, s=15, alpha=0.6, label=None)
+
+    # FLATGRU_RL_s0's early-checkpoint -> late-checkpoint arrow.
+    at_criterion_csv = ROOT / "results" / "metrics" / "FLATGRU_RL_s0.csv"
+    gate_a_row = completed[completed.run_id == "FLATGRU_RL_s0"]
+    if len(gate_a_row) and at_criterion_csv.exists():
+        mdf = pd.read_csv(at_criterion_csv)
+        first_ms = gate_a_row.iloc[0].get("first_milestone_step")
+        crit_row = mdf[mdf.step == first_ms] if first_ms else pd.DataFrame()
+        final_acc = gate_a_row.iloc[0].get("accuracy") or {}
+        if len(crit_row):
+            crit = crit_row.iloc[0]
+            for load in loads:
+                y0 = crit.get(f"train_acc_load{load}")
+                y1 = final_acc.get(f"load{load}")
+                if y0 is not None and y1 is not None:
+                    ax.annotate("", xy=(load, y1), xytext=(load, y0),
+                               arrowprops=dict(arrowstyle="->", color="red", lw=1.5))
+
+    ax.set_xticks(loads)
+    ax.set_xlabel("load")
+    ax.set_ylabel("accuracy")
+    ax.set_ylim(0.4, 1.05)
+    ax.set_title("F11: behavioural position vs. human distribution\n"
+                 "red arrow: FLATGRU_RL_s0 early → late checkpoint")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[figures] wrote {out_path}")
+    return True
+
+
 def main(argv=None) -> int:
     import yaml
 
@@ -326,6 +501,9 @@ def main(argv=None) -> int:
     made_any |= make_f5_persistence(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F5_persistence.pdf")
     made_any |= make_f6_dynamic_stable(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F6_dynamic_stable.pdf")
     made_any |= make_f7_dv_relationship(ROOT / "results" / "dv_relationship.csv", out_dir / "F7_dv_relationship.pdf")
+    made_any |= make_f9_subpop_dissociation(ROOT / "results" / "alignment_by_session.csv", out_dir / "F9_subpop_dissociation.pdf")
+    made_any |= make_f10_tick_bin_heatmap(ROOT / "results", out_dir / "F10_tick_bin_heatmap.pdf")
+    made_any |= make_f11_behavioral_position(ROOT / "results" / "human_behavior.csv", manifest_df, out_dir / "F11_behavioral_position.pdf")
 
     if not made_any:
         print("[figures] no figures produced -- no completed runs or alignment results available yet.")

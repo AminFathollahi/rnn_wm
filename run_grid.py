@@ -23,11 +23,20 @@ Design properties:
     `results/RUN_REPORT.md`;
   * `--workers N` (§12.3): runs N `train_one` calls concurrently via
     `ProcessPoolExecutor` (`run_grid_loop`, shared with
-    `scripts/run_stage1_grid.py`). N=8 measured best on this machine
-    (Appendix A / executor.md's Phase 12.3 entry: largest N keeping
-    per-process ms/step under 1.5x the N=1 value); every manifest row
-    records the `workers` value in force so wall-clock/energy DVs are
-    never compared across rows with different N.
+    `scripts/run_stage1_grid.py`). N=8 (Appendix A / executor.md's Phase
+    12.3 entry: largest N keeping per-process ms/step under 1.5x the N=1
+    value) is a THROUGHPUT benchmark on one small cell replicated eight
+    ways and does NOT generalise to this battery's real mix -- it is what
+    D38 disproved when `--workers 8` OOM'd 25 minutes into Pass 1. `--workers`
+    is a submission ceiling, not a memory guarantee: `--gpu-budget-mib` (D39,
+    D41, D49 -- see `_run_mib` below) is what actually keeps concurrent runs
+    off each other's memory, and N=8 remains the current launch
+    recommendation only because D49's direct probe (comments.txt §21.1,
+    `scripts/probe_peak_memory.py`) confirmed the memory gate is
+    conservative on every real cell at N=8, not because the throughput
+    benchmark alone would justify it; every manifest row records the
+    `workers` value in force so wall-clock/energy DVs are never compared
+    across rows with different N.
 
 A `--scaffold` mode substitutes a synthetic stub for `train_one`, allowing
 the orchestration logic to be exercised without the model/training
@@ -144,6 +153,12 @@ LOCAL_LEARNING_CELLS = [
 # again; that desynchronisation is the whole content of D39 and D40.
 _BASE_MIB = 500  # params + optimiser + CUDA context + frozen front-end. Measured:
                  # four concurrent non-plastic runs occupied 1275 MiB in total.
+                 # D50/D49 probe (comments.txt §21.1/§21.2, scripts/probe_peak_memory.py,
+                 # 2026-08-07): a single forward+backward+optimizer.step() at load 3 (the
+                 # curriculum's longest trial) measured M11011 (S=1, the non-plastic branch's
+                 # largest case) at 173.9 MiB and M00000 (the cheapest cell) at 95.1 MiB --
+                 # both well under this constant, so it is conservative at the load that
+                 # matters and no per-tick term is needed on this branch.
 _LEGACY_MIB = {0: 900, 1: 6200}  # only when no resolved config is available (scaffold/tests)
 DEFAULT_GPU_BUDGET_MIB = 10500  # of 12227 MiB total; leaves headroom for driver/fragmentation
 
@@ -703,15 +718,25 @@ def main(argv=None) -> int:
                           "An unknown model_id is an error, not an empty grid.")
     ap.add_argument("--workers", type=int, default=1,
                      help="§12.3: concurrent training processes (ProcessPoolExecutor, one run per "
-                          "process). N=8 measured 5.9x aggregate throughput for a 1.36x per-process "
-                          "slowdown (Appendix A, 12.3 RESULT); keep N FIXED for a whole stage since "
-                          "wall_s_to_*/joules_to_* are not comparable across rows with different "
-                          "`workers` (every manifest row records it).")
+                          "process). The historical N=8 measured 5.9x aggregate throughput for a 1.36x "
+                          "per-process slowdown (Appendix A, 12.3 RESULT) benchmarked one small cell "
+                          "replicated eight ways and does NOT generalise to this battery's real mix -- "
+                          "`--workers 8` OOM'd 25 minutes into the real launch (D38). N=8 is still the "
+                          "current recommendation (comments.txt §21.3/§21.4), but on the strength of "
+                          "D49's direct memory probe, not this throughput number. `--gpu-budget-mib` is "
+                          "what actually gates concurrent memory; keep `--workers` FIXED for a whole "
+                          "stage since wall_s_to_*/joules_to_* are not comparable across rows with "
+                          "different `workers` (every manifest row records it, D51).")
     ap.add_argument("--gpu-budget-mib", type=int, default=DEFAULT_GPU_BUDGET_MIB,
-                     help="D38: cap on estimated concurrent GPU memory (MiB) across in-flight runs "
-                          "(S=1 cells ~6200 MiB, S=0 ~900 MiB); a run that would exceed it waits for "
-                          "one in-flight run to finish before submitting, so `--workers` is a ceiling "
-                          "and not a guarantee. Pass a very large value to disable.")
+                     help="D38/D41: cap on estimated concurrent GPU memory (MiB) across in-flight runs, "
+                          "estimated per cell by `_run_mib` from the resolved config (S=1 plastic cells "
+                          "~3538 MiB, S=1 non-plastic/S=0 ~500-1796 MiB -- see `_run_mib`'s comments, not "
+                          "the flat 6200/900 MiB pair this help text used to cite; those are now the "
+                          "`_LEGACY_MIB` scaffold-only fallback). D49 (comments.txt §21.1) measured every "
+                          "real cell at 19-61% of its `_run_mib` prediction, so this default is "
+                          "conservative on this GPU as of 2026-08-07. A run that would exceed the budget "
+                          "waits for one in-flight run to finish before submitting, so `--workers` is a "
+                          "ceiling and not a guarantee. Pass a very large value to disable.")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "

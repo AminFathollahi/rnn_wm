@@ -111,6 +111,51 @@ def test_gpu_budget_mib_serializes_s1_runs_but_not_s0(tmp_path, monkeypatch):
             assert e_a <= s_b or e_b <= s_a, "two S=1 runs overlapped under the GPU memory budget"
 
 
+def test_a_run_that_does_not_fit_does_not_block_cheaper_runs_behind_it(tmp_path, monkeypatch):
+    """The SUP campaign launched 8 workers and ran 3. Two plastic cells filled
+    7076 of 10500 MiB; the next queued cell was a third plastic cell needing
+    3538 more, and the scheduler stopped submitting there -- for 15 hours --
+    while nine 500 MiB cells sat behind it and five workers idled. Admission
+    must skip a run that does not fit and take the first pending one that
+    does."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+
+    def _timed_resolve(force_scaffold):  # noqa: ARG001
+        def _fn(run, cfg):  # noqa: ARG001
+            t_start = time.time()
+            time.sleep(1.2 if run["P"] else 0.05)  # plastic cells are the long ones
+            return {"status": "completed", "t_start": t_start, "t_end": time.time()}
+        return _fn
+
+    monkeypatch.setattr(rg, "resolve_train_fn", _timed_resolve)
+
+    def _big(i):
+        return {"model_id": f"BIG{i}", "S": 1, "P": 1, "seed": 0, "run_id": f"BIG{i}_s0"}
+
+    def _cheap(i):
+        return {"model_id": f"CHEAP{i}", "S": 0, "P": 0, "seed": 0, "run_id": f"CHEAP{i}_s0"}
+
+    # Queue order mirrors CELLS: plastic cells early, cheap ones interleaved after.
+    # Two plastic cells (2*3538) plus one cheap (500) fill 7576 of 10500 MiB; the
+    # third plastic needs 3538 more and cannot be admitted until a plastic one ends.
+    runs = [_big(0), _big(1), _cheap(0), _big(2), _cheap(1), _cheap(2)]
+    manifest = tmp_path / "m.jsonl"
+    rg.run_grid_loop(runs, set(), {}, "hash", "gitrev", "smoke",
+                      budget_s=3600, t0=time.time(), manifest=manifest, force_scaffold=True,
+                      workers=6, log_prefix="[test]", gpu_budget_mib=rg.DEFAULT_GPU_BUDGET_MIB,
+                      mem_cfg=_mem_cfg())
+    rows = _rows(manifest)
+    assert len(rows) == 6
+
+    first_big_end = min(r["t_end"] for r in rows.values() if r["P"] == 1)
+    for r in rows.values():
+        if r["P"] == 0:
+            assert r["t_end"] < first_big_end, (
+                f"{r['run_id']} waited behind an unadmittable plastic cell instead of "
+                "being skipped ahead to"
+            )
+
+
 def _mem_cfg(max_load: int = 3, checkpointing: bool = True) -> dict:
     """A resolved-config shape carrying only the fields `_run_mib` reads."""
     return {

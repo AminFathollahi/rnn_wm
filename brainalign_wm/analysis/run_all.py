@@ -64,7 +64,20 @@ MIN_TRIALS_PER_CONDITION = 8
 # fail loudly (report a status, not a score) rather than emit a number.
 MIN_SHARED_CONDITIONS = 8
 
-REGIONS = [None, "MTL", "MFC"]
+# Pooled, then each region FAMILY, then each single canonical region within
+# it. The 5 single regions are exactly the ones that actually occur in Tier
+# A (000469+000673) -- confirmed by scanning every session's own
+# `electrodes/location` field directly (not just the dataset descriptor's
+# prose), not the full 6-name `dataset_contract._RAW_TO_CANONICAL` table:
+# 'entorhinal' is a valid canonical name (present for forward-compatibility
+# with a future dataset that does record it) but never actually appears in
+# 000469 or 000673, so it is deliberately omitted here rather than added as
+# a region that would only ever report "no units for region='entorhinal'".
+# Each single region reuses the exact same degenerate-RDM guard
+# (`MIN_SHARED_CONDITIONS`) and worker/manager subpop crossing as MTL/MFC
+# (`align_one_run`) -- a region with too few units/sessions reports
+# "insufficient_shared_conditions", never a fabricated score.
+REGIONS = [None, "MTL", "MFC", "hippocampus", "amygdala", "dACC", "preSMA", "vmPFC"]
 
 
 def _filter_min_trials(patterns: np.ndarray, labels: list[tuple], min_count: int) -> tuple[np.ndarray, list[tuple]]:

@@ -9,6 +9,8 @@ not dropped):
     results/alignment_results.csv   -> rsa_alignment (probe-epoch primary)
     results/network_properties.jsonl -> modularity_q, small_worldness,
                                          mixed_selectivity
+    results/attractor_properties.jsonl -> n_fixed_points, n_stable_fixed_points,
+                                         max_eig_modulus (analysis/attractors.py)
     results/dynamics_persistence.csv -> persistence_index
 
 Only rows belonging to the 5-arm ablation battery are included (a
@@ -107,6 +109,31 @@ def _load_network_properties() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _load_attractor_properties() -> pd.DataFrame:
+    """n_fixed_points/n_stable_fixed_points/max_eig_modulus per run_id
+    (`analysis/attractors.py`'s whole-system pooled fields -- already
+    computed over the joint [worker;manager] state for S=1, so unlike
+    `_load_network_properties` there is no separate worker/manager value
+    to average here)."""
+    path = ROOT / "results" / "attractor_properties.jsonl"
+    cols = ["run_id", "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus"]
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+    latest: dict[str, dict] = {}
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            latest[rec["run_id"]] = rec
+    rows = [{"run_id": run_id, **{c: rec.get(c) for c in cols[1:]}} for run_id, rec in latest.items()]
+    return pd.DataFrame(rows, columns=cols)
+
+
 def _load_persistence() -> pd.DataFrame:
     path = ROOT / "results" / "dynamics_persistence.csv"
     if not path.exists():
@@ -123,13 +150,16 @@ def build_dv_table() -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "cell", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
             "modularity_q", "small_worldness", "mixed_selectivity", "persistence_index",
+            "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus",
         ])
     df = df.merge(_load_alignment(), on="run_id", how="left")
     df = df.merge(_load_network_properties(), on="run_id", how="left")
+    df = df.merge(_load_attractor_properties(), on="run_id", how="left")
     df = df.merge(_load_persistence(), on="run_id", how="left")
     cols = [
         "cell", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
         "modularity_q", "small_worldness", "mixed_selectivity", "persistence_index",
+        "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus",
     ]
     return df[cols]
 
@@ -174,10 +204,16 @@ PAIRS = [
     ("accuracy", "small_worldness"),
     ("accuracy", "mixed_selectivity"),
     ("accuracy", "persistence_index"),
+    ("accuracy", "n_fixed_points"),
+    ("accuracy", "n_stable_fixed_points"),
+    ("accuracy", "max_eig_modulus"),
     ("rsa_alignment", "modularity_q"),
     ("rsa_alignment", "small_worldness"),
     ("rsa_alignment", "mixed_selectivity"),
     ("rsa_alignment", "persistence_index"),
+    ("rsa_alignment", "n_fixed_points"),
+    ("rsa_alignment", "n_stable_fixed_points"),
+    ("rsa_alignment", "max_eig_modulus"),
 ]
 
 

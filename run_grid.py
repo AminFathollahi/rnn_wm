@@ -642,7 +642,6 @@ def run_grid_loop(
     try:
         with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer) as ex:
             in_flight: dict = {}
-            next_idx = 0
             _ACTIVE_LOOP_STATE = {
                 "manifest": manifest, "in_flight": in_flight, "cfg_hash": cfg_hash, "commit": commit,
                 "tier": tier, "workers": workers, "gpu_budget_mib": gpu_budget_mib,
@@ -650,19 +649,26 @@ def run_grid_loop(
             }
 
             def _try_submit() -> None:
-                nonlocal next_idx
                 while (
-                    next_idx < len(pending)
+                    pending
                     and len(in_flight) < workers
                     and not _STOP
                     and (time.time() - t0) < budget_s
                 ):
-                    run = pending[next_idx]
+                    idx = 0
                     if gpu_budget_mib is not None and in_flight:
                         in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
-                        if in_flight_mib + _run_mib(run, mem_cfg) > gpu_budget_mib:
-                            break  # wait for an in-flight run to finish before submitting more
-                    next_idx += 1
+                        # First pending run that fits the remaining budget, not just the
+                        # head of the queue: an expensive run that does not fit must not
+                        # block the cheap ones queued behind it (which would idle workers).
+                        idx = next(
+                            (i for i, r in enumerate(pending)
+                             if in_flight_mib + _run_mib(r, mem_cfg) <= gpu_budget_mib),
+                            None,
+                        )
+                        if idx is None:
+                            break  # nothing pending fits; wait for an in-flight run to finish
+                    run = pending.pop(idx)
                     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     print(f"{log_prefix} >>> {run['run_id']}", flush=True)
                     fut = ex.submit(_worker_entry, run, cfg, force_scaffold)

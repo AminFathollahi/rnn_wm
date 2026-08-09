@@ -350,3 +350,12 @@ def test_real_runs_get_a_fresh_worker_process_each(tmp_path, monkeypatch):
     assert _rows(manifest)["A_s0"]["status"] == "completed"
 
 
+def test_help_does_not_crash(capsys):
+    """comments.txt §23.2: a bare `%` in an argparse help string makes argparse's
+    own formatter raise, so `--help` died with `TypeError: %o format: an integer
+    is required, not dict` -- the one command a user runs when they are unsure."""
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        rg.main(["--help"])
+    assert exc.value.code == 0
+    assert "--gpu-budget-mib" in capsys.readouterr().out

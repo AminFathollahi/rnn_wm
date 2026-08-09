@@ -123,8 +123,14 @@ mechanisms:
                                             # recurrence through train.py's `_segment_checkpoint_scan` (~sqrt(T)
                                             # segments of torch.utils.checkpoint) instead of a plain loop -- the
                                             # exact same BPTT gradient (tests/test_plastic_checkpointing.py),
-                                            # traded for ~30-40% more wall clock on plastic cells only. No effect
-                                            # on P=0 cells either way. false reverts to the plain (pre-fix) loop.
+                                            # traded for MEASURED 2.30x wall clock per tick on plastic cells only
+                                            # (5.95 -> 13.7 ms/tick, M11111_SUP_s0 either side of the fix, §22.2;
+                                            # the "~30-40%" this comment used to claim was D41's estimate and is
+                                            # falsified). Memory saving is 4.9x measured (10,525.9 -> 2,155.3 MB).
+                                            # No effect on P=0 cells either way. false reverts to the plain
+                                            # (pre-fix) loop and does not fit this card -- see §22.3 before
+                                            # touching it. Comment-only edits here do not move `config_hash`,
+                                            # which hashes the parsed config, not the file text.
 
 task:                                      # image-Sternberg working-memory task
   loads: [1, 2, 3]

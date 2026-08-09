@@ -186,6 +186,26 @@ def gpu_used_total_mib() -> tuple[int, int] | None:
         return None
 
 
+def gpu_device_rec() -> dict:
+    """Which card a run actually happened on, for the manifest (§23.3).
+
+    `workers` and `gpu_budget_mib` are only interpretable against the device:
+    the same budget means something different on an 11.5 GiB laptop card than
+    on a 40 GiB one, and D41's four unfittable cells are a fact about this GPU,
+    not about the config.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits",
+             "--id=0"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip().splitlines()[0]
+        name, total = out.split(",")
+        return {"gpu_name": name.strip(), "gpu_total_mib": int(total.strip())}
+    except Exception:  # noqa: BLE001
+        return {"gpu_name": None, "gpu_total_mib": None}
+
+
 def _trial_ticks(cfg: dict) -> int:
     """Ticks in the longest trial the curriculum will reach, from the task config."""
     t = cfg.get("task", {})
@@ -678,7 +698,9 @@ def run_grid_loop(
     `completed` as done, so the extra `interrupted` row is inert once that
     happens."""
     global _ACTIVE_LOOP_STATE
-    extra_rec_fields = extra_rec_fields or {}
+    # Read once here rather than per row: it is a property of the machine, and
+    # both the normal and the interrupted (D44) row paths spread this dict.
+    extra_rec_fields = {**gpu_device_rec(), **(extra_rec_fields or {})}
     pending = [r for r in runs if r["run_id"] not in completed]
     try:
         # `max_tasks_per_child=1`: one fresh process per run. `empty_cache()` in

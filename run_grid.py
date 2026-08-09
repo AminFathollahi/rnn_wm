@@ -806,7 +806,7 @@ def main(argv=None) -> int:
                           "~3538 MiB, S=1 non-plastic/S=0 ~500-1796 MiB -- see `_run_mib`'s comments, not "
                           "the flat 6200/900 MiB pair this help text used to cite; those are now the "
                           "`_LEGACY_MIB` scaffold-only fallback). D49 (comments.txt §21.1) measured every "
-                          "real cell at 19-61% of its `_run_mib` prediction, so this default is "
+                          "real cell at 19-61%% of its `_run_mib` prediction, so this default is "
                           "conservative on this GPU as of 2026-08-07. A run that would exceed the budget "
                           "waits for one in-flight run to finish before submitting, so `--workers` is a "
                           "ceiling and not a guarantee. Pass a very large value to disable.")

@@ -269,3 +269,84 @@ def test_stop_signal_writes_interrupted_rows_for_in_flight_runs(tmp_path, monkey
     finally:
         signal.signal(signal.SIGTERM, old_handler)
         rg._STOP = False
+
+
+def test_admission_respects_a_reading_of_the_card_not_only_the_model(tmp_path, monkeypatch):
+    """comments.txt §23.1: the scheduler admitted against `_run_mib`'s *model*
+    of what the in-flight runs should cost. On 2026-08-08 three runs whose
+    modelled cost fit the budget were submitted while five idle pool workers
+    held ~9 GiB of an 11.5 GiB card, and all three died of CUDA OOM -- the
+    allocator wrote the evidence into their manifest rows. A candidate must fit
+    both accounts: what the model says is in flight, AND what the device
+    reports as used."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+
+    def _timed_resolve(force_scaffold):  # noqa: ARG001
+        def _fn(run, cfg):
+            t_start = time.time()
+            time.sleep(cfg.get("scaffold_sleep_s", 0.05))
+            return {"status": "completed", "t_start": t_start, "t_end": time.time()}
+        return _fn
+
+    monkeypatch.setattr(rg, "resolve_train_fn", _timed_resolve)
+
+    # Two S=0 cells, 500 MiB each by the model: 1000 of 10500 MiB, so the model
+    # alone would happily run them together.
+    def _runs():
+        return [{"model_id": f"S0_{i}", "S": 0, "P": 0, "seed": 0, "run_id": f"S0_{i}_s0"}
+                for i in range(2)]
+
+    def _overlap(manifest):
+        (a_s, a_e), (b_s, b_e) = [(r["t_start"], r["t_end"]) for r in _rows(manifest).values()]
+        return not (a_e <= b_s or b_e <= a_s)
+
+    def _go(manifest, used_mib):
+        monkeypatch.setattr(rg, "gpu_used_total_mib", lambda: (used_mib, 12227))
+        rg.run_grid_loop(_runs(), set(), {"scaffold_sleep_s": 0.4}, "hash", "gitrev", "smoke",
+                          budget_s=3600, t0=time.time(), manifest=manifest, force_scaffold=True,
+                          workers=2, log_prefix="[test]",
+                          gpu_budget_mib=rg.DEFAULT_GPU_BUDGET_MIB, mem_cfg=_mem_cfg())
+
+    # Card already at 10200 of a 10500 MiB budget: 300 MiB of real headroom, so
+    # the second 500 MiB run must wait however cheap the model thinks it is.
+    full = tmp_path / "full.jsonl"
+    _go(full, 10200)
+    assert not _overlap(full), "admitted a run the device had no room for"
+
+    # Control: same runs, same model, empty card -- they must still overlap, or
+    # the fix would be serializing everything rather than reading the device.
+    empty = tmp_path / "empty.jsonl"
+    _go(empty, 0)
+    assert _overlap(empty), "an empty card should still allow two cheap runs to overlap"
+
+
+def test_real_runs_get_a_fresh_worker_process_each(tmp_path, monkeypatch):
+    """comments.txt §23.1 / user decision 2026-08-09: `empty_cache()` returns the
+    caching allocator's blocks but not the CUDA context, which a pooled worker
+    holds for the life of the pool -- 370-466 MiB per idle worker during the
+    2026-08-08 pass. Only process death frees it, so real (non-scaffold) runs
+    must get `max_tasks_per_child=1`."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    seen: dict = {}
+    real_pool = rg.ProcessPoolExecutor
+
+    class _Recording(real_pool):
+        def __init__(self, *a, **kw):
+            seen.update(kw)
+            # Drop it here so the pool stays fork-based for this test; the
+            # assertion below is on what `run_grid_loop` asked for.
+            kw.pop("max_tasks_per_child", None)
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(rg, "ProcessPoolExecutor", _Recording)
+    monkeypatch.setattr(rg, "resolve_train_fn", lambda force_scaffold: rg._scaffold_train_one)
+
+    runs = [{"model_id": "A", "S": 0, "P": 0, "seed": 0, "run_id": "A_s0"}]
+    manifest = tmp_path / "m.jsonl"
+    rg.run_grid_loop(runs, set(), {"steps": 5, "scaffold_sleep_s": 0}, "hash", "gitrev", "smoke",
+                      budget_s=3600, t0=time.time(), manifest=manifest, force_scaffold=False,
+                      workers=2, log_prefix="[test]")
+    assert seen["max_tasks_per_child"] == 1
+    assert _rows(manifest)["A_s0"]["status"] == "completed"
+
+

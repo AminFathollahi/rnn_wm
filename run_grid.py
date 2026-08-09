@@ -163,6 +163,29 @@ _LEGACY_MIB = {0: 900, 1: 6200}  # only when no resolved config is available (sc
 DEFAULT_GPU_BUDGET_MIB = 10500  # of 12227 MiB total; leaves headroom for driver/fragmentation
 
 
+def gpu_used_total_mib() -> tuple[int, int] | None:
+    """(used, total) MiB actually resident on GPU 0, or None if unreadable.
+
+    Read, not modelled. Everything above this line is a model of what a run
+    *should* cost; four separate memory failures (D38, D39/D40, D41, and the
+    2026-08-08 pass's three OOMs) all came of admitting against a model while
+    the card held something else. `nvidia-smi` rather than
+    `torch.cuda.mem_get_info` on purpose: the orchestrator never trains, and
+    initialising a CUDA context in it just to measure would itself consume a
+    few hundred MiB of the memory it is trying to protect.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+             "--format=csv,noheader,nounits", "--id=0"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip().splitlines()[0]
+        used, total = (int(x.strip()) for x in out.split(","))
+        return used, total
+    except Exception:  # noqa: BLE001 -- no GPU, no nvidia-smi, or a driver hiccup
+        return None
+
+
 def _trial_ticks(cfg: dict) -> int:
     """Ticks in the longest trial the curriculum will reach, from the task config."""
     t = cfg.get("task", {})
@@ -595,6 +618,12 @@ def _pool_initializer() -> None:
     per worker."""
     os.environ["OMP_NUM_THREADS"] = "2"
     os.environ["MKL_NUM_THREADS"] = "2"
+    # Same reason it has to be set here: the allocator reads this once, at the
+    # worker's first CUDA allocation, and the worker has not imported torch yet.
+    # Expandable segments let a freed block be reused at a different size instead
+    # of stranding it in a fixed-size pool, which is where this card's headroom
+    # went during the 2026-08-08 pass (comments.txt §23.1).
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def _worker_entry(run: dict, cfg: dict, force_scaffold: bool) -> dict:
@@ -604,7 +633,19 @@ def _worker_entry(run: dict, cfg: dict, force_scaffold: bool) -> dict:
     boundary, so each worker re-resolves it from scratch -- cheap (an
     import, not a load) and the only correct option."""
     train_one = resolve_train_fn(force_scaffold)
-    return train_one(run, cfg)
+    try:
+        return train_one(run, cfg)
+    finally:
+        # Return this run's cached blocks to the driver before the parent reads
+        # free memory to admit the next one. Redundant under
+        # `max_tasks_per_child=1` (process death frees strictly more, including
+        # the CUDA context), kept because it also covers a pool without it.
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 -- never fail a finished run on cleanup
+            pass
 
 
 def run_grid_loop(
@@ -640,7 +681,22 @@ def run_grid_loop(
     extra_rec_fields = extra_rec_fields or {}
     pending = [r for r in runs if r["run_id"] not in completed]
     try:
-        with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer) as ex:
+        # `max_tasks_per_child=1`: one fresh process per run. `empty_cache()` in
+        # `_worker_entry` returns the allocator's blocks but not the CUDA context,
+        # which a pooled worker holds for the life of the pool -- the 2026-08-08
+        # pass showed idle workers pinned at 370-466 MiB each, up to ~3 GiB of an
+        # 11.5 GiB card held by processes doing no work. Only process death frees
+        # it. Costs a spawn + torch import + context init (~15-25 s) per run
+        # against runs of 2.4-26 h; user decision 2026-08-09, optimising total
+        # campaign wall clock rather than per-run latency. Forces the `spawn`
+        # start method, which this module is already safe under: module level is
+        # constants and defs only, `main()` is behind `if __name__ ==
+        # "__main__"`, and `_worker_entry` re-resolves `train_one` by import
+        # rather than closing over it. Not applied to the synthetic stub, which
+        # never creates a CUDA context and so has nothing to release; that keeps
+        # the scaffold pool on `fork`, where a test can inject a fake trainer.
+        with ProcessPoolExecutor(max_workers=max(1, workers), initializer=_pool_initializer,
+                                 max_tasks_per_child=None if force_scaffold else 1) as ex:
             in_flight: dict = {}
             _ACTIVE_LOOP_STATE = {
                 "manifest": manifest, "in_flight": in_flight, "cfg_hash": cfg_hash, "commit": commit,
@@ -658,12 +714,23 @@ def run_grid_loop(
                     idx = 0
                     if gpu_budget_mib is not None and in_flight:
                         in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
+                        headroom = gpu_budget_mib - in_flight_mib
+                        # Two independent accounts of the same card, and the candidate
+                        # must fit BOTH (D38/D39/D40 and comments.txt §23.1). The model
+                        # covers what an in-flight run has not allocated yet; the reading
+                        # covers what anything on the card is holding that the model does
+                        # not know about -- a worker's retained CUDA context, another
+                        # process, fragmentation. Neither is sufficient alone: the
+                        # 2026-08-08 pass admitted three runs whose modelled cost fit
+                        # while five idle workers held ~9 GiB, and all three OOM'd.
+                        rd = gpu_used_total_mib()
+                        if rd is not None:
+                            headroom = min(headroom, gpu_budget_mib - rd[0])
                         # First pending run that fits the remaining budget, not just the
                         # head of the queue: an expensive run that does not fit must not
                         # block the cheap ones queued behind it (which would idle workers).
                         idx = next(
-                            (i for i, r in enumerate(pending)
-                             if in_flight_mib + _run_mib(r, mem_cfg) <= gpu_budget_mib),
+                            (i for i, r in enumerate(pending) if _run_mib(r, mem_cfg) <= headroom),
                             None,
                         )
                         if idx is None:

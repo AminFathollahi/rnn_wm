@@ -350,6 +350,23 @@ def test_real_runs_get_a_fresh_worker_process_each(tmp_path, monkeypatch):
     assert _rows(manifest)["A_s0"]["status"] == "completed"
 
 
+def test_manifest_rows_record_which_gpu_the_run_used(tmp_path, monkeypatch):
+    """comments.txt §23.3: `workers` and `gpu_budget_mib` are only interpretable
+    against a device. D41's four unfittable cells are a fact about an 11.5 GiB
+    laptop card, not about the config."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    monkeypatch.setattr(rg, "gpu_device_rec",
+                        lambda: {"gpu_name": "Test GPU", "gpu_total_mib": 12227})
+    runs = [{"model_id": "A", "S": 0, "P": 0, "seed": 0, "run_id": "A_s0"}]
+    manifest = tmp_path / "m.jsonl"
+    rg.run_grid_loop(runs, set(), {"steps": 5, "scaffold_sleep_s": 0}, "hash", "gitrev", "smoke",
+                      budget_s=3600, t0=time.time(), manifest=manifest, force_scaffold=True,
+                      workers=1, log_prefix="[test]")
+    row = _rows(manifest)["A_s0"]
+    assert row["gpu_name"] == "Test GPU"
+    assert row["gpu_total_mib"] == 12227
+
+
 def test_help_does_not_crash(capsys):
     """comments.txt §23.2: a bare `%` in an argparse help string makes argparse's
     own formatter raise, so `--help` died with `TypeError: %o format: an integer

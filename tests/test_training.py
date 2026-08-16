@@ -4,6 +4,7 @@ minimal step budget (the smoke tier). Skips if the stimuli pool has not
 been built yet."""
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -332,6 +333,103 @@ def test_resume_preserves_true_milestone_step_and_does_not_reoverwrite_snapshot(
     assert second["steps_to_load1_0.83"] == 6
     assert second["first_milestone_step"] == 6
     assert snapshot_after["step"] == 6  # not overwritten with post-resume (step 16) weights
+
+
+def test_analysis_budget_and_unmet_criterion_cap_stop_at_their_own_limits():
+    """Gate-A success stops at the budget; persistent failure reaches the cap."""
+    import copy
+    import shutil
+
+    import torch
+
+    import brainalign_wm.training.train as train_mod
+
+    fake_cfg = copy.deepcopy(CFG)
+    fake_cfg["train"]["eval_every"] = 2
+    fake_cfg["gates"]["consecutive_evals"] = 2
+    fake_cfg["gates"]["criterion"] = {"load1": 0.83}
+    fake_cfg["gates"]["extra_milestones"] = {}
+    budget, cap = 6, 10
+
+    def accuracy(value):
+        return {
+            "load1": value, "load1_ci_lo": value, "load1_ci_hi": value,
+            "load2": value, "load2_ci_lo": value, "load2_ci_hi": value,
+            "load3": value, "load3_ci_lo": value, "load3_ci_hi": value,
+        }
+
+    evaluation_calls = {"met": 0}
+
+    def fake_evaluate_accuracy(*args, **kwargs):
+        run_kind = fake_cfg["_test_run_kind"]
+        if run_kind == "never":
+            return accuracy(0.0)
+        evaluation_calls["met"] += 1
+        return accuracy(1.0 if evaluation_calls["met"] >= 2 else 0.0)
+
+    run_ids = ["SMOKETEST_budget_met", "SMOKETEST_budget_never_met"]
+    ckpt_dirs = [ROOT / "results" / "checkpoints" / run_id for run_id in run_ids]
+    metrics_paths = [ROOT / "results" / "metrics" / f"{run_id}.csv" for run_id in run_ids]
+    for path in [*ckpt_dirs, *metrics_paths]:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+    orig_load_cfg = train_mod._load_full_config
+    orig_eval_acc = train_mod.evaluate_accuracy
+    orig_final_eval = train_mod.final_evaluation
+    train_mod._load_full_config = lambda: fake_cfg
+    train_mod.evaluate_accuracy = fake_evaluate_accuracy
+    train_mod.final_evaluation = lambda *a, **k: accuracy(0.9)
+    try:
+        fake_cfg["_test_run_kind"] = "met"
+        met = train_mod.train_one(
+            {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": run_ids[0]},
+            {"steps": budget, "max_steps_if_criterion_unmet": cap, "batch_size": 4},
+        )
+        met_ckpt = torch.load(ckpt_dirs[0] / "ckpt.pt", map_location="cpu", weights_only=False)
+        met_gate_ckpt = torch.load(
+            ckpt_dirs[0] / "ckpt_at_criterion.pt", map_location="cpu", weights_only=False
+        )
+
+        fake_cfg["_test_run_kind"] = "never"
+        never = train_mod.train_one(
+            {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 1, "run_id": run_ids[1]},
+            {"steps": budget, "max_steps_if_criterion_unmet": cap, "batch_size": 4},
+        )
+        never_ckpt = torch.load(ckpt_dirs[1] / "ckpt.pt", map_location="cpu", weights_only=False)
+    finally:
+        train_mod._load_full_config = orig_load_cfg
+        train_mod.evaluate_accuracy = orig_eval_acc
+        train_mod.final_evaluation = orig_final_eval
+        for path in ckpt_dirs:
+            if path.exists():
+                shutil.rmtree(path)
+        for path in metrics_paths:
+            if path.exists():
+                path.unlink()
+
+    assert met["training_stop_step"] == budget
+    assert met["criterion_met_at_budget"] is True
+    assert met_ckpt["step"] == budget
+    assert never["training_stop_step"] == cap
+    assert never["criterion_met_at_budget"] is False
+    assert never["criterion_met_by_stop"] is False
+    assert never_ckpt["step"] == budget
+    for checkpoint in (met_ckpt, met_gate_ckpt, never_ckpt):
+        assert "torch_rng_state" in checkpoint
+        assert "numpy_rng_state" in checkpoint
+
+    torch.set_rng_state(met_ckpt["torch_rng_state"])
+    expected_torch_draw = torch.rand(4)
+    np.random.set_state(met_ckpt["numpy_rng_state"])
+    expected_numpy_draw = np.random.rand(4)
+    torch.manual_seed(999)
+    np.random.seed(999)
+    train_mod._restore_checkpoint_rng(met_ckpt)
+    assert torch.equal(torch.rand(4), expected_torch_draw)
+    assert np.array_equal(np.random.rand(4), expected_numpy_draw)
 
 
 def test_update_milestone_counters_latches_and_never_refires():

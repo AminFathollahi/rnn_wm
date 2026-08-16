@@ -320,22 +320,21 @@ gates:
   # stops training and a milestone never reached is recorded `null`.
   extra_milestones:
     load3: 0.80    # 000469 (only dataset with load 3) q10 = 0.8000
-  # Gate B (§3.2): the equal-duration budget. A single max_steps, fixed
-  # for every cell in a stage, set ONCE per stage from that stage's pilot
-  # (12.6) -- NOT a per-run stopping rule, because C1-C4 are geometry DVs
-  # that keep changing after accuracy saturates, and comparing two cells'
-  # geometry at different training durations confounds arm with duration.
-  # `ckpt.pt` at max_steps is what every geometry analysis reads.
-  # Set 2026-08-02, user-confirmed; see advisor.md's frozen-preregistration
-  # amendment "Gate B is set to max_steps: 80000" for the full derivation.
-  # Not the vanilla pilot 12.6 names: flat vanilla is NO-GO under all three
-  # signals and has no plateau to read. The calibration pair is the GRU one
-  # -- FLATGRU_RL_s0 (S=0) and M10000_pilot_s0 (S=1) -- read with a
-  # three-evaluation window mean rather than the rule's literal per-eval
-  # delta, because a single n=200 eval's Wilson half-width (+/-0.042) is four
-  # times the rule's own 0.01 threshold. Floor term 1.2 x 53,328 = 63,994 ->
-  # 70,000; plateau term (both arms) -> 80,000; max = 80,000.
-  max_steps: 80000
+  # Equal-duration analysis budget. Every geometry, alignment, and network-
+  # property analysis reads `ckpt.pt` at exactly this step. The value is
+  # 1.71x the slowest observed three-evaluation Gate-A confirmation (14,000)
+  # and exceeds the configured 1.2x floor rule. It deliberately does not
+  # claim that the representation has reached a plateau: geometry at this
+  # checkpoint is pre-asymptotic. The task's 90,000-step lure ramp remains
+  # unchanged, so the shorter budget also means less training-time lure
+  # exposure; held-out evaluation still uses the full lure fraction.
+  max_steps: 24000
+  # Runs that have not confirmed Gate A by the analysis budget continue only
+  # to confirmation or this ceiling, whichever comes first. The ceiling is
+  # 1.2 x the latest known successful hierarchical-GRU confirmation
+  # (39,996), rounded up. Extension weights are never an analysis input;
+  # `ckpt.pt` remains frozen at `max_steps`.
+  max_steps_if_criterion_unmet: 48000
   # n-back (Stage 3, Phase 6/11): from the 2 Kai Miller ECoG patients (CA,
   # CC) with a usable dataglove response signal -- AL has no response
   # channel, UG's is degenerate -- scripts/human_behavior_gates_nback.py,

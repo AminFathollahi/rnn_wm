@@ -164,12 +164,7 @@ def test_write_report(tmp_path):
 
 
 def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatch, capsys):
-    """`train_one` reads its ceiling from `cfg["steps"]` (train.py:1540) and
-    never looks at `gates.max_steps`, so the launcher must resolve Gate B into
-    `steps`. Without this the battery trains to the tier's 150,000 while the
-    config, the manifest and advisor.md's §12 amendment all say Gate B is
-    80,000 -- the wrong equal-duration snapshot for every geometry DV, at
-    1.9x the authorized budget, and silently."""
+    """The full launcher must pass both campaign limits to the trainer."""
     monkeypatch.setattr(rg, "RESULTS", tmp_path)
     monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
     monkeypatch.setattr(rg, "REPORT", tmp_path / "RUN_REPORT.md")
@@ -180,15 +175,18 @@ def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatc
 
     import yaml as _yaml
 
-    gate_b = _yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())["gates"]["max_steps"]
+    gates = _yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())["gates"]
+    gate_b = gates["max_steps"]
     assert gate_b, "gates.max_steps is unset; Gate B must be written before a campaign launch"
     assert captured["steps"] == gate_b
-    assert "from gates.max_steps" in capsys.readouterr().out
+    assert captured["max_steps_if_criterion_unmet"] == gates["max_steps_if_criterion_unmet"]
+    assert "analysis budget" in capsys.readouterr().out
 
     # smoke/dev exist to run short; Gate B is a results-tier commitment.
     captured.clear()
     rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP"])
     assert captured["steps"] != gate_b and captured["steps"] < 1000
+    assert "max_steps_if_criterion_unmet" not in captured
 
 
 def test_every_cell_states_substrate_and_recurrent_init():

@@ -876,22 +876,23 @@ def main(argv=None) -> int:
             print(f"[run_grid] failed to parse {args.config}: {e}", flush=True)
             raise
 
-    # Gate B governs the campaign's run length. `train_one` reads its ceiling
-    # from `cfg["steps"]` (`train.py:1540`) and never looks at
-    # `gates.max_steps`, so without this the battery would run to the tier's
-    # `steps` (150,000 at --tier full) while the config, the manifest and the
-    # §12 amendment all say Gate B is 80,000: the wrong equal-duration
-    # snapshot for every geometry DV, at 1.9x the authorized budget, silently.
-    # Only the campaign launcher resolves this -- the pilots and Stage 1 pass
-    # their own explicit `steps` and must keep it.
-    # `full` only: `smoke` and `dev` exist to run short, and Gate B is a
-    # results-tier commitment, not a global one.
-    gate_b = (full_cfg.get("gates") or {}).get("max_steps") if args.tier == "full" else None
+    # The full campaign has two independent limits: a fixed analysis budget
+    # shared by every cell, and a larger ceiling used only while Gate A is
+    # still unconfirmed. Pilots and short development tiers pass their own
+    # explicit step counts and do not inherit the campaign extension.
+    gates_cfg = full_cfg.get("gates") or {}
+    gate_b = gates_cfg.get("max_steps") if args.tier == "full" else None
+    criterion_cap = gates_cfg.get("max_steps_if_criterion_unmet") if args.tier == "full" else None
     if gate_b:
         cfg["steps"] = int(gate_b)
-        print(f"[run_grid] Gate B: steps={cfg['steps']} from gates.max_steps "
-              f"(tier '{args.tier}' default was {full_cfg.get('tiers', {}).get(args.tier, {}).get('steps')}).",
-              flush=True)
+        if criterion_cap is not None:
+            cfg["max_steps_if_criterion_unmet"] = int(criterion_cap)
+        print(
+            f"[run_grid] analysis budget: steps={cfg['steps']} from gates.max_steps; "
+            f"unmet-criterion ceiling={cfg.get('max_steps_if_criterion_unmet', cfg['steps'])} "
+            f"(tier '{args.tier}' default was {full_cfg.get('tiers', {}).get(args.tier, {}).get('steps')}).",
+            flush=True,
+        )
 
     # Audit fix B1: hash the FULL resolved config (not just the tier
     # subset), computed once per invocation -- every run in this grid

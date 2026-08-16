@@ -1,7 +1,8 @@
-"""comments.txt §23.2: `run_grid.py --help` crashed with `TypeError: %o format:
-a number is required, not dict` because a help string contained a bare `%`
-(argparse runs help text through `%`-formatting). `--help` is the first thing
-anyone runs when unsure of a flag, and nothing in the suite ever invoked it.
+"""Ensure every command-line entry point can render its help text.
+
+An argparse help string containing a bare percent sign once made
+`run_grid.py --help` raise a formatting `TypeError`. Help is a public entry
+point and needs the same regression coverage as execution.
 
 This sweeps every argparse entry point rather than that one file: the defect is
 a class, not an instance, and a new script can reintroduce it at any time."""

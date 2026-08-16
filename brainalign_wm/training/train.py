@@ -212,6 +212,45 @@ def _load_full_config() -> dict:
     return yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
 
 
+def _checkpoint_state(
+    step: int,
+    front_end: nn.Module,
+    core: nn.Module,
+    heads: nn.Module,
+    adapters: dict[str, nn.Module],
+    optimizer,
+    rung: int,
+    accuracy_at_budget: dict | None = None,
+) -> dict:
+    """Build a resumable checkpoint, including every process RNG stream."""
+    state = {
+        "step": step,
+        "front_end": front_end.state_dict(),
+        "core": core.state_dict(),
+        "heads": heads.state_dict(),
+        "adapters": {name: adapter.state_dict() for name, adapter in adapters.items()},
+        "optimizer": optimizer.state_dict() if optimizer else None,
+        "rung": rung,
+        "torch_rng_state": torch.get_rng_state(),
+        "numpy_rng_state": np.random.get_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+    if accuracy_at_budget is not None:
+        state["accuracy_at_budget"] = accuracy_at_budget
+    return state
+
+
+def _restore_checkpoint_rng(state: dict) -> None:
+    """Restore RNG state when present while accepting historical checkpoints."""
+    if state.get("torch_rng_state") is not None:
+        torch.set_rng_state(state["torch_rng_state"].cpu())
+    if state.get("numpy_rng_state") is not None:
+        np.random.set_state(state["numpy_rng_state"])
+    if state.get("torch_cuda_rng_state_all") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([rng_state.cpu() for rng_state in state["torch_cuda_rng_state_all"]])
+
+
 class _GatedFlatCore(torch.nn.Module):
     """The S=0 (flat, GRU-substrate) core, for every M/P combination
     (Phase 1, B1/1.5): uses `MaskedGRUCell`/`PlasticGRUCell` (mask=None --
@@ -1736,6 +1775,12 @@ def train_one(run: dict, cfg: dict) -> dict:
     pbwm_gate = bool(run.get("pbwm_gate", False))  # ablation-battery arm M111_pbwm only (§4.4)
     bioinit = bool(run.get("bioinit", False))  # item 8.9b: M00001_bioinit only, S=0 GRU substrate
     total_steps = int(cfg.get("steps", full_cfg["tiers"]["smoke"]["steps"]))
+    max_steps_if_criterion_unmet = int(cfg.get("max_steps_if_criterion_unmet", total_steps))
+    if max_steps_if_criterion_unmet < total_steps:
+        raise ValueError(
+            "max_steps_if_criterion_unmet must be greater than or equal to the analysis budget "
+            f"({max_steps_if_criterion_unmet} < {total_steps})"
+        )
     run_id = run["run_id"]
 
     seed_everything(seed)
@@ -1881,6 +1926,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     ckpt_path = ckpt_dir / "ckpt.pt"
     start_step = 0
     rung = 1
+    accuracy_at_budget = None
 
     optimizer = None
     if L == 0:
@@ -1901,6 +1947,13 @@ def train_one(run: dict, cfg: dict) -> dict:
             optimizer.load_state_dict(ck["optimizer"])
         start_step = ck["step"]
         rung = ck.get("rung", 1)
+        accuracy_at_budget = ck.get("accuracy_at_budget")
+        _restore_checkpoint_rng(ck)
+        if start_step > total_steps:
+            raise RuntimeError(
+                f"{ckpt_path} is at step {start_step}, beyond the configured analysis budget "
+                f"{total_steps}; archive this incompatible checkpoint before relaunching"
+            )
 
     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed) if L == 1 else None
 
@@ -1938,7 +1991,6 @@ def train_one(run: dict, cfg: dict) -> dict:
     eval_trials_per_load = int(t_cfg["eval_trials_per_load"])
     criterion = full_cfg["gates"]["criterion"]
     consecutive_evals_required = int(full_cfg["gates"]["consecutive_evals"])
-    task_loads = full_cfg["task"]["loads"]
     # Phase 12 (§3.3): the milestone set is `gates.criterion` (Gate A, §3.1)
     # merged with `gates.extra_milestones` -- Gate A's own threshold is
     # tracked as a milestone automatically, so its number lives in exactly
@@ -1954,21 +2006,17 @@ def train_one(run: dict, cfg: dict) -> dict:
     # nowhere near it even at the max ~300 periodic calls a 150k-step run
     # makes at eval_every>=500.
     eval_call_counter = 0
-    # Phase 12 (§3.3): milestones, not a stop rule. Each key gets its OWN
-    # streak counter -- confirmed at the step of the CONFIRMING (last-in-
-    # streak) evaluation, never overwritten afterward, never stops training
-    # (§3: Gate A is inclusion-only; Gate B, i.e. `total_steps`, is the only
-    # ceiling). A milestone never confirmed stays `None` -- a result, not a
-    # missing value.
+    # Each milestone gets its own streak counter, latches on its first
+    # confirming evaluation, and is never overwritten afterward. A run always
+    # reaches the common analysis budget. If Gate A is still unconfirmed there,
+    # training continues only to confirmation or the configured extension cap.
     # `milestone_reached`/`milestone_consecutive` latch at the first
     # confirming streak and then stop updating -- they back the efficiency
     # DV `steps_to_<key>_<threshold>`, which must record when a criterion was
-    # first reached even if it later collapses. Gate A inclusion (`matched`)
-    # must instead reflect whether the criterion holds at the checkpoint
-    # geometry actually reads (max_steps), so track its own trailing streak,
-    # updated on every periodic eval with no latch.
-    # comments.txt §16A.2: on a genuine resume, seed all of this from the
-    # pre-resume metrics history instead of restarting at zero -- otherwise
+    # first reached even if it later collapses. The independent trailing
+    # streak remains available for checkpoint-local diagnostics.
+    # On a genuine resume, seed all of this from the pre-resume metrics
+    # history instead of restarting at zero -- otherwise
     # `steps_to_*`/`first_milestone_step` report the first post-resume
     # confirmation, and a milestone already reached pre-resume gets
     # re-detected live and silently overwrites `ckpt_at_criterion.pt` with
@@ -2006,10 +2054,32 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `first_milestone_step`.
     accuracy_at_first_milestone = None
 
+    criterion_met_at_budget = None
+    criterion_met_by_stop = all(
+        criterion_consecutive[k] >= consecutive_evals_required for k in criterion
+    )
+    if start_step == total_steps:
+        criterion_met_at_budget = criterion_met_by_stop
+        if accuracy_at_budget is None:
+            accuracy_at_budget = final_evaluation(
+                front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                task_name_for_context=("sternberg" if diet == "multitask" else None),
+            )
+            torch.save(
+                _checkpoint_state(
+                    total_steps, front_end, core, heads, adapters, optimizer, rung,
+                    accuracy_at_budget=accuracy_at_budget,
+                ),
+                ckpt_path,
+            )
+
     t0 = time.time()
     running_loss = 0.0
     loss_count = 0
-    for step in range(start_step, total_steps):
+    training_stop_step = start_step
+    loop_ceiling = total_steps if start_step == total_steps and criterion_met_by_stop else max_steps_if_criterion_unmet
+    for step in range(start_step, loop_ceiling):
+        training_stop_step = step + 1
         step_wall_t0 = time.time()
         params = task_gen.curriculum_params(step, total_steps)
         phase = params["phase"]
@@ -2095,7 +2165,7 @@ def train_one(run: dict, cfg: dict) -> dict:
             step_durations.append(time.time() - step_wall_t0)
 
         # Periodic metrics logging (audit addition)
-        if (step + 1) % eval_every == 0 or step == total_steps - 1:
+        if (step + 1) % eval_every == 0 or step + 1 == total_steps or step + 1 == max_steps_if_criterion_unmet:
             avg_loss = running_loss / max(loss_count, 1)
             eval_call_counter += 1
             acc = evaluate_accuracy(
@@ -2124,7 +2194,7 @@ def train_one(run: dict, cfg: dict) -> dict:
             running_loss = 0.0
             loss_count = 0
 
-            # Phase 12 (§3.3): each milestone (`gates.criterion` merged with
+            # Each milestone (`gates.criterion` merged with
             # `gates.extra_milestones`) is confirmed independently by its own
             # streak of `consecutive_evals_required` periodic evals (each
             # drawn with its own fresh `eval_seed`, disjoint from
@@ -2134,14 +2204,12 @@ def train_one(run: dict, cfg: dict) -> dict:
             # and the eval(s) that DO trigger it are never the same trials
             # as the officially reported (max_steps, §3.4) accuracy.
             #
-            # NONE of these stop training -- §3: Gate A (`criterion`) is
-            # inclusion, not a stop rule, and `extra_milestones` are pure
-            # efficiency DVs; only Gate B (`total_steps`, the loop's own
-            # ceiling) does. The FIRST milestone reached (of any key) gets a
-            # checkpoint + full evaluation snapshot -- what 12.4 compares
-            # `ckpt.pt` (the max_steps, equal-duration snapshot, unchanged
-            # below) against.
-            # §16A.2: shared with `_seed_milestone_state_from_history`'s
+            # Before the common budget these are descriptive/inclusion
+            # quantities and never stop training. Beyond the budget, Gate A
+            # confirmation ends the extension. Extra milestones never stop a
+            # run. The first Gate A confirmation gets its own checkpoint and
+            # full evaluation snapshot.
+            # Shared with `_seed_milestone_state_from_history`'s
             # replay of a resumed run's pre-resume rows, so the live update
             # rule and the replay rule cannot drift apart.
             newly_confirmed = _update_milestone_counters(
@@ -2167,16 +2235,13 @@ def train_one(run: dict, cfg: dict) -> dict:
                 # snapshot exists for.
                 if _mkey in criterion and first_milestone_step is None:
                     first_milestone_step = milestone_steps_to[_mkey]
-                    print(f"[train] first milestone ({_mkey}); snapshotting ckpt_at_criterion.pt, "
-                          f"continuing to {total_steps} for geometry only.", flush=True)
+                    print(
+                        f"[train] first Gate A milestone ({_mkey}); snapshotting "
+                        "ckpt_at_criterion.pt.",
+                        flush=True,
+                    )
                     torch.save(
-                        {
-                            "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
-                            "heads": heads.state_dict(),
-                            "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
-                            "optimizer": optimizer.state_dict() if optimizer else None,
-                            "rung": rung,
-                        },
+                        _checkpoint_state(step + 1, front_end, core, heads, adapters, optimizer, rung),
                         ckpt_dir / "ckpt_at_criterion.pt",
                     )
                     accuracy_at_first_milestone = final_evaluation(
@@ -2184,48 +2249,61 @@ def train_one(run: dict, cfg: dict) -> dict:
                         task_name_for_context=("sternberg" if diet == "multitask" else None),
                     )
 
-        if (step + 1) % t_cfg["checkpoint_every"] == 0 or step == total_steps - 1:
+        criterion_met_by_stop = all(
+            criterion_consecutive[k] >= consecutive_evals_required for k in criterion
+        )
+        if step + 1 == total_steps:
+            criterion_met_at_budget = criterion_met_by_stop
+            accuracy_at_budget = final_evaluation(
+                front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
+                task_name_for_context=("sternberg" if diet == "multitask" else None),
+            )
+
+        # `ckpt.pt` is the equal-duration analysis artifact. Periodic saves
+        # stop at the analysis budget so an extension can never overwrite it.
+        if step + 1 <= total_steps and (
+            (step + 1) % t_cfg["checkpoint_every"] == 0 or step + 1 == total_steps
+        ):
             torch.save(
-                {
-                    "step": step + 1, "front_end": front_end.state_dict(), "core": core.state_dict(),
-                    "heads": heads.state_dict(), "optimizer": optimizer.state_dict() if optimizer else None,
-                    "adapters": {name: ad.state_dict() for name, ad in adapters.items()},
-                    "rung": rung,
-                },
+                _checkpoint_state(
+                    step + 1, front_end, core, heads, adapters, optimizer, rung,
+                    accuracy_at_budget=accuracy_at_budget if step + 1 == total_steps else None,
+                ),
                 ckpt_path,
             )
 
+        if step + 1 >= total_steps and criterion_met_by_stop:
+            break
+
     metrics_logger.close()
-    # `ckpt.pt` and this final evaluation are the equal-duration (max_steps)
-    # snapshot every cell gets regardless of when/whether any milestone was
-    # reached -- geometry analyses use these, unchanged from the original
-    # design.
-    accuracy = final_evaluation(
-        front_end, core, heads, S, P, reflective_gate, task_gen, image_bank, full_cfg, device, seed,
-        task_name_for_context=("sternberg" if diet == "multitask" else None),
-    )
+    if accuracy_at_budget is None:
+        raise RuntimeError("analysis-budget evaluation was not captured")
+    accuracy = accuracy_at_budget
     # Root-cause fix (same as the periodic-eval loop above): iterate
     # `criterion`'s own keys, not `task_loads` -- a load-1-only criterion
     # must not require every future gate change to touch this code.
     gates = {f"{k}>={v}": accuracy.get(k, 0.0) >= v for k, v in criterion.items()}
-    # §3.4: the headline is now the max_steps evaluation, unconditionally --
-    # this is where every cell is compared and where every geometry
-    # analysis reads, so it inverts Round 1's "at-criterion is the headline"
-    # policy. `accuracy_at_max_steps`/`gates_at_max_steps` stay as aliases
-    # (identical to `accuracy`/`gates` now) so nothing downstream that reads
-    # them specifically breaks.
-    # §3.1: Gate A specifically (not the extra efficiency milestones) is the
-    # behavioural-matching/inclusion verdict.
-    matched = all(criterion_consecutive[k] >= consecutive_evals_required for k in criterion)
+    # The headline is the analysis-budget evaluation unconditionally because
+    # this is where every cell and every geometry analysis are compared.
+    # `accuracy_at_max_steps`/`gates_at_max_steps` remain aliases so existing
+    # analysis readers keep their stable field names.
+    # Gate A specifically (not the extra efficiency milestones) is the
+    # behavioural-matching/inclusion verdict. For an extended run this says
+    # whether confirmation occurred by the cap; headline accuracy remains the
+    # equal-duration budget evaluation above.
+    matched = criterion_met_by_stop
     human_percentile = _human_percentiles(accuracy)
     return {
         "status": "completed",
         "gates": gates, "accuracy": accuracy,
         "gates_at_max_steps": gates, "accuracy_at_max_steps": accuracy,
-        # The at-first-milestone snapshot (`ckpt_at_criterion.pt`) -- None if
-        # no milestone was ever confirmed. What 12.4 compares `ckpt.pt` against.
+        # The at-first-Gate-A snapshot is absent when no criterion was confirmed.
         "accuracy_at_first_milestone": accuracy_at_first_milestone,
         "first_milestone_step": first_milestone_step,
+        "analysis_budget_steps": total_steps,
+        "training_stop_step": training_stop_step,
+        "criterion_met_at_budget": bool(criterion_met_at_budget),
+        "criterion_met_by_stop": bool(criterion_met_by_stop),
         "rung": rung if L == 1 else 0, "wall_clock_train_s": round(time.time() - t0, 1),
         "matched": matched,
         "human_percentile_load1": human_percentile.get("load1"),

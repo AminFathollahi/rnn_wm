@@ -328,44 +328,62 @@ def check_workers_consistency(rows: list[dict], tier: str) -> None:
 
 
 def check_max_steps_completion(rows: list[dict]) -> None:
-    """D35: `gates.max_steps` is read by no training code path except through
-    the tier's resolved config, so a launcher regression can silently run a
-    different ceiling than every artifact claims. This check would have
-    caught D35 by itself: a `completed` row's `accuracy_at_max_steps` must be
-    populated, and its metrics CSV must actually reach the resolved
-    `gates.max_steps` -- not just claim to."""
-    max_steps_by_sup: dict[str, int | None] = {}
+    """Completed runs must reach the common budget and respect the extension cap."""
+    limits_by_sup: dict[str, tuple[int | None, int | None]] = {}
     for sup in ("SUP", "RL"):
         cfg_path = RESULTS / f"resolved_config_grid_{sup}.yaml"
         if not cfg_path.exists():
             continue
-        m = re.search(r"^\s*max_steps:\s*(\d+)\s*$", cfg_path.read_text(), re.MULTILINE)
-        max_steps_by_sup[sup] = int(m.group(1)) if m else None
+        text = cfg_path.read_text()
+        budget_match = re.search(r"^\s*max_steps:\s*(\d+)\s*$", text, re.MULTILINE)
+        cap_match = re.search(r"^\s*max_steps_if_criterion_unmet:\s*(\d+)\s*$", text, re.MULTILINE)
+        budget = int(budget_match.group(1)) if budget_match else None
+        cap = int(cap_match.group(1)) if cap_match else budget
+        limits_by_sup[sup] = (budget, cap)
     for r in rows:
         rid = r.get("run_id", "")
         if r.get("status") != "completed" or not CAMPAIGN_RE.match(rid):
             continue
         if r.get("accuracy_at_max_steps") is None:
             violation("max-steps", f"{rid} is completed but accuracy_at_max_steps is null")
-        expected = max_steps_by_sup.get(str(r.get("supervision")))
-        if expected is None:
+        budget, cap = limits_by_sup.get(str(r.get("supervision")), (None, None))
+        if budget is None:
             continue
         csv_path = METRICS_DIR / f"{rid}.csv"
         if not csv_path.exists():
             warn("max-steps", f"{rid} claims completion but {csv_path.name} is missing")
             continue
-        last_step = None
+        steps = []
         with csv_path.open(newline="") as fh:
             for row in csv.DictReader(fh):
                 if row.get("step"):
-                    last_step = int(row["step"])
-        if last_step != expected:
+                    steps.append(int(row["step"]))
+        last_step = steps[-1] if steps else None
+        if budget not in steps:
             violation(
                 "max-steps",
-                f"{rid} is completed but its CSV's last step is {last_step}, not the "
-                f"resolved gates.max_steps={expected} -- ran a different ceiling than "
-                f"the artifact claims (D35)",
+                f"{rid} is completed but its CSV never reaches the resolved analysis budget {budget}",
             )
+            continue
+        if last_step is None or last_step < budget or (cap is not None and last_step > cap):
+            violation(
+                "max-steps",
+                f"{rid} stops at CSV step {last_step}, outside the allowed [{budget}, {cap}] interval",
+            )
+        if r.get("training_stop_step") is not None and int(r["training_stop_step"]) != last_step:
+            violation(
+                "max-steps",
+                f"{rid} reports training_stop_step={r['training_stop_step']} but its CSV ends at {last_step}",
+            )
+        if last_step and last_step > budget and r.get("criterion_met_at_budget") is True:
+            violation("max-steps", f"{rid} extended past {budget} despite confirming Gate A at the budget")
+        if (
+            last_step
+            and cap is not None
+            and budget < last_step < cap
+            and r.get("criterion_met_by_stop") is False
+        ):
+            violation("max-steps", f"{rid} stopped its extension at {last_step} without confirming Gate A")
 
 
 def load_baseline(path: Path) -> dict[str, str]:
@@ -404,7 +422,7 @@ def main(argv=None) -> int:
         ("resume counters", lambda: check_resume_counters(rows)),
         ("activity log provenance", lambda: check_activity_log_provenance(rows)),
         ("storage arithmetic", lambda: check_storage()),
-        ("max_steps completion (D35)", lambda: check_max_steps_completion(rows)),
+        ("analysis-budget and extension completion", lambda: check_max_steps_completion(rows)),
         ("workers consistency (D51)", lambda: check_workers_consistency(rows, args.tier)),
     ]:
         print(f"- {name}")

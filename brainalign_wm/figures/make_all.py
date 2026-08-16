@@ -62,6 +62,8 @@ def _load_manifest(path: Path) -> pd.DataFrame:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if rec.get("archived", False):
+            continue
         latest[rec.get("run_id", "?")] = rec
     return pd.DataFrame(latest.values())
 

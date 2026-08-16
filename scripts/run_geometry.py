@@ -68,6 +68,14 @@ COLUMNS = [
 ]
 
 
+def _completed_records(manifest: Path = MANIFEST) -> list[dict]:
+    """Return active completed runs; archived checkpoints are never analysis inputs."""
+    return [
+        record for record in load_all_records(manifest)
+        if record.get("status") == "completed" and not record.get("archived", False)
+    ]
+
+
 def _build_single_trial_ensemble(df: pd.DataFrame) -> np.ndarray:
     """[n_trials, n_timebins, n_units] from `h_flat`, restricted to
     epoch=='maintain' (the delay period -- matches
@@ -146,7 +154,7 @@ def main(argv=None) -> int:
     out_csv = out_csv_for(args.checkpoint)
 
     RESULTS.mkdir(exist_ok=True)
-    records = [r for r in load_all_records(MANIFEST) if r.get("status") == "completed"]
+    records = _completed_records()
     rows = []
     for rec in records:
         run_id = rec["run_id"]

@@ -46,5 +46,27 @@ def test_archive_runs_is_dry_by_default_and_rewrites_every_manifest_row(tmp_path
     assert (checkpoints / archived_id / "ckpt.pt").read_bytes() == b"checkpoint"
     assert not resolved.exists()
     assert (results / f"resolved_config_{archived_id.lower()}.yaml").exists()
-    rewritten_ids = [json.loads(line)["run_id"] for line in manifest.read_text().splitlines()]
+    rewritten = [json.loads(line) for line in manifest.read_text().splitlines()]
+    rewritten_ids = [row["run_id"] for row in rewritten]
     assert rewritten_ids == [archived_id, archived_id, "UNRELATED"]
+    assert [row.get("archived") for row in rewritten] == [True, True, None]
+
+
+def test_mark_existing_adds_archive_marker_without_changing_status(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    results.mkdir()
+    manifest = results / "manifest.jsonl"
+    run_id = "M00000_SUP_s0_budget80000"
+    manifest.write_text(json.dumps({"run_id": run_id, "status": "completed"}) + "\n")
+    monkeypatch.setattr(archive_runs, "RESULTS", results)
+    monkeypatch.setattr(archive_runs, "MANIFEST", manifest)
+    monkeypatch.setattr(archive_runs, "ROOT", tmp_path)
+
+    assert archive_runs.main(["--mark-existing"]) == 0
+    assert "archived" not in json.loads(manifest.read_text())
+
+    assert archive_runs.main(["--mark-existing", "--apply"]) == 0
+    row = json.loads(manifest.read_text())
+    assert row["run_id"] == run_id
+    assert row["status"] == "completed"
+    assert row["archived"] is True

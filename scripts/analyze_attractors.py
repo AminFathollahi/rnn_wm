@@ -94,7 +94,7 @@ def _completed_run_ids() -> list[str]:
             except json.JSONDecodeError:
                 print(f"[analyze_attractors] skipping malformed manifest line: {line[:200]!r}", flush=True)
                 continue
-            if rec.get("status") == "completed":
+            if rec.get("status") == "completed" and not rec.get("archived", False):
                 seen[rec["run_id"]] = rec
     return list(seen.keys())
 

@@ -104,6 +104,7 @@ def _rewrite_manifest(rows: list[dict], mapping: dict[str, str]) -> None:
         record = dict(row)
         if record.get("run_id") in mapping:
             record["run_id"] = mapping[record["run_id"]]
+            record["archived"] = True
         rewritten.append(json.dumps(record, sort_keys=False))
 
     fd, temporary_name = tempfile.mkstemp(prefix="manifest.archive.", suffix=".jsonl", dir=MANIFEST.parent)
@@ -129,6 +130,11 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--suffix", default="budget80000", help="archive suffix without the leading underscore")
     parser.add_argument("--expected-step", type=int, default=None, help="require every selected metrics CSV to end here")
+    parser.add_argument(
+        "--mark-existing",
+        action="store_true",
+        help="mark already-renamed budget80000/prebudget manifest identities as archived",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print the plan without changing files (the default)")
     mode.add_argument("--apply", action="store_true", help="perform the planned renames and manifest rewrite")
@@ -140,6 +146,30 @@ def main(argv=None) -> int:
         raise SystemExit("--suffix must be a non-empty filename component")
 
     rows = _load_manifest()
+    if args.mark_existing:
+        archived_ids = sorted({
+            row.get("run_id", "")
+            for row in rows
+            if row.get("run_id", "").endswith("_budget80000") or "_prebudget_" in row.get("run_id", "")
+        })
+        unmarked_ids = [
+            run_id for run_id in archived_ids
+            if any(row.get("run_id") == run_id and not row.get("archived") for row in rows)
+        ]
+        if not unmarked_ids:
+            print("archive_runs: no unmarked archived identities")
+            return 0
+        mode_name = "APPLY" if args.apply else "DRY RUN"
+        print(f"archive_runs: {mode_name}; mark {len(unmarked_ids)} existing archived identity/identities")
+        for run_id in unmarked_ids:
+            print(f"  {run_id}")
+        if not args.apply:
+            print("No changes made. Re-run with --apply to mark these manifest rows.")
+            return 0
+        _rewrite_manifest(rows, {run_id: run_id for run_id in unmarked_ids})
+        print(f"Marked {len(unmarked_ids)} archived identity/identities; original row status fields were preserved.")
+        return 0
+
     run_ids = sorted(set(args.run_id)) if args.run_id else _discover_completed_80000(rows, args.suffix)
     if not run_ids:
         print("archive_runs: no matching runs")

@@ -100,7 +100,10 @@ def _load_completed_runs(manifest_path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
         latest[rec.get("run_id", "?")] = rec
-    return [r for r in latest.values() if r.get("status") == "completed"]
+    return [
+        r for r in latest.values()
+        if r.get("status") == "completed" and not r.get("archived", False)
+    ]
 
 
 def _identity_condition(row) -> tuple:

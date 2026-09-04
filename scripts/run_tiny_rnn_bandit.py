@@ -53,6 +53,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))  # editable install's finder maps to a stale pre-rename path; see executor.md Phase 9b
 
+from brainalign_wm.config import get_path  # noqa: E402
 from brainalign_wm.tasks.multitask import make_env  # noqa: E402
 ACTION_DIM = {"bandit": 2, "dawtwostep": 3}
 
@@ -241,7 +242,7 @@ def main() -> None:
             print(f"[tiny_rnn_bandit] task={task:10s} H={H} trained_mean_trial_reward={trained_mean:+.4f} "
                   f"chance={chance_mean:+.4f} wall_s={train_s:.1f}", flush=True)
 
-    out_path = ROOT / "results" / "tiny_rnn_bandit.json"
+    out_path = get_path("results") / "tiny_rnn_bandit.json"
     out_path.write_text(json.dumps(results, indent=2))
     print(f"\n[tiny_rnn_bandit] wrote {out_path}")
     print("\n=== task, H, trained_mean_trial_reward, chance_mean_trial_reward ===")

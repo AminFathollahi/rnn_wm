@@ -14,11 +14,16 @@ import csv
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "results"
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
+
+RESULTS = get_path("results")
 MANIFEST = RESULTS / "manifest.jsonl"
 CANONICAL_SUP_RE = re.compile(r"^M[01]{5}_SUP_s[0-7]$")
 

@@ -39,6 +39,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
 from run_grid import (  # noqa: E402
     MANIFEST, REPORT, RESULTS, ROOT,
     _handle_signal,
@@ -69,7 +70,7 @@ def main(argv=None) -> int:
                     help="comments.txt 11.2: 1.5x the slower pilot's steps_to_criterion, rounded up to 10k")
     ap.add_argument("--seeds", type=int, default=3, help="number of seeds (0..N-1); study default 3 (§4)")
     ap.add_argument("--budget", type=str, default="72h", help="wall-clock budget, e.g. 48h / 30m / 600s")
-    ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
     ap.add_argument("--workers", type=int, default=1,
                      help="§12.3: concurrent training processes (ProcessPoolExecutor); see "
@@ -88,7 +89,7 @@ def main(argv=None) -> int:
 
     import yaml
 
-    full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+    full_cfg = load_config(args.config)
     cfg = {"steps": args.max_steps}
 
     # F1: every STAGE1_CELL is substrate=vanilla; without this the written

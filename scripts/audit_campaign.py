@@ -50,11 +50,15 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "results"
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
+
+RESULTS = get_path("results")
 MANIFEST = RESULTS / "manifest.jsonl"
 METRICS_DIR = RESULTS / "metrics"
 CHECKPOINTS_DIR = RESULTS / "checkpoints"
-ACTIVITY_DIR = RESULTS / "activity_logs"
+ACTIVITY_DIR = get_path("activity_logs")
 
 # A campaign run id: five mechanism bits, a supervision level, a seed.
 CAMPAIGN_RE = re.compile(r"^M[01]{5}(L)?_(SUP|RL)_s\d+$")

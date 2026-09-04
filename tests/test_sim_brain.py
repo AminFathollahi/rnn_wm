@@ -4,11 +4,13 @@ import numpy as np
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 from brainalign_wm.neural.dataset_contract import validate_dataset
 from brainalign_wm.neural.sim_brain.spiking_generator import SimulatedBrain, make_scrambled
 
 ROOT = __file__.rsplit("/tests/", 1)[0]
-SIM_CFG = yaml.safe_load(open(f"{ROOT}/configs/config.yaml"))["sim_brain"]
+SIM_CFG = load_config()["sim_brain"]
 
 _SMALL_CFG = {**SIM_CFG, "n_sessions": 2, "n_units_per_session": 6, "n_patients": 2, "trials_per_condition": 4}
 

@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 torch = pytest.importorskip("torch")
 
 from brainalign_wm.models.gru_cell import MaskedGRUCell, PBWMManagerCell, PlasticGRUCell
@@ -13,7 +15,7 @@ from brainalign_wm.models.hrl import HRLCore
 from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
 
 ROOT = Path(__file__).resolve().parents[1]
-FULL_CFG = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+FULL_CFG = load_config()
 CFG = FULL_CFG["model"]
 
 

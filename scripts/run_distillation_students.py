@@ -72,6 +72,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_grid import ROOT  # noqa: E402
 
+from brainalign_wm.config import get_path  # noqa: E402
 from brainalign_wm.analysis.rsa import compare_rdms  # noqa: E402
 from brainalign_wm.tasks.image_token_bank import ImageTokenBank  # noqa: E402
 from brainalign_wm.tasks.generator import TaskGenerator  # noqa: E402
@@ -95,7 +96,7 @@ CURRICULUM_OFFSET = 200_000  # step_idx offset guaranteeing CurriculumSchedule.p
 
 def _load_teacher(full_cfg: dict, device):
     front_end, core, heads = _build_model(full_cfg, 0, 0, 0, device)
-    ckpt = torch.load(ROOT / "results" / "checkpoints" / TEACHER_RUN_ID / "ckpt.pt", map_location=device, weights_only=False)
+    ckpt = torch.load(get_path("results") / "checkpoints" / TEACHER_RUN_ID / "ckpt.pt", map_location=device, weights_only=False)
     front_end.load_state_dict(ckpt["front_end"])
     core.load_state_dict(ckpt["core"])
     heads.load_state_dict(ckpt["heads"])
@@ -299,10 +300,10 @@ def main(argv=None) -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     full_cfg = _load_full_config()
-    stimuli_root = ROOT / full_cfg["paths"]["stimuli"]
+    stimuli_root = Path(full_cfg["paths"]["stimuli"])
     image_bank = ImageTokenBank(
         stimuli_root=stimuli_root, categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=args.seed)
 
@@ -349,7 +350,7 @@ def main(argv=None) -> int:
         "teacher_run_id": TEACHER_RUN_ID, "condition_order": [list(c) for c in condition_order],
         "teacher_self_consistency_rsa": teacher_self_consistency, "students": results,
     }
-    out_path = ROOT / "results" / "distillation_students.json"
+    out_path = get_path("results") / "distillation_students.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2))
     print(f"\n[distill] wrote {out_path}", flush=True)

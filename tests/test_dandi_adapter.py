@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 ROOT = Path(__file__).resolve().parents[1]
-CFG = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+CFG = load_config()
 DATA_ROOT = Path(CFG["paths"]["data_root"])
 
 pytestmark = pytest.mark.skipif(

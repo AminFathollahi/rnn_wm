@@ -19,10 +19,13 @@ like *internal* organization, orthogonal to every neural-alignment DV.
 
 Usage:
   python scripts/analyze_network_properties.py
+  python scripts/analyze_network_properties.py --campaign-only
 """
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,18 +35,35 @@ import numpy as np
 import pandas as pd
 import torch
 
+from brainalign_wm.config import get_path
 from brainalign_wm.analysis.network_properties import (
     gru_effective_connectivity, mixed_selectivity_index, modularity_q, small_worldness, weight_entropy,
 )
 from brainalign_wm.training.generate_activity_logs import _load_checkpoint, _parse_run_id, _run_id_extras
 from brainalign_wm.training.train import ROOT, _build_model, _load_full_config
 
-MANIFEST = ROOT / "results" / "manifest.jsonl"
-ACTIVITY_LOGS = ROOT / "results" / "activity_logs"
-OUT_PATH = ROOT / "results" / "network_properties.jsonl"
+RESULTS = get_path("results")
+MANIFEST = RESULTS / "manifest.jsonl"
+ACTIVITY_LOGS = get_path("activity_logs")
+OUT_PATH = RESULTS / "network_properties.jsonl"
 
 
-def _completed_run_ids() -> list[str]:
+_CAMPAIGN_MODEL_ID = re.compile(r"M[01]{5}")
+
+
+def _is_campaign_core_record(rec: dict) -> bool:
+    """Return whether a manifest row belongs to the five-arm Core campaign."""
+    model_id = str(rec.get("model_id", ""))
+    supervision = rec.get("supervision")
+    return (
+        _CAMPAIGN_MODEL_ID.fullmatch(model_id) is not None
+        and supervision in {"SUP", "RL"}
+        and str(rec.get("run_id", "")).startswith(f"{model_id}_{supervision}_s")
+        and all(key in rec for key in ("S", "M", "P", "T", "D", "seed"))
+    )
+
+
+def _completed_run_ids(campaign_only: bool = False) -> list[str]:
     if not MANIFEST.exists():
         return []
     seen = {}
@@ -57,7 +77,9 @@ def _completed_run_ids() -> list[str]:
             except json.JSONDecodeError:
                 print(f"[analyze_network_properties] skipping malformed manifest line: {line[:200]!r}", flush=True)
                 continue
-            if rec.get("status") == "completed" and not rec.get("archived", False):
+            if (rec.get("status") == "completed"
+                    and not rec.get("archived", False)
+                    and (not campaign_only or _is_campaign_core_record(rec))):
                 seen[rec["run_id"]] = rec  # last write wins (resumed/rerun rows)
     return list(seen.keys())
 
@@ -93,12 +115,20 @@ def _mixed_selectivity_for_run(run_id: str) -> "dict | None":
     return {"population_mean": pooled_mean, "n_sessions": len(per_session)}
 
 
-def main() -> int:
+def main(argv=None) -> int:
     import time
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--campaign-only", action="store_true",
+        help="analyze only active completed five-arm Core campaign runs; excludes pilots, "
+             "capacity sweeps, local-learning extensions, and other checkpoint variants",
+    )
+    args = ap.parse_args(argv)
 
     full_cfg = _load_full_config()
     device = torch.device("cpu")
-    run_ids = _completed_run_ids()
+    run_ids = _completed_run_ids(campaign_only=args.campaign_only)
     print(f"[analyze_network_properties] {len(run_ids)} completed runs in manifest", flush=True)
 
     # Incremental append (not a batch write at the end): small_worldness's
@@ -128,7 +158,7 @@ def main() -> int:
         for run_id in run_ids:
             if run_id in already_done:
                 continue
-            ckpt_path = ROOT / "results" / "checkpoints" / run_id / "ckpt.pt"
+            ckpt_path = RESULTS / "checkpoints" / run_id / "ckpt.pt"
             if not ckpt_path.exists():
                 print(f"[analyze_network_properties]   skipping {run_id} (no checkpoint on disk)", flush=True)
                 continue

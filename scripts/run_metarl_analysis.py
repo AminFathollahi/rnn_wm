@@ -26,18 +26,21 @@ the spec's actual "BLOCKS of K=20" parameter, not a free efficiency knob.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
 
-from brainalign_wm.analysis.cross_temporal import cross_temporal_decoding
-from brainalign_wm.tasks.image_token_bank import ImageTokenBank
-from brainalign_wm.tasks.nback import NBackGenerator
-from brainalign_wm.training.train import MetaRLAdapter, _build_model, run_metarl_block, sample_metarl_block
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path, load_config  # noqa: E402
+from brainalign_wm.analysis.cross_temporal import cross_temporal_decoding  # noqa: E402
+from brainalign_wm.tasks.image_token_bank import ImageTokenBank  # noqa: E402
+from brainalign_wm.tasks.nback import NBackGenerator  # noqa: E402
+from brainalign_wm.training.train import MetaRLAdapter, _build_model, run_metarl_block, sample_metarl_block  # noqa: E402
 
 
 def train_metarl(cfg: dict, S: int, steps: int, batch_size: int, seed: int, device, image_bank, nback_gen):
@@ -154,13 +157,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    full_cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    full_cfg = load_config()
     full_cfg = {**full_cfg, "nback": {**full_cfg["nback"], "sequence_length": args.sequence_length}}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     image_bank = ImageTokenBank(
-        stimuli_root=ROOT / full_cfg["paths"]["stimuli"], categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        stimuli_root=Path(full_cfg["paths"]["stimuli"]), categories=full_cfg["task"]["categories"],
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     nback_gen = NBackGenerator(full_cfg, image_bank)
 
@@ -175,7 +178,7 @@ def main() -> None:
     )
     print("\nn_decode:      ", np.round(result0["n_decode"], 3).tolist())
     print("feature_decode:", np.round(result0["feature_decode"], 3).tolist())
-    make_plot(result0["n_decode"], result0["feature_decode"], ROOT / "results" / "figures" / "metarl_decoding_7_1.png")
+    make_plot(result0["n_decode"], result0["feature_decode"], get_path("results") / "figures" / "metarl_decoding_7_1.png")
 
     print("\n=== 7.2: S=1 METARL run ===", flush=True)
     core1, heads1, adapter1 = train_metarl(

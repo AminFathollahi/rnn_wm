@@ -128,8 +128,8 @@ def main() -> int:
         return 0
 
     image_bank = ImageTokenBank(
-        stimuli_root=MODEL_ROOT / full_cfg["paths"]["stimuli"], categories=full_cfg["task"]["categories"],
-        feature_cache_path=MODEL_ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy",
+        stimuli_root=Path(full_cfg["paths"]["stimuli"]), categories=full_cfg["task"]["categories"],
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy",
         seed=0,
     )
 

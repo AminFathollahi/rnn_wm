@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import sys
 from pathlib import Path
 from collections import defaultdict
 import pandas as pd
@@ -17,7 +18,11 @@ import pandas as pd
 # package inside it). Every glob below silently matched nothing, so this
 # script reported an empty experiment. Derived from __file__ instead.
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "results"
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
+
+RESULTS = get_path("results")
 METRICS_DIR = RESULTS / "metrics"
 CHECKPOINTS_DIR = RESULTS / "checkpoints"
 MANIFEST = RESULTS / "manifest.jsonl"

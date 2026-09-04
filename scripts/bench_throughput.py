@@ -10,15 +10,18 @@ process) per (run, steps) pair so no run benefits from another's warm cache;
 output pasted into executor.md."""
 import argparse
 import shutil
+import sys
 import time
 
 import torch
 import yaml
 from pathlib import Path
 
-from brainalign_wm.training.train import train_one
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
+from brainalign_wm.training.train import train_one  # noqa: E402
 
 RUNS = {
     "s0": {"run_id": "bench_s0", "model_id": "M00000", "S": 0, "M": 0, "seed": 0, "P": 0},
@@ -38,7 +41,7 @@ def main() -> None:
     # A stale checkpoint from a prior benchmark run would make train_one
     # RESUME instead of training from scratch, silently truncating the
     # measured step count -- always start clean.
-    ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
+    ckpt_dir = get_path("results") / "checkpoints" / run["run_id"]
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
     t0 = time.time()

@@ -27,6 +27,8 @@ Implemented so far:
          violin of the deduplicated human session pool with model runs
          overlaid, `FLATGRU_RL_s0`'s early and late training snapshots
          connected by an arrow.
+  F12 -- trained-network organization and attractor structure: small-worldness,
+         stable fixed-point count, and maximum fixed-point Jacobian eigenvalue.
 
 Explicitly scoped out of this pass, not silently dropped:
 F1 (design schematic -- purely illustrative, no analysis dependency) and F8
@@ -42,7 +44,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, get_path, load_config
+
 ROOT = Path(__file__).resolve().parents[2]
+RESULTS = get_path("results")
 CELL_ORDER = [
     "M00000", "M11111",
     "M01111", "M10111", "M11011", "M11101", "M11110",
@@ -454,7 +459,7 @@ def make_f11_behavioral_position(human_behavior_csv: Path, manifest_df: pd.DataF
         ax.scatter(xs, ys, s=15, alpha=0.6, label=None)
 
     # FLATGRU_RL_s0's early-checkpoint -> late-checkpoint arrow.
-    at_criterion_csv = ROOT / "results" / "metrics" / "FLATGRU_RL_s0.csv"
+    at_criterion_csv = RESULTS / "metrics" / "FLATGRU_RL_s0.csv"
     gate_a_row = completed[completed.run_id == "FLATGRU_RL_s0"]
     if len(gate_a_row) and at_criterion_csv.exists():
         mdf = pd.read_csv(at_criterion_csv)
@@ -484,28 +489,81 @@ def make_f11_behavioral_position(human_behavior_csv: Path, manifest_df: pd.DataF
     return True
 
 
+def make_f12_organization_attractors(dv_csv: Path, out_path: Path) -> bool:
+    """Plot the explicit organization and attractor DVs assembled in the cross-DV table."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not dv_csv.exists():
+        print("[figures] F12: no dv_relationship.csv yet; run the organization and attractor analyses first. Skipping.")
+        return False
+    df = pd.read_csv(dv_csv)
+    metrics = [
+        ("small_worldness", "small-worldness (sigma)"),
+        ("n_stable_fixed_points", "stable fixed points"),
+        ("max_eig_modulus", "max Jacobian eigenvalue modulus"),
+    ]
+    metrics = [(column, label) for column, label in metrics if column in df and df[column].notna().any()]
+    if not metrics:
+        print("[figures] F12: cross-DV table has no small-worldness or attractor values. Skipping.")
+        return False
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(5.2 * len(metrics), 4.8), squeeze=False)
+    rng = np.random.RandomState(0)
+    for ax, (column, label) in zip(axes[0], metrics):
+        sub = df.dropna(subset=[column]).copy()
+        cell_column = "cell" if "cell" in sub else "model_id"
+        order = [cell for cell in CELL_ORDER if cell in set(sub[cell_column])]
+        grouped = sub.groupby(cell_column)[column]
+        means = grouped.mean().reindex(order)
+        x = np.arange(len(order))
+        ax.bar(x, means.to_numpy(), color="C0", alpha=0.65)
+        for i, cell in enumerate(order):
+            values = grouped.get_group(cell).to_numpy()
+            jitter = (rng.rand(len(values)) - 0.5) * 0.22
+            ax.scatter(np.full(len(values), i) + jitter, values, s=13, color="black", alpha=0.55, zorder=3)
+        if column == "max_eig_modulus":
+            ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label="stability boundary")
+            ax.legend(fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(order, rotation=90, fontsize=8)
+        ax.set_ylabel(label)
+        ax.set_title(label)
+    fig.suptitle("F12: network organization and attractor structure (bars=cell means, points=seeds)")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[figures] wrote {out_path}")
+    return True
+
+
 def main(argv=None) -> int:
     import yaml
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default=str(ROOT / "configs" / "config.yaml"))
-    ap.add_argument("--out-dir", default=str(ROOT / "results" / "figures"))
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument("--out-dir", default=str(RESULTS / "figures"))
     args = ap.parse_args(argv)
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
+    cfg = load_config(args.config)
     out_dir = Path(args.out_dir)
-    manifest_df = _load_manifest(ROOT / "results" / "manifest.jsonl")
+    manifest_df = _load_manifest(RESULTS / "manifest.jsonl")
 
     made_any = False
     made_any |= make_f2_behavior(manifest_df, out_dir / "F2_behavior_gates.pdf", cfg["gates"])
-    made_any |= make_f3_alignment(ROOT / "results" / "alignment_results.csv", out_dir / "F3_alignment.pdf")
-    made_any |= make_f4_reflection_shuffle(ROOT / "results" / "reflection_shuffle_lesion.csv", out_dir / "F4_reflection_shuffle.pdf")
-    made_any |= make_f5_persistence(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F5_persistence.pdf")
-    made_any |= make_f6_dynamic_stable(ROOT / "results" / "dynamics_persistence.csv", out_dir / "F6_dynamic_stable.pdf")
-    made_any |= make_f7_dv_relationship(ROOT / "results" / "dv_relationship.csv", out_dir / "F7_dv_relationship.pdf")
-    made_any |= make_f9_subpop_dissociation(ROOT / "results" / "alignment_by_session.csv", out_dir / "F9_subpop_dissociation.pdf")
-    made_any |= make_f10_tick_bin_heatmap(ROOT / "results", out_dir / "F10_tick_bin_heatmap.pdf")
-    made_any |= make_f11_behavioral_position(ROOT / "results" / "human_behavior.csv", manifest_df, out_dir / "F11_behavioral_position.pdf")
+    made_any |= make_f3_alignment(RESULTS / "alignment_results.csv", out_dir / "F3_alignment.pdf")
+    made_any |= make_f4_reflection_shuffle(RESULTS / "reflection_shuffle_lesion.csv", out_dir / "F4_reflection_shuffle.pdf")
+    made_any |= make_f5_persistence(RESULTS / "dynamics_persistence.csv", out_dir / "F5_persistence.pdf")
+    made_any |= make_f6_dynamic_stable(RESULTS / "dynamics_persistence.csv", out_dir / "F6_dynamic_stable.pdf")
+    made_any |= make_f7_dv_relationship(RESULTS / "dv_relationship.csv", out_dir / "F7_dv_relationship.pdf")
+    made_any |= make_f9_subpop_dissociation(RESULTS / "alignment_by_session.csv", out_dir / "F9_subpop_dissociation.pdf")
+    made_any |= make_f10_tick_bin_heatmap(RESULTS, out_dir / "F10_tick_bin_heatmap.pdf")
+    made_any |= make_f11_behavioral_position(RESULTS / "human_behavior.csv", manifest_df, out_dir / "F11_behavioral_position.pdf")
+    made_any |= make_f12_organization_attractors(RESULTS / "dv_relationship.csv", out_dir / "F12_organization_attractors.pdf")
 
     if not made_any:
         print("[figures] no figures produced -- no completed runs or alignment results available yet.")

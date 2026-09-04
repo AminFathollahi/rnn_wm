@@ -50,10 +50,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from brainalign_wm.config import get_path, load_config  # noqa: E402
+
 
 def _load_cfg():
-    import yaml
-    return yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    return load_config()
 
 
 def _dandi_data(cfg):
@@ -247,7 +248,7 @@ def main(argv=None) -> int:
     if mat is None:
         print("[diagnose]   no usable sessions.")
     else:
-        out_csv = ROOT / "results" / f"tick_bin_alignment_{args.run_id}.csv"
+        out_csv = get_path("results") / f"tick_bin_alignment_{args.run_id}.csv"
         pd.DataFrame(mat).to_csv(out_csv, index_label="model_tick")
         print(f"[diagnose]   wrote {out_csv} (shape {mat.shape})")
         print(f"[diagnose]   diagonal (matched relative time) mean={np.nanmean(diag_vals):.4f}, trace={np.round(diag_vals, 3).tolist()}")

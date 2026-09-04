@@ -164,9 +164,11 @@ def run(cfg: dict) -> bool:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="configs/config.yaml")
+    from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config
+
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     args = ap.parse_args(argv)
-    cfg = yaml.safe_load(open(args.config))
+    cfg = load_config(args.config)
 
     passed = run(cfg)
     if passed:

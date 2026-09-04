@@ -55,6 +55,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from brainalign_wm.config import get_path, load_config  # noqa: E402
 from brainalign_wm.tasks.multitask import YANG19_TASKS, Yang19BatchEnv, pick_task  # noqa: E402
 from brainalign_wm.training.train import _build_model, _init_state, _step_core  # noqa: E402
 
@@ -167,7 +168,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     torch.manual_seed(args.seed)
-    full_cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    full_cfg = load_config()
     m = full_cfg["model"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -180,9 +181,9 @@ def main(argv=None) -> int:
     optimizer = torch.optim.Adam(params, lr=full_cfg["train"]["lr"])
 
     run_id = RUN_ID.format(seed=args.seed)
-    ckpt_dir = ROOT / "results" / "checkpoints" / run_id
+    ckpt_dir = get_path("results") / "checkpoints" / run_id
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = ROOT / "results" / "metrics" / f"{run_id}.csv"
+    metrics_path = get_path("results") / "metrics" / f"{run_id}.csv"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
 
     onehots = {t: torch.tensor(task_onehot_vec(t), dtype=torch.float32, device=device) for t in YANG19_TASKS}
@@ -249,7 +250,7 @@ def main(argv=None) -> int:
         "wall_s_to_criterion": wall_s_to_criterion, "final_eval_pooled_decision_acc": final_eval_acc,
         "wall_clock_s": wall_clock_s,
     }
-    (ROOT / "results" / f"{run_id}_summary.json").write_text(json.dumps(record, indent=2))
+    (get_path("results") / f"{run_id}_summary.json").write_text(json.dumps(record, indent=2))
     print(f"\n[yang19] {json.dumps(record, indent=2)}")
     print(f"[yang19] wrote {ckpt_dir}/ckpt.pt, {ckpt_dir}/ckpt_at_criterion.pt "
           f"({'exists' if criterion_met else 'not written -- criterion never met'}), "

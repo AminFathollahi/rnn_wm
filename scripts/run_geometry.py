@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_grid import MANIFEST, RESULTS, load_all_records  # noqa: E402
 
+from brainalign_wm.config import get_path  # noqa: E402
 from brainalign_wm.analysis.geometry import mean_speed, pca_participation_ratio  # noqa: E402
 from brainalign_wm.analysis.network_properties import (  # noqa: E402
     degree_assortativity,
@@ -47,7 +48,7 @@ from brainalign_wm.analysis.network_properties import (  # noqa: E402
     weight_entropy,
 )
 
-ACTIVITY_LOGS = RESULTS / "activity_logs"
+ACTIVITY_LOGS = get_path("activity_logs")
 
 
 def out_csv_for(checkpoint: str) -> Path:
@@ -77,21 +78,31 @@ def _completed_records(manifest: Path = MANIFEST) -> list[dict]:
 
 
 def _build_single_trial_ensemble(df: pd.DataFrame) -> np.ndarray:
-    """[n_trials, n_timebins, n_units] from `h_flat`, restricted to
+    """[n_trials, n_timebins, n_units] from the recurrent state, restricted to
     epoch=='maintain' (the delay period -- matches
     `network_properties.py::_epoch_trial_means`'s own epoch-filtering
-    convention), each trial's ticks sorted by `t` (C3: one row per REAL
-    trial, never averaged). Trials whose tick count doesn't match the
-    session's modal tick count are dropped (a single array needs one
-    fixed T; a handful of truncated/aborted trials shouldn't blank the
-    whole ensemble)."""
+    convention). Flat runs use `h_flat`; hierarchical runs use the joint
+    `[h_worker; h_manager]` state. Each trial's ticks are sorted by `t` (C3:
+    one row per REAL trial, never averaged). Trials whose tick count doesn't
+    match the session's modal tick count are dropped (a single array needs one
+    fixed T; a handful of truncated/aborted trials shouldn't blank the whole
+    ensemble)."""
     sub = df[df["epoch"] == "maintain"]
     if len(sub) == 0:
         return np.zeros((0, 0, 0))
     per_trial = []
     for _, g in sub.groupby("trial_id"):
         g = g.sort_values("t")
-        per_trial.append(np.stack(g["h_flat"].to_numpy()))
+        flat = g["h_flat"].dropna()
+        if len(flat) == len(g):
+            per_trial.append(np.stack(flat.to_numpy()))
+            continue
+        joint = g[["h_worker", "h_manager"]].dropna()
+        if len(joint) == len(g):
+            per_trial.append(np.stack([
+                np.concatenate([worker, manager])
+                for worker, manager in zip(joint["h_worker"], joint["h_manager"])
+            ]))
     lengths = [len(x) for x in per_trial]
     if not lengths:
         return np.zeros((0, 0, 0))

@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "results"
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path, load_config  # noqa: E402
+
+RESULTS = get_path("results")
 MANIFEST = RESULTS / "manifest.jsonl"
 
 # Cell definitions matching run_grid.py
@@ -54,8 +59,7 @@ def main(argv=None) -> int:
     budget_s = float(args.budget.rstrip("h")) * 3600 if args.budget.endswith("h") else float(args.budget.rstrip("s"))
 
     from brainalign_wm.training.train import train_one
-    import yaml
-    full_cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    full_cfg = load_config()
     smoke_cfg = full_cfg["tiers"]["smoke"]
 
     cell = CELLS[args.cell]

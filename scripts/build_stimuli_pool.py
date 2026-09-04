@@ -21,9 +21,15 @@ primate/human face-patch literature would want and is noted as a limitation.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from PIL import Image
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
 
 CATEGORY_MAP = {
     "faces": ["baby", "boy", "girl", "man", "woman"],
@@ -48,9 +54,9 @@ FINE_TO_CATEGORY = {fine: cat for cat, fines in CATEGORY_MAP.items() for fine in
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default="stimuli")
+    ap.add_argument("--out", default=str(get_path("stimuli")))
     ap.add_argument("--per-class", type=int, default=80, help="images per fine class per CIFAR split")
-    ap.add_argument("--cache-dir", default="./results/cifar100_raw")
+    ap.add_argument("--cache-dir", default=str(get_path("results") / "cifar100_raw"))
     args = ap.parse_args()
 
     from torchvision.datasets import CIFAR100

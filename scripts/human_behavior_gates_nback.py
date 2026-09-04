@@ -60,18 +60,19 @@ Writes `results/human_behavior_nback.csv` (one row per patient x n-level).
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from scripts.human_behavior_gates import wilson_ci
-
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATA_ROOT = (
-    "/media/amin/EXTERNAL_USB/SMAF/Research/Representation/Working Memory/"
-    "data/kai miller/memory_nback/memory_nback/data"
-)
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path  # noqa: E402
+from scripts.human_behavior_gates import wilson_ci  # noqa: E402
+
+DEFAULT_DATA_ROOT = get_path("data_root") / "kai miller" / "memory_nback" / "memory_nback" / "data"
 USABLE_PATIENTS = ["ca", "cc"]  # al: no response field; ug: degenerate response field (see module docstring)
 WINDOW = 1600         # samples from epoch onset to allow a response in
 PRE_BASELINE = 200    # samples before onset used as the local baseline
@@ -150,7 +151,7 @@ def main(argv=None) -> int:
         return 1
     df = pd.concat(all_rows, ignore_index=True)
 
-    out = ROOT / "results" / "human_behavior_nback.csv"
+    out = get_path("results") / "human_behavior_nback.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     print(f"\n[nback-human] wrote {out} ({len(df)} patient x n rows)\n")

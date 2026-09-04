@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
 from run_grid import (  # noqa: E402
     MANIFEST, REPORT, RESULTS, ROOT,
     build_resolved_config, config_hash, git_commit, load_completed, parse_budget, resolve_train_fn,
@@ -87,7 +88,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", type=int, default=3, help="number of seeds (0..N-1); breadth-first")
     ap.add_argument("--budget", type=str, default="8h", help="wall-clock budget, e.g. 8h / 30m / 600s")
-    ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--tier", type=str, default="dev", choices=["smoke", "dev", "full"],
                      help="compute tier (default: dev, a sanity-check tier -- the full study uses --tier full)")
     args = ap.parse_args(argv)
@@ -103,7 +104,7 @@ def main(argv=None) -> int:
 
     import yaml
 
-    full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+    full_cfg = load_config(args.config)
     base_flat_units = int(full_cfg.get("model", {}).get("flat_units", 256))
     runs = enumerate_runs(seeds, base_flat_units)
     cfg = {"steps": full_cfg.get("tiers", {}).get(args.tier, {}).get("steps", 20000)}

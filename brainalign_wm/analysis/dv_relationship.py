@@ -28,18 +28,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[2]
+from brainalign_wm.config import get_path
 
-DV_CSV = ROOT / "results" / "dv_relationship.csv"
+ROOT = Path(__file__).resolve().parents[2]
+RESULTS = get_path("results")
+
+DV_CSV = RESULTS / "dv_relationship.csv"
 
 
 def _manifest_spine() -> pd.DataFrame:
     """One row per completed ablation-battery run: run_id, model_id,
-    S, M, P, T, D, seed, accuracy (load3, matching the accuracy proxy
+    supervision, S, M, P, T, D, seed, accuracy (load3, matching the accuracy proxy
     `run_all.py` already uses for its own regressions)."""
     from brainalign_wm.analysis.run_all import _is_ablation_or_catch_variant, _load_completed_runs
 
-    completed = _load_completed_runs(ROOT / "results" / "manifest.jsonl")
+    completed = _load_completed_runs(RESULTS / "manifest.jsonl")
     rows = []
     for rec in completed:
         if "P" not in rec or "T" not in rec or "D" not in rec:
@@ -48,6 +51,7 @@ def _manifest_spine() -> pd.DataFrame:
             continue  # supplementary arm / identity-catch run, not a battery cell
         rows.append({
             "run_id": rec["run_id"], "cell": rec["model_id"],
+            "supervision": rec.get("supervision"),
             "S": rec["S"], "M": rec["M"], "P": rec["P"], "T": rec["T"], "D": rec["D"],
             "seed": rec["seed"], "accuracy": rec.get("accuracy", {}).get("load3"),
         })
@@ -59,7 +63,7 @@ def _load_alignment() -> pd.DataFrame:
     primary DV (invariant to region/session-schema noise the maintenance
     path is exposed to); falls back to maintenance-epoch alignment only
     for a run where the probe column itself is entirely absent."""
-    path = ROOT / "results" / "alignment_results.csv"
+    path = RESULTS / "alignment_results.csv"
     if not path.exists():
         return pd.DataFrame(columns=["run_id", "rsa_alignment"])
     df = pd.read_csv(path)
@@ -78,7 +82,7 @@ def _load_network_properties() -> pd.DataFrame:
     (worker, manager) with no single natural aggregate, so this averages
     them -- a simplification, not a claim that worker and manager organize
     identically."""
-    path = ROOT / "results" / "network_properties.jsonl"
+    path = RESULTS / "network_properties.jsonl"
     if not path.exists():
         return pd.DataFrame(columns=["run_id", "modularity_q", "small_worldness", "mixed_selectivity"])
     latest: dict[str, dict] = {}
@@ -115,7 +119,7 @@ def _load_attractor_properties() -> pd.DataFrame:
     computed over the joint [worker;manager] state for S=1, so unlike
     `_load_network_properties` there is no separate worker/manager value
     to average here)."""
-    path = ROOT / "results" / "attractor_properties.jsonl"
+    path = RESULTS / "attractor_properties.jsonl"
     cols = ["run_id", "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus"]
     if not path.exists():
         return pd.DataFrame(columns=cols)
@@ -135,7 +139,7 @@ def _load_attractor_properties() -> pd.DataFrame:
 
 
 def _load_persistence() -> pd.DataFrame:
-    path = ROOT / "results" / "dynamics_persistence.csv"
+    path = RESULTS / "dynamics_persistence.csv"
     if not path.exists():
         return pd.DataFrame(columns=["run_id", "persistence_index"])
     df = pd.read_csv(path)
@@ -148,7 +152,7 @@ def build_dv_table() -> pd.DataFrame:
     df = _manifest_spine()
     if len(df) == 0:
         return pd.DataFrame(columns=[
-            "cell", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
+            "run_id", "cell", "supervision", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
             "modularity_q", "small_worldness", "mixed_selectivity", "persistence_index",
             "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus",
         ])
@@ -157,7 +161,7 @@ def build_dv_table() -> pd.DataFrame:
     df = df.merge(_load_attractor_properties(), on="run_id", how="left")
     df = df.merge(_load_persistence(), on="run_id", how="left")
     cols = [
-        "cell", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
+        "run_id", "cell", "supervision", "seed", "S", "M", "P", "T", "D", "accuracy", "rsa_alignment",
         "modularity_q", "small_worldness", "mixed_selectivity", "persistence_index",
         "n_fixed_points", "n_stable_fixed_points", "max_eig_modulus",
     ]

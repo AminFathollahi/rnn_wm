@@ -48,7 +48,10 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, get_path, load_config
+
 ROOT = Path(__file__).resolve().parents[2]
+RESULTS = get_path("results")
 
 # crossnobis needs multiple trials per condition per cross-validation fold;
 # a condition with too few trials gets a fold with zero members, and
@@ -991,7 +994,7 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default=str(ROOT / "configs" / "config.yaml"))
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--regenerate", action="store_true", help="force regeneration of activity logs")
     ap.add_argument(
         "--runs", default=None,
@@ -1069,10 +1072,10 @@ def main(argv=None) -> int:
     _tag = "" if args.checkpoint == "ckpt.pt" else "_" + Path(args.checkpoint).stem.removeprefix("ckpt_")
 
     def out_csv(name: str) -> Path:
-        return ROOT / "results" / f"{name}{_tag}.csv"
+        return RESULTS / f"{name}{_tag}.csv"
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
-    completed = _load_completed_runs(ROOT / "results" / "manifest.jsonl")
+    cfg = load_config(args.config)
+    completed = _load_completed_runs(RESULTS / "manifest.jsonl")
     explicit_runs = {r.strip() for r in args.runs.split(",") if r.strip()} if args.runs else None
     if explicit_runs is not None:
         missing = explicit_runs - {r["run_id"] for r in completed}
@@ -1449,7 +1452,7 @@ def main(argv=None) -> int:
                   "insufficient completed cells yet for a distributional test.")
 
         pd.DataFrame(chance_rows).to_csv(out_csv("chance_control"), index=False)
-        print(f"[run_all] wrote {ROOT / 'results' / 'chance_control.csv'}")
+        print(f"[run_all] wrote {out_csv('chance_control')}")
 
     if not args.skip_dv_relationship:
         from brainalign_wm.analysis.dv_relationship import run_dv_relationship

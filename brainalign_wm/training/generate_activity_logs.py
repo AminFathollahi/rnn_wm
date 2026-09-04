@@ -38,6 +38,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from brainalign_wm.config import get_path
 from brainalign_wm.training.logging_schema import LogRecord, ParquetLogWriter
 from brainalign_wm.training.train import ROOT, _build_model, _gate_width, _init_state, _load_full_config, _step_core
 from brainalign_wm.tasks.sternberg import context_vector
@@ -53,6 +54,8 @@ _RE_5BIT = re.compile(r"^M([01])([01])([01])([01])([01])")
 # cell family (M00L/M01L/M10L/M11L) -- dispatched to its own branch below,
 # never migrated to the 5-bit scheme.
 _RE_LOCAL = re.compile(r"^M([01])([01])L")
+RESULTS = get_path("results")
+ACTIVITY_LOGS = get_path("activity_logs")
 
 
 def _parse_model_id(model_id: str) -> tuple[int, int, int, int, int]:
@@ -107,7 +110,7 @@ def _arch_from_manifest(run_id: str) -> Optional[tuple[int, int, int, int, int]]
     has twice had a conclusion invalidated by inferring a run's architecture
     instead of reading the recorded one (F1, and the 2026-08-01 supervision
     finding); a run_id is a filename, not a record."""
-    manifest = ROOT / "results" / "manifest.jsonl"
+    manifest = RESULTS / "manifest.jsonl"
     if not manifest.exists():
         return None
     import json
@@ -154,13 +157,13 @@ def activity_log_path(run_id: str, checkpoint_name: str = "ckpt.pt", out_dir: Op
     equal-duration comparison, and a Gate A log overwriting the Gate B log
     is worse than not having one. Mirrors `scripts/run_geometry.py::
     out_csv_for`, which solved the same problem for the topology CSV."""
-    out_dir = out_dir or (ROOT / "results" / "activity_logs")
+    out_dir = out_dir or ACTIVITY_LOGS
     suffix = "" if checkpoint_name == "ckpt.pt" else "_" + Path(checkpoint_name).stem.removeprefix("ckpt_")
     return out_dir / f"{run_id}{suffix}.parquet"
 
 
 def _load_checkpoint(front_end, core, heads, run_id: str, device, checkpoint_name: str = "ckpt.pt") -> int:
-    ckpt_path = ROOT / "results" / "checkpoints" / run_id / checkpoint_name
+    ckpt_path = RESULTS / "checkpoints" / run_id / checkpoint_name
     if not ckpt_path.exists():
         raise FileNotFoundError(f"no checkpoint for {run_id} at {ckpt_path}")
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -172,7 +175,7 @@ def _load_checkpoint(front_end, core, heads, run_id: str, device, checkpoint_nam
 
 def _stimulus_features_for_session(session_id: str) -> Optional[dict]:
     """Loads the cached (PicID -> feature) map for one session, if present."""
-    cache_dir = ROOT / "results" / "feat_cache" / "dataset_stimuli"
+    cache_dir = get_path("feature_cache") / "dataset_stimuli"
     path = cache_dir / f"{session_id}.npz"
     if not path.exists():
         return None
@@ -376,7 +379,7 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
     reflective_gate = ReflectiveGate(cfg["mechanisms"]["reflection_lambda"], cfg["mechanisms"]["reflection_beta"]) if M else None
 
     run_id = f"{model_id}_s{seed}_chance"
-    out_dir = out_dir or (ROOT / "results" / "activity_logs")
+    out_dir = out_dir or ACTIVITY_LOGS
     out_path = out_dir / f"{run_id}.parquet"
     trials = dandi_data.trials()
 

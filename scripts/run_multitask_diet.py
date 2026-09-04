@@ -11,6 +11,7 @@ acceptance run, output pasted into executor.md.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,10 @@ import torch
 import torch.nn.functional as F
 import yaml
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import load_config  # noqa: E402
 from brainalign_wm.tasks.multitask import (
     C_DIM_MULTITASK,
     DIET_TASKS,
@@ -27,7 +32,7 @@ from brainalign_wm.tasks.multitask import (
     obs_dim_for,
     pick_task,
     task_context_vector,
-)
+)  # noqa: E402
 from brainalign_wm.training.train import (
     _build_model,
     _image_features_all_ticks,
@@ -35,9 +40,7 @@ from brainalign_wm.training.train import (
     _step_core,
     _target_action,
     run_multitask_neurogym_trial,
-)
-
-ROOT = Path(__file__).resolve().parent.parent
+)  # noqa: E402
 
 
 def run_sternberg_diet_trial(front_end_mt, core, heads, image_bank, trial_steps_batch, feature_dim, device):
@@ -104,7 +107,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    full_cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    full_cfg = load_config()
     m = full_cfg["model"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     max_ticks = int(full_cfg["task"]["multitask_max_ticks"])
@@ -121,8 +124,8 @@ def main() -> None:
     from brainalign_wm.tasks.image_token_bank import ImageTokenBank
 
     image_bank = ImageTokenBank(
-        stimuli_root=ROOT / full_cfg["paths"]["stimuli"], categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        stimuli_root=Path(full_cfg["paths"]["stimuli"]), categories=full_cfg["task"]["categories"],
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=args.seed)
 

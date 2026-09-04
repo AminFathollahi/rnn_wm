@@ -2,6 +2,8 @@
 matched within tolerance, all S x M x P cell combinations pass a forward
 pass, and the hierarchical core's manager-tick semantics are correct."""
 import yaml
+
+from brainalign_wm.config import load_config
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -12,7 +14,7 @@ from brainalign_wm.models.heads import Heads, N_ACTIONS
 from brainalign_wm.models.hrl import HRLCore
 
 ROOT = __file__.rsplit("/tests/", 1)[0]
-FULL_CFG = yaml.safe_load(open(f"{ROOT}/configs/config.yaml"))
+FULL_CFG = load_config()
 CFG = FULL_CFG["model"]
 BATCH = 4
 

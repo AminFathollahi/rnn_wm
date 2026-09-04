@@ -68,6 +68,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
 from run_grid import (  # noqa: E402
     MANIFEST, RESULTS, ROOT,
     build_resolved_config, config_hash, git_commit, resolve_train_fn, resolved_config_path,
@@ -111,7 +112,7 @@ def main(argv=None) -> int:
                          "M{s}0000_pilot_{substrate}_s{seed}. Pass this even for a diagnostic arm whose values "
                          "happen to match the historical defaults (the current-init/legacy control), so it gets "
                          "its own run_id rather than colliding with the original pilot's")
-    ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     args = ap.parse_args(argv)
 
     RESULTS.mkdir(exist_ok=True)
@@ -119,7 +120,7 @@ def main(argv=None) -> int:
 
     import yaml
 
-    full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+    full_cfg = load_config(args.config)
     if not args.diagnostic:
         # run_id carries the substrate: the invalid GRU pilot already
         # occupies `M{s}0000_pilot_s{seed}` in the manifest and its

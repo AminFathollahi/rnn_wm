@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("neurogym")
 
@@ -27,7 +29,7 @@ from brainalign_wm.tasks.multitask import (
 )
 
 ROOT = __file__.rsplit("/tests/", 1)[0]
-FULL_CFG = yaml.safe_load(open(f"{ROOT}/configs/config.yaml"))
+FULL_CFG = load_config()
 BOTTLENECK = FULL_CFG["model"]["bottleneck"]
 BATCH = 4
 

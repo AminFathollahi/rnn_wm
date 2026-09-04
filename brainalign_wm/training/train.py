@@ -138,7 +138,10 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import yaml
 
+from brainalign_wm.config import get_path, load_config
+
 ROOT = Path(__file__).resolve().parents[2]
+RESULTS = get_path("results")
 # `scripts/` has no __init__.py (namespace package) and is only on sys.path
 # when the interpreter's own entry point lives at the repo root (e.g. `python
 # run_grid.py`, or pytest's rootdir insertion) -- NOT when a script inside
@@ -169,7 +172,7 @@ class _MetricsLogger:
     ]
 
     def __init__(self, run_id: str, resume: bool = False):
-        self.path = ROOT / "results" / "metrics" / f"{run_id}.csv"
+        self.path = RESULTS / "metrics" / f"{run_id}.csv"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # A resumed run (comments.txt §16 item 16.1) must not truncate the
         # accuracy trace Gate B is derived from: append when the caller
@@ -209,7 +212,7 @@ class _MetricsLogger:
 
 
 def _load_full_config() -> dict:
-    return yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    return load_config()
 
 
 def _checkpoint_state(
@@ -1648,7 +1651,7 @@ def _human_percentiles(accuracy: dict) -> dict:
     dataset that ran them). `None` per load if `results/human_behavior.csv`
     doesn't exist yet (e.g. a smoke test run before
     `scripts/human_behavior_gates.py` has ever been run)."""
-    path = ROOT / "results" / "human_behavior.csv"
+    path = RESULTS / "human_behavior.csv"
     if not path.exists():
         return {"load1": None, "load2": None, "load3": None}
     import pandas as pd
@@ -1882,7 +1885,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # instead of shrinking the default for every cell.
     batch_size = int(cfg.get("batch_size", t_cfg.get("batch_size", 1)))
 
-    stimuli_root = ROOT / full_cfg["paths"]["stimuli"]
+    stimuli_root = Path(full_cfg["paths"]["stimuli"])
     if not stimuli_root.exists():
         _crit = full_cfg["gates"]["criterion"]
         return {"status": "failed", "error": f"stimuli pool missing at {stimuli_root}; run scripts/build_stimuli_pool.py",
@@ -1891,7 +1894,7 @@ def train_one(run: dict, cfg: dict) -> dict:
 
     image_bank = ImageTokenBank(
         stimuli_root=stimuli_root, categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=seed)
 
@@ -1921,7 +1924,7 @@ def train_one(run: dict, cfg: dict) -> dict:
         }
         max_ticks = int(full_cfg["task"]["multitask_max_ticks"])
 
-    ckpt_dir = ROOT / "results" / "checkpoints" / run_id
+    ckpt_dir = RESULTS / "checkpoints" / run_id
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / "ckpt.pt"
     start_step = 0

@@ -45,7 +45,7 @@ def test_human_percentiles_survives_dataset_code_csv_roundtrip(tmp_path, monkeyp
 
     from brainalign_wm.training import train as train_mod
 
-    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(train_mod, "RESULTS", tmp_path / "results")
     (tmp_path / "results").mkdir()
     pd.DataFrame([
         {"dataset": "000469", "session": "s1", "load": 1, "accuracy": 0.70},

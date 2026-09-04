@@ -1,11 +1,7 @@
-# Root configuration. Keys are grouped by subsystem (model, mechanisms, task,
-# sim_brain, analysis, train, gates, neural, tiers).
-
-paths:
-  data_root: /media/amin/EXTERNAL_USB/SMAF/Research/Representation/Working Memory/data
-  stimuli: ./stimuli                      # ImageTokenBank broad training pool
-  results: ./results
-  feature_cache: ./results/feat_cache
+# Scientific experiment configuration. Keys are grouped by subsystem (model,
+# mechanisms, task, sim_brain, analysis, train, gates, neural, tiers).
+# Machine/storage locations are deliberately separate in configs/paths.yaml
+# and are injected by brainalign_wm.config.load_config().
 
 # The 5-arm bio-plausibility ABLATION BATTERY (v6.0, comments.txt 2026-07-08;
 # 3 interaction-probe cells added 2026-07-08 per user request):

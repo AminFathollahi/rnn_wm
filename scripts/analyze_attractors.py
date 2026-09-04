@@ -31,10 +31,13 @@ points are a pure property of the trained model's own dynamics.
 
 Usage:
   python scripts/analyze_attractors.py
+  python scripts/analyze_attractors.py --campaign-only
 """
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -45,14 +48,16 @@ import numpy as np
 import pandas as pd
 import torch
 
+from brainalign_wm.config import get_path, load_config
 from brainalign_wm.analysis.attractors import find_fixed_points, summarize_fixed_points
 from brainalign_wm.tasks.sternberg import context_vector
 from brainalign_wm.training.generate_activity_logs import _load_checkpoint, _parse_run_id, _run_id_extras
 from brainalign_wm.training.train import ROOT, _build_model, _load_full_config
 
-MANIFEST = ROOT / "results" / "manifest.jsonl"
-ACTIVITY_LOGS = ROOT / "results" / "activity_logs"
-OUT_PATH = ROOT / "results" / "attractor_properties.jsonl"
+RESULTS = get_path("results")
+MANIFEST = RESULTS / "manifest.jsonl"
+ACTIVITY_LOGS = get_path("activity_logs")
+OUT_PATH = RESULTS / "attractor_properties.jsonl"
 
 MAX_REAL_STARTS = 64       # real maintenance-epoch hidden states sampled per run (bounds optimizer cost)
 N_JITTER_PER_START = 2     # Gaussian-jittered copies per real start, for basin coverage beyond exactly-observed states
@@ -71,16 +76,31 @@ def _resolved_cfg_for_run(run_id: str, full_cfg: dict) -> dict:
     120 cells and has no such per-run file, so this falls back to the
     shared `full_cfg` for those (matching `analyze_network_properties.py`'s
     existing assumption, which IS correct for the campaign)."""
-    path = ROOT / "results" / f"resolved_config_{run_id.lower()}.yaml"
+    path = RESULTS / f"resolved_config_{run_id.lower()}.yaml"
     if path.exists():
         import yaml
 
         with path.open() as f:
-            return yaml.safe_load(f)
+            return load_config(path)
     return full_cfg
 
 
-def _completed_run_ids() -> list[str]:
+_CAMPAIGN_MODEL_ID = re.compile(r"M[01]{5}")
+
+
+def _is_campaign_core_record(rec: dict) -> bool:
+    """Return whether a manifest row belongs to the five-arm Core campaign."""
+    model_id = str(rec.get("model_id", ""))
+    supervision = rec.get("supervision")
+    return (
+        _CAMPAIGN_MODEL_ID.fullmatch(model_id) is not None
+        and supervision in {"SUP", "RL"}
+        and str(rec.get("run_id", "")).startswith(f"{model_id}_{supervision}_s")
+        and all(key in rec for key in ("S", "M", "P", "T", "D", "seed"))
+    )
+
+
+def _completed_run_ids(campaign_only: bool = False) -> list[str]:
     if not MANIFEST.exists():
         return []
     seen = {}
@@ -94,7 +114,9 @@ def _completed_run_ids() -> list[str]:
             except json.JSONDecodeError:
                 print(f"[analyze_attractors] skipping malformed manifest line: {line[:200]!r}", flush=True)
                 continue
-            if rec.get("status") == "completed" and not rec.get("archived", False):
+            if (rec.get("status") == "completed"
+                    and not rec.get("archived", False)
+                    and (not campaign_only or _is_campaign_core_record(rec))):
                 seen[rec["run_id"]] = rec
     return list(seen.keys())
 
@@ -184,10 +206,18 @@ def _sample_starts(run_id: str, S: int) -> "np.ndarray | None":
     return np.concatenate([real, *jittered], axis=0)
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--campaign-only", action="store_true",
+        help="analyze only active completed five-arm Core campaign runs; excludes pilots, "
+             "capacity sweeps, local-learning extensions, and other checkpoint variants",
+    )
+    args = ap.parse_args(argv)
+
     full_cfg = _load_full_config()
     device = torch.device("cpu")
-    run_ids = _completed_run_ids()
+    run_ids = _completed_run_ids(campaign_only=args.campaign_only)
     print(f"[analyze_attractors] {len(run_ids)} completed runs in manifest", flush=True)
 
     already_done = set()
@@ -207,7 +237,7 @@ def main() -> int:
         for run_id in run_ids:
             if run_id in already_done:
                 continue
-            ckpt_path = ROOT / "results" / "checkpoints" / run_id / "ckpt.pt"
+            ckpt_path = RESULTS / "checkpoints" / run_id / "ckpt.pt"
             if not ckpt_path.exists():
                 print(f"[analyze_attractors]   skipping {run_id} (no checkpoint on disk)", flush=True)
                 continue

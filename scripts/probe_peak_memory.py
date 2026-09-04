@@ -38,8 +38,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import run_grid  # noqa: E402
+from brainalign_wm.config import get_path, load_config  # noqa: E402
 
-RESOLVED_CONFIG = ROOT / "results" / "resolved_config_grid_SUP.yaml"
+RESOLVED_CONFIG = get_path("results") / "resolved_config_grid_SUP.yaml"
 CARD_CAPACITY_MIB = 12227
 
 # D49's cell list (comments.txt §21.1): the S=1 plastic worst case that
@@ -58,7 +59,7 @@ def _bits(model_id: str) -> tuple[int, int, int, int, int]:
 
 
 def load_full_cfg(checkpointing: bool | None = None) -> dict:
-    cfg = yaml.safe_load(RESOLVED_CONFIG.read_text())
+    cfg = load_config(RESOLVED_CONFIG)
     if checkpointing is not None:
         cfg = {**cfg, "mechanisms": {**cfg["mechanisms"], "plastic_gradient_checkpointing": checkpointing}}
     return cfg
@@ -103,8 +104,8 @@ def probe_one_cell(model_id: str, checkpointing: bool, seed: int = 0) -> dict:
     S, M, P, T, D = _bits(model_id)
 
     image_bank = ImageTokenBank(
-        stimuli_root=ROOT / full_cfg["paths"]["stimuli"], categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        stimuli_root=Path(full_cfg["paths"]["stimuli"]), categories=full_cfg["task"]["categories"],
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=seed)
     trial_batch = build_load3_batch(task_gen, full_cfg, int(full_cfg["train"]["batch_size"]), seed=seed)

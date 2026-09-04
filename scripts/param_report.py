@@ -10,12 +10,14 @@ about).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import torch
-import yaml
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import load_config  # noqa: E402
 
 
 def _mask_aware_param_count(module: torch.nn.Module) -> int:
@@ -85,7 +87,7 @@ def max_pairwise_deviation(values: list[int]) -> float:
 
 
 def main() -> None:
-    full_cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    full_cfg = load_config()
     rows = build_table(full_cfg)
 
     print("| model_id | S | M | P | T | D | n_units | n_synapses_effective | n_params_total | dev_from_S_group_mean |")

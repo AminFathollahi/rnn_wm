@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 from brainalign_wm.tasks.curriculum import CurriculumSchedule, phase_at
 from brainalign_wm.tasks.sternberg import SternbergGenerator, context_vector
 from brainalign_wm.tasks.generator import TaskGenerator
 
 ROOT = Path(__file__).resolve().parents[1]
-FULL_CFG = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+FULL_CFG = load_config()
 STIMULI_READY = (ROOT / "stimuli" / "faces").exists()
 
 pytestmark_needs_stimuli = pytest.mark.skipif(

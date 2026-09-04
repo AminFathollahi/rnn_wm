@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path, load_config  # noqa: E402
 
 
 def wilson_ci(n_correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -114,7 +116,7 @@ def collect(data_root: Path, datasets: list[str]) -> pd.DataFrame:
 
 
 def main(argv=None) -> int:
-    cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    cfg = load_config()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-root", type=str, default=cfg["paths"]["data_root"])
     ap.add_argument("--datasets", type=str, nargs="+",
@@ -126,7 +128,7 @@ def main(argv=None) -> int:
         print("[human] no sessions read; cannot derive gates.")
         return 1
 
-    out = ROOT / "results" / "human_behavior.csv"
+    out = get_path("results") / "human_behavior.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     print(f"\n[human] wrote {out}  ({len(df)} session x load rows)\n")

@@ -37,10 +37,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 import yaml
 
+from brainalign_wm.config import get_path, load_config
 from brainalign_wm.analysis.run_all import ROOT, _aggregate_maintenance, align_one_run
 
-MANIFEST = ROOT / "results" / "manifest.jsonl"
-OUT_PATH = ROOT / "results" / "alignment_extended_variants.csv"
+RESULTS = get_path("results")
+MANIFEST = RESULTS / "manifest.jsonl"
+OUT_PATH = RESULTS / "alignment_extended_variants.csv"
 
 # (variant run_id prefix family, base Core run_id it should be compared
 # against) -- every ablation/idcatch/perf-baseline run_id is
@@ -82,7 +84,7 @@ def _variant_runs() -> list[dict]:
 
 
 def main() -> int:
-    cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    cfg = load_config()
     from brainalign_wm.neural.adapters.dandi_nwb import DandiSternbergTierA
 
     dandi_data = DandiSternbergTierA(

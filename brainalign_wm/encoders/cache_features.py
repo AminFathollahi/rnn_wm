@@ -8,15 +8,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import yaml
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="configs/config.yaml")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     args = ap.parse_args(argv)
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
+    cfg = load_config(args.config)
     paths = cfg["paths"]
 
     from brainalign_wm.tasks.image_token_bank import ImageTokenBank

@@ -52,6 +52,7 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from brainalign_wm.config import get_path  # noqa: E402
 from brainalign_wm.analysis.geometry import pca_participation_ratio  # noqa: E402
 
 
@@ -132,7 +133,7 @@ def main(argv=None) -> int:
         results[task] = {"pca_participation_ratio": pr, "n_timebins": int(go_on), "n_trials": args.batch_size}
         print(f"[yang19-tier2] task={task:14s} pre-go PR={pr:.3f} (T={go_on}, B={args.batch_size})", flush=True)
 
-    out = ROOT / "results" / "yang19_pretrained_tier2_geometry.json"
+    out = get_path("results") / "yang19_pretrained_tier2_geometry.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"model_dir": str(model_dir), "hp_subset": {
         k: hp[k] for k in ("n_rnn", "n_input", "n_output", "activation", "rnn_type", "alpha")

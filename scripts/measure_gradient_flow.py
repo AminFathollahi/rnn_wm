@@ -189,8 +189,8 @@ def main() -> int:
     feature_dim = m["feature_dim"]
 
     image_bank = ImageTokenBank(
-        stimuli_root=ROOT / full_cfg["paths"]["stimuli"], categories=full_cfg["task"]["categories"],
-        feature_cache_path=ROOT / full_cfg["paths"]["feature_cache"] / "image_token_bank.npy", seed=0,
+        stimuli_root=Path(full_cfg["paths"]["stimuli"]), categories=full_cfg["task"]["categories"],
+        feature_cache_path=Path(full_cfg["paths"]["feature_cache"]) / "image_token_bank.npy", seed=0,
     )
     task_gen = TaskGenerator(full_cfg, image_bank, seed=0)
 

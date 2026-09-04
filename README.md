@@ -76,15 +76,41 @@ result, not a reused constant.
 | `brainalign_wm/analysis/` | Representational similarity analysis, demixed PCA, cross-temporal decoding, encoding models, statistics |
 | `brainalign_wm/training/` | Logging schema and the single-run training entrypoint (`train.py::train_one`) |
 | `configs/config.yaml` | The project's configuration contract |
+| `configs/paths.yaml` | Runtime storage locations (data, stimuli, results, caches, activity logs) |
 | `advisor.md` | The scientific record: current state, decision ledger, guardrails, literature-to-decision traceability, and the frozen preregistration (hypotheses, analysis lock, amendments) as an appendix |
 | `implementation.md` | How the model and pipeline are actually built: architectures, mechanisms, task/curriculum generation, training loop, metrics schema, config contract |
 | `executor.md` | The execution record: current status, next steps, and the full implementation chronology with acceptance output |
 
+## Configuration and paths
+
+Scientific settings live in `configs/config.yaml`; machine-specific storage
+locations live only in `configs/paths.yaml`. Every training, replay, analysis,
+figure, and audit entry point resolves paths through `brainalign_wm.config`.
+Inspect the effective configuration before a run with:
+
+```bash
+python -m brainalign_wm.config
+```
+
+Relative entries in `configs/paths.yaml` are anchored at the repository root.
+For another machine or scheduler, either select a complete replacement file:
+
+```bash
+export BRAINALIGN_WM_PATHS_CONFIG=/path/to/paths.yaml
+```
+
+or override individual entries with `BRAINALIGN_WM_DATA_ROOT`,
+`BRAINALIGN_WM_STIMULI_ROOT`, `BRAINALIGN_WM_RESULTS_ROOT`,
+`BRAINALIGN_WM_FEATURE_CACHE_ROOT`, and
+`BRAINALIGN_WM_ACTIVITY_LOGS_ROOT`. The human recordings are read directly
+from the configured `data_root` via `h5py` (no `pynwb` dependency required).
+
+Resolved run configs contain the effective paths for provenance, but loading
+an old resolved config always injects the current runtime paths. Moving a
+volume therefore does not require editing historical artifacts or scripts.
+
 ## Notes
 
-- Configuration: `configs/config.yaml`, in particular `paths.data_root` for
-  the external-drive location of the human single-neuron recordings, read
-  directly via `h5py` (no `pynwb` dependency required).
 - Scope: visual working memory only in the core experimental design; the
   training image pool is broad and general-purpose, while alignment against
   the neural recordings uses each session's exact stimulus images.

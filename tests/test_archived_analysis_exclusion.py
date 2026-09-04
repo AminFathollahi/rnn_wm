@@ -25,3 +25,22 @@ def test_standard_analysis_loaders_exclude_archived_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(analyze_attractors, "MANIFEST", manifest)
     assert analyze_network_properties._completed_run_ids() == ["LIVE"]
     assert analyze_attractors._completed_run_ids() == ["LIVE"]
+
+
+def test_campaign_only_analysis_loaders_exclude_noncampaign_runs(tmp_path, monkeypatch):
+    manifest = tmp_path / "manifest.jsonl"
+    campaign = {
+        "run_id": "M00000_SUP_s0", "model_id": "M00000", "supervision": "SUP",
+        "S": 0, "M": 0, "P": 0, "T": 0, "D": 0, "seed": 0, "status": "completed",
+    }
+    local_learning = {
+        "run_id": "M00L_RL_s0", "model_id": "M00L", "supervision": "RL",
+        "S": 0, "M": 0, "L": 1, "seed": 0, "status": "completed",
+    }
+    pilot = {"run_id": "M00000_H2_s0", "model_id": "M00000_H2", "status": "completed"}
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in (campaign, local_learning, pilot)))
+
+    monkeypatch.setattr(analyze_network_properties, "MANIFEST", manifest)
+    monkeypatch.setattr(analyze_attractors, "MANIFEST", manifest)
+    assert analyze_network_properties._completed_run_ids(campaign_only=True) == ["M00000_SUP_s0"]
+    assert analyze_attractors._completed_run_ids(campaign_only=True) == ["M00000_SUP_s0"]

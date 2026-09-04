@@ -12,15 +12,18 @@ the leak logic lives in one place.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
 import yaml
 from sklearn.linear_model import LogisticRegression
 
-from brainalign_wm.tasks.sternberg import SternbergGenerator
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from brainalign_wm.config import get_path, load_config  # noqa: E402
+from brainalign_wm.tasks.sternberg import SternbergGenerator  # noqa: E402
 
 
 def generate_probe_dataset(
@@ -72,13 +75,13 @@ def conjunction_accuracy(category_match: np.ndarray, ctx: np.ndarray, y: np.ndar
 
 
 def main() -> None:
-    cfg = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+    cfg = load_config()
     from brainalign_wm.tasks.image_token_bank import ImageTokenBank
 
     bank = ImageTokenBank(
-        stimuli_root=ROOT / "stimuli",
+        stimuli_root=get_path("stimuli"),
         categories=cfg["task"]["categories"],
-        feature_cache_path=ROOT / "results" / "feat_cache" / "leak_check.npy",
+        feature_cache_path=get_path("feature_cache") / "leak_check.npy",
         seed=0,
     )
     ctx, category_match, truth = generate_probe_dataset(cfg, bank, n_trials=3000)

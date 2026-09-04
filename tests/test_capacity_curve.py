@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 ROOT = Path(__file__).resolve().parents[1]
-CFG = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+CFG = load_config()
 STIMULI_READY = (ROOT / "stimuli" / "faces").exists()
 
 import sys  # noqa: E402

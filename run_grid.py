@@ -70,8 +70,10 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from brainalign_wm.config import DEFAULT_CONFIG_PATH, get_path, load_config
+
 ROOT = Path(__file__).resolve().parent
-RESULTS = ROOT / "results"
+RESULTS = get_path("results")
 MANIFEST = RESULTS / "manifest.jsonl"
 REPORT = RESULTS / "RUN_REPORT.md"
 
@@ -800,7 +802,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", type=int, default=5, help="number of seeds (0..N-1); breadth-first; study default 5")
     ap.add_argument("--budget", type=str, default="10h", help="wall-clock budget, e.g. 10h / 30m / 600s")
-    ap.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
+    ap.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--tier", type=str, default="full", choices=["smoke", "dev", "full"],
                      help="compute tier (default: full, the 150k-step results tier the study uses)")
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
@@ -868,7 +870,7 @@ def main(argv=None) -> int:
         print("[run_grid] pyyaml not installed; using scaffold defaults.", flush=True)
     else:
         try:
-            full_cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+            full_cfg = load_config(args.config)
             cfg.update(full_cfg.get("tiers", {}).get(args.tier, {}))
         except FileNotFoundError:
             print(f"[run_grid] config not found at {args.config}; using scaffold defaults.", flush=True)

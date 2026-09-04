@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 import yaml
 
+from brainalign_wm.config import load_config
+
 ROOT = Path(__file__).resolve().parents[1]
-CFG = yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())
+CFG = load_config()
 STIMULI_READY = (ROOT / "stimuli" / "faces").exists()
 
 pytestmark = pytest.mark.skipif(not STIMULI_READY, reason="stimuli/ pool not built yet")
@@ -559,7 +561,7 @@ def test_metrics_logger_resume_appends_without_truncating(tmp_path, monkeypatch)
     the original rows, and write the header exactly once."""
     import brainalign_wm.training.train as train_mod
 
-    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(train_mod, "RESULTS", tmp_path / "results")
 
     logger = train_mod._MetricsLogger("RESUME_TEST")
     logger.log({"step": 2000, "train_loss": "0.5"})
@@ -583,7 +585,7 @@ def test_metrics_logger_skips_duplicate_step_at_resume_boundary(tmp_path, monkey
     eval_every), it must not double-write that row."""
     import brainalign_wm.training.train as train_mod
 
-    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(train_mod, "RESULTS", tmp_path / "results")
 
     logger = train_mod._MetricsLogger("RESUME_DUP_TEST")
     logger.log({"step": 4000, "train_loss": "0.4"})
@@ -610,7 +612,7 @@ def test_metrics_logger_non_resume_overwrites_stale_file(tmp_path, monkeypatch):
 
     import brainalign_wm.training.train as train_mod
 
-    monkeypatch.setattr(train_mod, "ROOT", tmp_path)
+    monkeypatch.setattr(train_mod, "RESULTS", tmp_path / "results")
 
     first = train_mod._MetricsLogger("FRESH_TEST")
     first.log({"step": 1, "train_loss": "0.9"})

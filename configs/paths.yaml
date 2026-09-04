@@ -1,0 +1,18 @@
+# Runtime storage locations. This is the only tracked file that should need
+# editing after moving data or outputs to another machine/volume.
+#
+# Relative paths are resolved from the repository root. Any entry can be
+# overridden without editing this file:
+#   BRAINALIGN_WM_DATA_ROOT
+#   BRAINALIGN_WM_STIMULI_ROOT
+#   BRAINALIGN_WM_RESULTS_ROOT
+#   BRAINALIGN_WM_FEATURE_CACHE_ROOT
+#   BRAINALIGN_WM_ACTIVITY_LOGS_ROOT
+# Set BRAINALIGN_WM_PATHS_CONFIG to select an entirely different paths file.
+
+paths:
+  data_root: /media/amin/ADATA HD710 PRO/Research/Representation/Working Memory/data
+  stimuli: stimuli
+  results: results
+  feature_cache: results/feat_cache
+  activity_logs: /media/amin/ADATA HD710 PRO/Research/Representation/Working Memory/RNNs/activity_logs

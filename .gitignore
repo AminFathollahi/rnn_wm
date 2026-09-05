@@ -1,21 +1,42 @@
-# results & caches
-results/
-!results/.gitkeep
-**/feat_cache/
-stimuli/
-
-# internal working documents (not part of the shipped codebase)
+# Private project notes and agent configuration
+.agents/
+.claude/
+.codex/
+CLAUDE.md
+advisor.md
+advisor_prompt.md
+executor.md
+implementation.md
 RESPONSES.md
 comments.txt
 
-# python
+# Generated data, results, and run logs
+data/
+logs/
+paper/
+results/
+!results/.gitkeep
+stimuli/
+**/feat_cache/
+*.log
+*.pid
+
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 .ipynb_checkpoints/
+.coverage
+htmlcov/
 build/
 dist/
 
-# env
+# Local environments and editor/OS files
 .venv/
+venv/
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/

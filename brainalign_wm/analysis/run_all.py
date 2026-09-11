@@ -873,12 +873,7 @@ def align_one_run(
     log_path = activity_log_path(run_id, checkpoint)
     if force_regenerate or not log_path.exists():
         log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
-    try:
-        df = read_log(log_path)
-    except Exception as exc:  # a power loss can leave a parquet file without its footer
-        print(f"[run_all] regenerating unreadable activity log {log_path} ({type(exc).__name__}: {exc})")
-        log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
-        df = read_log(log_path)
+    df = read_log(log_path)
     is_hierarchical = len(df) > 0 and df["h_flat"].iloc[0] is None
 
     maintenance_rows, probe_rows = [], []
@@ -915,19 +910,8 @@ def reflection_shuffle_lesion_for_run(run_id: str, dandi_data, checkpoint: str =
     normal_rows = _maintenance_alignment_for_run(run_id, normal_df, dandi_data, None)
     normal_ok = [r for r in normal_rows if r.get("status") == "ok"]
 
-    # The shuffled replay is a durable, deterministic artifact. Reuse it on
-    # restart just as `align_one_run` reuses the ordinary activity log; this
-    # prevents an interrupted secondary-analysis campaign from needlessly
-    # replaying every M=1 run before it can resume the statistical work.
-    shuffled_path = activity_log_path(f"{run_id}__reflection_shuffled", checkpoint)
-    if not shuffled_path.exists():
-        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
-    try:
-        shuffled_df = read_log(shuffled_path)
-    except Exception as exc:  # same atomic-replay recovery as the normal log
-        print(f"[run_all] regenerating unreadable reflection-shuffled log {shuffled_path} ({type(exc).__name__}: {exc})")
-        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
-        shuffled_df = read_log(shuffled_path)
+    shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
+    shuffled_df = read_log(shuffled_path)
     shuffled_rows = _maintenance_alignment_for_run(run_id, shuffled_df, dandi_data, None)
     shuffled_ok = [r for r in shuffled_rows if r.get("status") == "ok"]
 
@@ -1016,16 +1000,9 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
     from brainalign_wm.training.generate_activity_logs import generate_chance_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
+    log_path = generate_chance_activity_log(model_id, seed, dandi_data)
+    df = read_log(log_path)
     run_id = f"{model_id}_s{seed}_chance"
-    log_path = get_path("activity_logs") / f"{run_id}.parquet"
-    if not log_path.exists():
-        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
-    try:
-        df = read_log(log_path)
-    except Exception as exc:
-        print(f"[run_all] regenerating unreadable chance log {log_path} ({type(exc).__name__}: {exc})")
-        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
-        df = read_log(log_path)
 
     maintenance_rows = _maintenance_alignment_for_run(run_id, df, dandi_data, None)
     probe_row = _probe_alignment_for_run(run_id, df, dandi_data, None)
@@ -1044,11 +1021,6 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    ap.add_argument(
-        "--out-dir", default=None,
-        help="directory for this invocation's CSV outputs. Inputs (manifest, checkpoints, and activity logs) "
-        "remain at their configured locations. Used by analysis.sh to keep one resumable result shard per run.",
-    )
     ap.add_argument("--regenerate", action="store_true", help="force regeneration of activity logs")
     ap.add_argument(
         "--runs", default=None,
@@ -1125,11 +1097,8 @@ def main(argv=None) -> int:
 
     _tag = "" if args.checkpoint == "ckpt.pt" else "_" + Path(args.checkpoint).stem.removeprefix("ckpt_")
 
-    out_dir = Path(args.out_dir) if args.out_dir else RESULTS
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     def out_csv(name: str) -> Path:
-        return out_dir / f"{name}{_tag}.csv"
+        return RESULTS / f"{name}{_tag}.csv"
 
     cfg = load_config(args.config)
     completed = _load_completed_runs(RESULTS / "manifest.jsonl")

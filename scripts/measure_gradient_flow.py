@@ -224,6 +224,19 @@ def main() -> int:
         paths=[("flat", core.cell.weight_hh, core.cell.mask)],
     )
 
+    # The leaky rate cores parameterize their recurrent matrix (rectified
+    # magnitudes times a fixed sign vector, a rank-R product, or a matrix
+    # scaled by the resting synaptic efficacy), so the radius and the
+    # gradient must be read off the EFFECTIVE matrix they build, not off a
+    # single stored weight.
+    for substrate in ("excitatory_inhibitory", "dynamic_synapse", "low_rank"):
+        cfg = {**full_cfg, "model": {**m, "substrate": substrate}}
+        front_end, core, heads = _build_model(cfg, S=0, M=0, P=0, device=device)
+        all_rows += _measure(
+            f"flat_{substrate}", front_end, core, heads, 0, task_gen, image_bank, feature_dim, device,
+            paths=[("flat", core.recurrent_weight(), None)],
+        )
+
     header = (
         f"{'core':<28} {'path':<10} {'load':>4} {'ticks':>5} {'radius':>8} "
         f"{'grad@encode1':>13} {'grad@maintain0':>15} {'grad@probe':>11} {'attenuation':>13}"

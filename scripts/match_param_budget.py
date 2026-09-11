@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""PHASE 1 item 1.3 (comments.txt): given a target EFFECTIVE-synapse budget
-(weight_ih + masked weight_hh, the same convention as
-`MaskedGRUCell.effective_param_count`), solve for the flat (S=0) core's
-`flat_units`, and for the hierarchical (S=1) core's (`worker_grid`,
-`manager_units`) at a fixed `worker_density` -- `worker_density` is a
-pre-registered scientific choice (comments.txt §1.6, B2: mean in-degree
-6 -> 14), not something this solver should search over. `worker_grid` is
-square, so `worker_units = g*g`.
+"""Given a target EFFECTIVE-synapse budget (weight_ih + masked weight_hh,
+the same convention as `MaskedGRUCell.effective_param_count`), solve for the
+flat (S=0) core's `flat_units`, and for the hierarchical (S=1) core's
+(`worker_grid`, `manager_units`) at a fixed `worker_density` --
+`worker_density` is a pre-registered scientific choice (mean in-degree 14),
+not something this solver should search over. `worker_grid` is square, so
+`worker_units = g*g`.
 
-Prints the solution; does NOT edit config.yaml (comments.txt: "do not
-auto-edit config").
+Gate count is what distinguishes the substrates at one budget: the GRU
+spends three weight blocks per synapse, while the vanilla tanh RNN and the
+leaky rate cores (`brainalign_wm/models/rate_rnn.py`) spend one, so a
+single-gate core matched to the GRU cell's budget is roughly sqrt(3) times
+as wide.
+
+Prints the solution; does NOT edit config.yaml.
 """
 from __future__ import annotations
 
@@ -70,7 +74,14 @@ def main() -> None:
 
     print(f"d_in={args.d_in} g_dim={args.g_dim} density={args.density}\n")
 
-    for label, target, gates in [("vanilla", args.target_vanilla, 1), ("gru", args.target_gru, 3)]:
+    budgets = [
+        ("vanilla", args.target_vanilla, 1),
+        ("gru", args.target_gru, 3),
+        # The leaky rate substrates are flat, single-gate cores matched to
+        # the GRU cell's budget, so they read the gru target at gates=1.
+        ("leaky_rate", args.target_gru, 1),
+    ]
+    for label, target, gates in budgets:
         flat_units = solve_flat_units(target, args.d_in, gates)
         achieved_flat = gates * flat_units * (flat_units + args.d_in)
         print(f"[{label}] target={target:.0f} gates={gates}")

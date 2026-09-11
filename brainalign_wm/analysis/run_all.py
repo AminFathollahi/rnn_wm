@@ -456,39 +456,65 @@ def _aggregate_maintenance(rows_ok: list[dict]) -> dict:
     }
 
 
-def _probe_alignment_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> dict:
-    """Pooled coarse-condition probe-epoch alignment."""
+def _probe_alignment_for_run(
+    run_id: str, model_df: pd.DataFrame, dandi_data, region,
+    epoch: str = "probe", conditions_to_use: list | None = None,
+    return_rdms: bool = False, compute_ceiling: bool = True,
+) -> dict:
+    """Pooled coarse-condition probe-epoch alignment.
+
+    The keyword arguments exist so the same pooled, unstratified estimator
+    can be applied to another epoch or to a fixed condition set without
+    duplicating it; every default reproduces the headline behaviour.
+    `conditions_to_use` forces the comparison onto a caller-supplied
+    condition set (needed when two session subsets must be scored on the
+    same conditions), `return_rdms` additionally returns the two
+    shared-condition RDMs for variance partitioning, and `compute_ceiling`
+    can skip the (expensive) resampled noise ceiling when only the raw
+    correlation is wanted."""
     from brainalign_wm.analysis.rdm import crossnobis_rdm
     from brainalign_wm.analysis.rsa import compare_rdms
     from brainalign_wm.analysis.pseudopopulation import pooled_condition_rdm, pooled_noise_ceiling
 
-    model_patterns, model_labels = _model_epoch_patterns(model_df, "probe", _coarse_condition)
+    model_patterns, model_labels = _model_epoch_patterns(model_df, epoch, _coarse_condition)
     model_patterns, model_labels = _filter_min_trials(model_patterns, model_labels, MIN_TRIALS_PER_CONDITION)
     if len(set(model_labels)) < 2:
         return {"run_id": run_id, "region": region or "pooled", "status": "too_few_conditions"}
     n_folds = max(2, min(4, min(model_labels.count(l) for l in set(model_labels))))
     model_rdm, model_conds = crossnobis_rdm(model_patterns, model_labels, n_folds=n_folds)
 
-    neural_rdm, neural_conds = pooled_condition_rdm(dandi_data, region, dandi_data.bin_ms, "probe", _coarse_condition, n_folds=4, seed=0)
+    neural_rdm, neural_conds = pooled_condition_rdm(dandi_data, region, dandi_data.bin_ms, epoch, _coarse_condition, n_folds=4, seed=0)
 
-    shared = _shared_conditions_or_none(model_conds, neural_conds)
+    if conditions_to_use is not None:
+        shared = [c for c in conditions_to_use if c in set(model_conds) & set(neural_conds)]
+        if len(shared) != len(conditions_to_use):
+            shared = None
+    else:
+        shared = _shared_conditions_or_none(model_conds, neural_conds)
     if shared is None:
         return {"run_id": run_id, "region": region or "pooled", "status": "insufficient_shared_conditions",
                 "n_shared_conditions": len(set(model_conds) & set(neural_conds))}
     m_idx = [model_conds.index(c) for c in shared]
     n_idx = [neural_conds.index(c) for c in shared]
-    raw = compare_rdms(model_rdm[np.ix_(m_idx, m_idx)], neural_rdm[np.ix_(n_idx, n_idx)])
-    ceiling_lower, ceiling_upper = pooled_noise_ceiling(dandi_data, region, dandi_data.bin_ms, "probe", _coarse_condition, n_resamples=10, seed=0)
-    return {
+    model_sub, neural_sub = model_rdm[np.ix_(m_idx, m_idx)], neural_rdm[np.ix_(n_idx, n_idx)]
+    raw = compare_rdms(model_sub, neural_sub)
+    if compute_ceiling:
+        ceiling_lower, ceiling_upper = pooled_noise_ceiling(dandi_data, region, dandi_data.bin_ms, epoch, _coarse_condition, n_resamples=10, seed=0)
+    else:
+        ceiling_lower = ceiling_upper = float("nan")
+    result = {
         "run_id": run_id, "region": region or "pooled", "status": "ok",
         "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
         "normalized_alignment": _norm(raw, ceiling_upper), "n_shared_conditions": len(shared),
     }
+    if return_rdms:
+        result.update(model_rdm=model_sub, neural_rdm=neural_sub, conditions=shared)
+    return result
 
 
 def _task_model_rdm_per_trial(labels: list) -> np.ndarray:
-    """B2 (master protocol §4.2, non-negotiable): the per-trial RDM implied
-    by ground-truth task structure alone -- 0 if two trials share the same
+    """The per-trial RDM implied by ground-truth task structure alone --
+    0 if two trials share the same
     held-item set (within a load stratum), 1 otherwise. Trial-level (not
     condition-level) because under load stratification, every condition
     within a stratum is unique, so a condition-level version would be
@@ -506,8 +532,8 @@ def _task_model_rdm_per_trial(labels: list) -> np.ndarray:
 
 
 def _encoder_only_patterns_for_session(session_id: str, session_trials: pd.DataFrame, condition_fn) -> tuple[np.ndarray, list]:
-    """B1 (master protocol §4.2, non-negotiable): patterns built from the
-    frozen ResNet encoder's own features alone (mean over held items),
+    """Patterns built from the frozen ResNet encoder's own features
+    alone (mean over held items),
     NO working-memory processing at all -- the "vision without WM" lower
     anchor. Uses the same cached per-session stimulus features the model
     replay itself is driven by."""
@@ -528,18 +554,18 @@ def _encoder_only_patterns_for_session(session_id: str, session_trials: pd.DataF
 
 
 def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> list[dict]:
-    """B1 (encoder-only) and B2 (task-model) baselines, master protocol
-    S4.2: computed per session, on the SAME shared-condition set and
+    """The encoder-only and task-model lower-anchor baselines, computed
+    per session on the SAME shared-condition set and
     neural RDM the real maintenance alignment uses for that session/region
     -- load-stratified, so B1/B2 rows stay directly
     comparable to the trained-model rows in `alignment_by_session.csv`
     (a non-stratified baseline compared against a stratified trained-model
     row would not be an apples-to-apples baseline).
 
-    B2 is a per-trial task-model RSA: the condition-level task-model RDM
-    is degenerate under load-stratification (each
+    The task-model baseline is a per-trial RSA: the condition-level
+    task-model RDM is degenerate under load-stratification (each
     within-stratum condition is unique, producing a constant RDM with zero
-    variance). Instead, B2 builds a per-trial "same held-set = 0,
+    variance). Instead it builds a per-trial "same held-set = 0,
     different = 1" task-model RDM and correlates it against per-trial
     Euclidean neural distances, which have real trial-level variation."""
     from brainalign_wm.analysis.rsa import compare_rdms, within_session_noise_ceiling
@@ -560,7 +586,7 @@ def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) 
         )
         if neural_rdm is None:
             continue
-        # Also extract per-trial neural data for B2's per-trial task-model RDM
+        # Also extract per-trial neural data for the per-trial task-model RDM
         neural_data, neural_session_trials = rsa_mod._session_trial_patterns(
             dandi_data, session_id, region, "maintain", dandi_data.bin_ms
         )
@@ -568,7 +594,7 @@ def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) 
             dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
         )
 
-        # B1: encoder-only
+        # Encoder-only lower anchor
         b1_patterns, b1_labels = _encoder_only_patterns_for_session(session_id, session_trials, condition_fn)
         b1_patterns, b1_labels = _filter_min_trials(b1_patterns, b1_labels, min_count=2)
         if len(set(b1_labels)) >= 2:
@@ -590,7 +616,7 @@ def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) 
                             "n_shared_conditions": len(shared_b1),
                         })
 
-        # B2: task-model (ground-truth condition structure only). A
+        # Task-model lower anchor (ground-truth condition structure only). A
         # condition-level RDM is degenerate under load-stratification (each
         # within-stratum condition is unique, so the RDM is constant = zero
         # variance); use the per-trial task-model RDM instead, correlated
@@ -606,7 +632,7 @@ def _baselines_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) 
             neural_trial_rdm = squareform(pdist(neural_data, metric="euclidean"))
             raw_b2 = compare_rdms(b2_task_rdm, neural_trial_rdm)
             n_valid_b2 = int(np.sum(~np.isnan(_vu(b2_task_rdm)) & ~np.isnan(_vu(neural_trial_rdm))))
-            # B2's raw score lives on the per-trial Euclidean
+            # This raw score lives on the per-trial Euclidean
             # representation, not the condition-level crossnobis one
             # `ceiling_upper` (above) estimates -- normalize against a
             # ceiling built on that same per-trial representation instead.
@@ -847,7 +873,12 @@ def align_one_run(
     log_path = activity_log_path(run_id, checkpoint)
     if force_regenerate or not log_path.exists():
         log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
-    df = read_log(log_path)
+    try:
+        df = read_log(log_path)
+    except Exception as exc:  # a power loss can leave a parquet file without its footer
+        print(f"[run_all] regenerating unreadable activity log {log_path} ({type(exc).__name__}: {exc})")
+        log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
+        df = read_log(log_path)
     is_hierarchical = len(df) > 0 and df["h_flat"].iloc[0] is None
 
     maintenance_rows, probe_rows = [], []
@@ -884,8 +915,19 @@ def reflection_shuffle_lesion_for_run(run_id: str, dandi_data, checkpoint: str =
     normal_rows = _maintenance_alignment_for_run(run_id, normal_df, dandi_data, None)
     normal_ok = [r for r in normal_rows if r.get("status") == "ok"]
 
-    shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
-    shuffled_df = read_log(shuffled_path)
+    # The shuffled replay is a durable, deterministic artifact. Reuse it on
+    # restart just as `align_one_run` reuses the ordinary activity log; this
+    # prevents an interrupted secondary-analysis campaign from needlessly
+    # replaying every M=1 run before it can resume the statistical work.
+    shuffled_path = activity_log_path(f"{run_id}__reflection_shuffled", checkpoint)
+    if not shuffled_path.exists():
+        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
+    try:
+        shuffled_df = read_log(shuffled_path)
+    except Exception as exc:  # same atomic-replay recovery as the normal log
+        print(f"[run_all] regenerating unreadable reflection-shuffled log {shuffled_path} ({type(exc).__name__}: {exc})")
+        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
+        shuffled_df = read_log(shuffled_path)
     shuffled_rows = _maintenance_alignment_for_run(run_id, shuffled_df, dandi_data, None)
     shuffled_ok = [r for r in shuffled_rows if r.get("status") == "ok"]
 
@@ -974,9 +1016,16 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
     from brainalign_wm.training.generate_activity_logs import generate_chance_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
-    log_path = generate_chance_activity_log(model_id, seed, dandi_data)
-    df = read_log(log_path)
     run_id = f"{model_id}_s{seed}_chance"
+    log_path = get_path("activity_logs") / f"{run_id}.parquet"
+    if not log_path.exists():
+        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
+    try:
+        df = read_log(log_path)
+    except Exception as exc:
+        print(f"[run_all] regenerating unreadable chance log {log_path} ({type(exc).__name__}: {exc})")
+        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
+        df = read_log(log_path)
 
     maintenance_rows = _maintenance_alignment_for_run(run_id, df, dandi_data, None)
     probe_row = _probe_alignment_for_run(run_id, df, dandi_data, None)
@@ -995,6 +1044,11 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument(
+        "--out-dir", default=None,
+        help="directory for this invocation's CSV outputs. Inputs (manifest, checkpoints, and activity logs) "
+        "remain at their configured locations. Used by analysis.sh to keep one resumable result shard per run.",
+    )
     ap.add_argument("--regenerate", action="store_true", help="force regeneration of activity logs")
     ap.add_argument(
         "--runs", default=None,
@@ -1071,8 +1125,11 @@ def main(argv=None) -> int:
 
     _tag = "" if args.checkpoint == "ckpt.pt" else "_" + Path(args.checkpoint).stem.removeprefix("ckpt_")
 
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     def out_csv(name: str) -> Path:
-        return RESULTS / f"{name}{_tag}.csv"
+        return out_dir / f"{name}{_tag}.csv"
 
     cfg = load_config(args.config)
     completed = _load_completed_runs(RESULTS / "manifest.jsonl")

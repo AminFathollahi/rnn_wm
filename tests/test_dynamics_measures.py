@@ -61,3 +61,64 @@ def test_diagonal_only_decoding_matches_full_diagonal():
     diag_only = cross_temporal_decoding(X, y, n_folds=3, seed=0, diagonal_only=True)
     assert np.allclose(np.diag(full), np.diag(diag_only))
     assert np.isnan(diag_only[0, 1])
+
+
+def _persistence_data(seed: int = 0, scale: float = 1.0):
+    rng = np.random.RandomState(seed)
+    n_units, n_trials = 12, 60
+    labels = np.repeat([1, 2, 3], n_trials // 3)
+    baseline = rng.rand(n_units) * 0.2
+    maintain = rng.randn(n_units, n_trials) * 0.1 + baseline[:, None]
+    # Half the units are elevated during maintenance at condition 3.
+    maintain[: n_units // 2, labels == 3] += 0.8
+    return maintain * scale, baseline * scale, labels
+
+
+def test_standardized_persistence_is_invariant_to_activity_rescaling():
+    from brainalign_wm.analysis.persistence import (
+        persistent_activity_index,
+        standardized_persistence_index,
+    )
+
+    maintain, baseline, labels = _persistence_data()
+    maintain_scaled, baseline_scaled, _ = _persistence_data(scale=10.0)
+
+    standardized = standardized_persistence_index(maintain, baseline, labels, seed=0)
+    standardized_scaled = standardized_persistence_index(maintain_scaled, baseline_scaled, labels, seed=0)
+    assert np.allclose(standardized, standardized_scaled)
+
+    # The retained absolute-rate index moves under the same rescaling --
+    # the units dependence this estimator exists to remove.
+    conditions = np.unique(labels)
+    by_condition = np.stack([maintain[:, labels == c].mean(axis=1) for c in conditions], axis=1)
+    by_condition_scaled = np.stack([maintain_scaled[:, labels == c].mean(axis=1) for c in conditions], axis=1)
+    old = persistent_activity_index(by_condition, baseline[:, None], conditions)
+    old_scaled = persistent_activity_index(by_condition_scaled, baseline_scaled[:, None], conditions)
+    assert not np.allclose(old, old_scaled)
+
+
+def test_standardized_persistence_separates_elevated_from_flat_units():
+    from brainalign_wm.analysis.persistence import standardized_persistence_index
+
+    maintain, baseline, labels = _persistence_data()
+    index = standardized_persistence_index(maintain, baseline, labels, seed=0)
+    assert index[:6].min() > index[6:].max()
+
+
+def test_standardized_persistence_selection_is_cross_validated():
+    from brainalign_wm.analysis.persistence import standardized_persistence_index
+
+    # Pure noise over baseline: an uncross-validated maximum over
+    # conditions is positively biased, a cross-validated one is not.
+    rng = np.random.RandomState(1)
+    n_units, n_trials = 40, 90
+    labels = np.repeat([1, 2, 3], n_trials // 3)
+    baseline = np.zeros(n_units)
+    maintain = rng.randn(n_units, n_trials)
+
+    index = standardized_persistence_index(maintain, baseline, labels, seed=0)
+    uncrossvalidated = np.stack(
+        [maintain[:, labels == c].mean(axis=1) for c in np.unique(labels)], axis=1
+    ).max(axis=1) / maintain.std(axis=1, ddof=1)
+    assert abs(index.mean()) < uncrossvalidated.mean()
+    assert abs(index.mean()) < 0.15

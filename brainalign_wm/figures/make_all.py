@@ -214,19 +214,19 @@ def make_f5_persistence(dynamics_csv: Path, out_path: Path) -> bool:
         print("[figures] F5: no dynamics_persistence.csv yet; run `analysis/run_all.py` first. Skipping.")
         return False
     df = pd.read_csv(dynamics_csv)
-    df = df[df.get("h6_model_persistence_mean").notna()] if "h6_model_persistence_mean" in df.columns else df.iloc[0:0]
+    df = df[df.get("model_persistence_mean").notna()] if "model_persistence_mean" in df.columns else df.iloc[0:0]
     if len(df) == 0:
         print("[figures] F5: no H6 persistence rows yet; skipping.")
         return False
 
-    agg = df.groupby("model_id")[["h6_model_persistence_mean", "h6_neural_persistence_mean"]].mean()
+    agg = df.groupby("model_id")[["model_persistence_mean", "neural_persistence_mean"]].mean()
     agg = agg.reindex([c for c in CELL_ORDER if c in agg.index])
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     x = range(len(agg))
     width = 0.35
-    ax.bar([xi - width / 2 for xi in x], agg["h6_model_persistence_mean"], width=width, label="model")
-    ax.bar([xi + width / 2 for xi in x], agg["h6_neural_persistence_mean"], width=width, label="brain")
+    ax.bar([xi - width / 2 for xi in x], agg["model_persistence_mean"], width=width, label="model")
+    ax.bar([xi + width / 2 for xi in x], agg["neural_persistence_mean"], width=width, label="brain")
     ax.set_xticks(list(x))
     ax.set_xticklabels(agg.index, rotation=0)
     ax.set_ylabel("persistent-activity index")
@@ -252,19 +252,19 @@ def make_f6_dynamic_stable(dynamics_csv: Path, out_path: Path) -> bool:
         print("[figures] F6: no dynamics_persistence.csv yet; run `analysis/run_all.py` first. Skipping.")
         return False
     df = pd.read_csv(dynamics_csv)
-    df = df[df.get("h5_model_stability_mean").notna()] if "h5_model_stability_mean" in df.columns else df.iloc[0:0]
+    df = df[df.get("model_stability_mean").notna()] if "model_stability_mean" in df.columns else df.iloc[0:0]
     if len(df) == 0:
         print("[figures] F6: no H5 stability rows yet; skipping.")
         return False
 
-    agg = df.groupby("model_id")[["h5_model_stability_mean", "h5_neural_stability_mean"]].mean()
+    agg = df.groupby("model_id")[["model_stability_mean", "neural_stability_mean"]].mean()
     agg = agg.reindex([c for c in CELL_ORDER if c in agg.index])
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     x = range(len(agg))
     width = 0.35
-    ax.bar([xi - width / 2 for xi in x], agg["h5_model_stability_mean"], width=width, label="model")
-    ax.bar([xi + width / 2 for xi in x], agg["h5_neural_stability_mean"], width=width, label="brain")
+    ax.bar([xi - width / 2 for xi in x], agg["model_stability_mean"], width=width, label="model")
+    ax.bar([xi + width / 2 for xi in x], agg["neural_stability_mean"], width=width, label="brain")
     ax.set_xticks(list(x))
     ax.set_xticklabels(agg.index, rotation=0)
     ax.set_ylabel("stability index (off-diag/diag generalization)")

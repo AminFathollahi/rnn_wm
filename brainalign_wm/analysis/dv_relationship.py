@@ -143,9 +143,9 @@ def _load_persistence() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["run_id", "persistence_index"])
     df = pd.read_csv(path)
-    if "h6_model_persistence_mean" not in df.columns:
+    if "model_persistence_mean" not in df.columns:
         return pd.DataFrame(columns=["run_id", "persistence_index"])
-    return df[["run_id", "h6_model_persistence_mean"]].rename(columns={"h6_model_persistence_mean": "persistence_index"})
+    return df[["run_id", "model_persistence_mean"]].rename(columns={"model_persistence_mean": "persistence_index"})
 
 
 def build_dv_table() -> pd.DataFrame:

@@ -938,40 +938,56 @@ MAX_SESSIONS_FOR_DYNAMICS = 20
 
 
 def dynamics_and_persistence_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, max_sessions: int = MAX_SESSIONS_FOR_DYNAMICS) -> dict:
-    """H5/H6: aggregates per-session stability-index
-    (dynamic vs. stable delay coding) and persistent-activity-index
-    (memoranda-selective persistence) comparisons across every session with
-    usable model+neural data, and compares the model's vs. the brain's
-    distributions (`stats.compare_distributions`, a permutation test +
+    """Aggregates the per-session cross-temporal stability and
+    persistent-activity comparisons across every session with usable
+    model+neural data, and compares the model's against the brain's
+    distributions (`stats.compare_distributions`: Mann-Whitney U plus a
     rank-biserial effect size). Pooled-region only (region=None) -- this
-    already replays/loads every session once per run; looping regions here
-    would triple an already expensive per-session computation for limited
-    additional value at this exploratory-analysis tier.
+    already replays/loads every session once per run, so looping regions
+    here would triple an already expensive per-session computation for
+    limited additional value at this exploratory tier.
+
+    Both measures are reported twice, because the older estimator of each
+    is retained alongside its repaired companion:
+
+    - Stability. `stability_*` columns are the bare off-diagonal/diagonal
+      ratio over all usable sessions. `stability_ratio_*` columns gate on
+      the label-permutation null: sessions whose decoding diagonal is not
+      above its own null on BOTH sides are excluded (they carry no
+      decodable signal, so their ratio is uninterpretable rather than
+      "stable"), and `stability_sessions_excluded_at_chance` records how
+      many. `*_diagonal_accuracy_mean` and `*_chance_accuracy_mean` say
+      what the decoders actually achieved.
+    - Persistence. `persistence_*` columns are the absolute-rate index,
+      whose `|baseline| + 1` regularizer makes bounded model activations
+      and firing rates incomparable. `persistence_standardized_*` columns
+      are the scale-free, cross-validated index; model-versus-brain
+      persistence rests on those.
 
     `cross_temporal_decoding` fits a fresh classifier per (fold, timebin)
-    pair -- ~90 fits per session per side at this task's ~30-bin maintenance
-    window -- so this is capped at `max_sessions` (deterministically, the
-    first N alphabetically) to keep H5/H6 tractable across a full 8-cell
-    grid rather than scaling linearly with however many sessions happen to
-    have replay coverage."""
+    pair, and the permutation null repeats that `STABILITY_PERMUTATIONS`
+    times per side, so this is capped at `max_sessions` (deterministically,
+    the first N alphabetically)."""
     from brainalign_wm.analysis.dynamics_and_persistence import stability_index_for_session, persistence_index_for_session
     from brainalign_wm.analysis.stats import compare_distributions
 
     model_sessions = sorted(model_df["session"].unique())[:max_sessions] if "session" in model_df.columns else []
-    model_stab, neural_stab = [], []
+    stability_rows = []
     model_pers, neural_pers = [], []
+    model_pers_standardized, neural_pers_standardized = [], []
     n_sessions_used = 0
     for session_id in model_sessions:
         stab = stability_index_for_session(model_df, dandi_data, session_id, None, dandi_data.bin_ms)
         pers = persistence_index_for_session(model_df, dandi_data, session_id, None, dandi_data.bin_ms)
         used = False
         if stab is not None:
-            model_stab.append(stab["model_stability"])
-            neural_stab.append(stab["neural_stability"])
+            stability_rows.append(stab)
             used = True
         if pers is not None:
             model_pers.extend(np.atleast_1d(pers["model_index"]).tolist())
             neural_pers.extend(np.atleast_1d(pers["neural_index"]).tolist())
+            model_pers_standardized.extend(np.atleast_1d(pers["model_index_standardized"]).tolist())
+            neural_pers_standardized.extend(np.atleast_1d(pers["neural_index_standardized"]).tolist())
             used = True
         n_sessions_used += int(used)
 
@@ -979,16 +995,49 @@ def dynamics_and_persistence_for_run(run_id: str, model_df: pd.DataFrame, dandi_
         return {"run_id": run_id, "status": "insufficient_sessions"}
 
     out = {"run_id": run_id, "status": "ok", "n_sessions_used": n_sessions_used}
+
+    model_stab = [r["model_stability"] for r in stability_rows]
+    neural_stab = [r["neural_stability"] for r in stability_rows]
     if len(model_stab) >= 2 and len(neural_stab) >= 2:
-        h5 = compare_distributions(np.array(model_stab), np.array(neural_stab))
-        out.update({f"h5_stability_{k}": v for k, v in h5.items()})
-        out["h5_model_stability_mean"] = float(np.mean(model_stab))
-        out["h5_neural_stability_mean"] = float(np.mean(neural_stab))
+        bare = compare_distributions(np.array(model_stab), np.array(neural_stab))
+        out.update({f"stability_{k}": v for k, v in bare.items()})
+        out["model_stability_mean"] = float(np.mean(model_stab))
+        out["neural_stability_mean"] = float(np.mean(neural_stab))
+
+    if stability_rows:
+        decodable = [r for r in stability_rows if r["model_diagonal_above_null"] and r["neural_diagonal_above_null"]]
+        out["stability_sessions_total"] = len(stability_rows)
+        out["stability_sessions_above_null"] = len(decodable)
+        out["stability_sessions_excluded_at_chance"] = len(stability_rows) - len(decodable)
+        for side in ("model", "neural"):
+            out[f"{side}_diagonal_accuracy_mean"] = float(np.mean([r[f"{side}_diagonal_accuracy"] for r in stability_rows]))
+            out[f"{side}_chance_accuracy_mean"] = float(np.mean([r[f"{side}_chance_accuracy"] for r in stability_rows]))
+            out[f"{side}_permutation_null_mean"] = float(np.nanmean([r[f"{side}_permutation_null_mean"] for r in stability_rows]))
+            out[f"{side}_sessions_diagonal_above_null"] = int(sum(r[f"{side}_diagonal_above_null"] for r in stability_rows))
+        if len(decodable) >= 2:
+            model_ratio = [r["model_stability_ratio"] for r in decodable]
+            neural_ratio = [r["neural_stability_ratio"] for r in decodable]
+            gated = compare_distributions(np.array(model_ratio), np.array(neural_ratio))
+            out.update({f"stability_ratio_{k}": v for k, v in gated.items()})
+            out["model_stability_ratio_mean"] = float(np.mean(model_ratio))
+            out["neural_stability_ratio_mean"] = float(np.mean(neural_ratio))
+
     if len(model_pers) >= 2 and len(neural_pers) >= 2:
-        h6 = compare_distributions(np.array(model_pers), np.array(neural_pers))
-        out.update({f"h6_persistence_{k}": v for k, v in h6.items()})
-        out["h6_model_persistence_mean"] = float(np.mean(model_pers))
-        out["h6_neural_persistence_mean"] = float(np.mean(neural_pers))
+        absolute = compare_distributions(np.array(model_pers), np.array(neural_pers))
+        out.update({f"persistence_{k}": v for k, v in absolute.items()})
+        out["model_persistence_mean"] = float(np.mean(model_pers))
+        out["neural_persistence_mean"] = float(np.mean(neural_pers))
+
+    model_std = np.array(model_pers_standardized)
+    neural_std = np.array(neural_pers_standardized)
+    model_std = model_std[~np.isnan(model_std)]
+    neural_std = neural_std[~np.isnan(neural_std)]
+    if len(model_std) >= 2 and len(neural_std) >= 2:
+        standardized = compare_distributions(model_std, neural_std)
+        out.update({f"persistence_standardized_{k}": v for k, v in standardized.items()})
+        out["model_persistence_standardized_mean"] = float(np.mean(model_std))
+        out["neural_persistence_standardized_mean"] = float(np.mean(neural_std))
+        out["n_units_persistence_standardized"] = int(len(model_std) + len(neural_std))
     return out
 
 

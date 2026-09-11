@@ -297,6 +297,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
     from brainalign_wm.models.front_end import FrontEnd
     from brainalign_wm.models.hrl import HRLCore
     from brainalign_wm.models.heads import Heads
+    from brainalign_wm.models.rate_rnn import RATE_SUBSTRATES, build_rate_cell
     from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
 
     m, mech = full_cfg["model"], full_cfg["mechanisms"]
@@ -314,14 +315,25 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
     recurrent_init_spectral_radius = m.get("recurrent_init_spectral_radius")
     if S == 0:
         if substrate == "vanilla":
-            # Stage 1 (§4): vanilla has no reflective-gate/Hebbian hooks
-            # wired up yet -- M/P aren't in Stage 1's factorial, so this
-            # path only needs to exist, not gate/plasticize (add when a
-            # later stage needs M/P on the vanilla substrate).
+            # The vanilla substrate has no reflective-gate/Hebbian hooks:
+            # it is only ever run at M=0, P=0, so this path needs to exist,
+            # not to gate or plasticize.
             core = VanillaRNNCell(
                 m["bottleneck"], m["flat_units"], mask=None,
                 recurrent_init_spectral_radius=recurrent_init_spectral_radius,
             ).to(device)
+        elif substrate in RATE_SUBSTRATES:
+            # Leaky rate cores (E/I separation, dynamic synapses, low-rank
+            # connectivity), each an ungated flat alternative to the GRU at
+            # the same effective-synapse budget. Width comes from the
+            # `rate_rnn` block, not `flat_units`: a single-gate cell needs a
+            # different width for the same synapse count.
+            if M or P:
+                raise NotImplementedError(
+                    f"the {substrate!r} substrate is built for M=0, P=0 only -- the reflective gate and "
+                    "the Hebbian fast weights have no hooks on these cores"
+                )
+            core = build_rate_cell(substrate, m["bottleneck"], m["rate_rnn"]).to(device)
         else:
             core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs).to(device)
             if bioinit:
@@ -334,7 +346,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
 
                 with torch.no_grad():
                     core.cell.weight_hh.copy_(bioinit_weight_hh(m["flat_units"]).to(device))
-        h_star_dim = m["flat_units"]
+        h_star_dim = core.n_units()
     else:
         if substrate == "vanilla":
             if M or P:
@@ -396,11 +408,17 @@ def _step_core(
         from brainalign_wm.models.vanilla_rnn import VanillaRNNCell
 
         if isinstance(core, VanillaRNNCell):
-            # Single-gate cell (Stage 1, §4): no update gate to report, and
-            # M/P aren't in Stage 1's factorial (see `_build_model`).
+            # Single-gate cell: no update gate to report, and it is only
+            # built at M=0, P=0 (see `_build_model`).
             h_t = core(z_t, state["h"], extra_update_bias=gate_bias)
             u_t = None
             new_state = {"h": h_t}
+        elif "synaptic" in state:
+            # Short-term facilitation/depression: the synaptic variables are
+            # per-trial state like the Hebbian trace below, threaded through
+            # the unroll rather than held on the cell.
+            h_t, u_t, synaptic_t = core(z_t, state["h"], state["synaptic"], extra_update_bias=gate_bias)
+            new_state = {"h": h_t, "synaptic": synaptic_t}
         elif P:
             h_t, u_t, hebb_t = core(z_t, state["h"], state["hebb"], extra_update_bias=gate_bias)
             new_state = {"h": h_t, "hebb": hebb_t}
@@ -490,6 +508,8 @@ def _init_state(core, S: int, P: int, batch: int, device):
         state = {"h": core.init_state(batch, device)}
         if P:
             state["hebb"] = core.cell.init_hebb(batch, device)
+        if hasattr(core, "init_synaptic_state"):
+            state["synaptic"] = core.init_synaptic_state(batch, device)
         return state
     return core.init_state(batch, device)
 

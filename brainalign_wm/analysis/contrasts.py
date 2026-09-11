@@ -57,21 +57,21 @@ def training_signal(run_id: str) -> str:
 
 def assign_patient_folds(patients, confirmation_share: float = 1.0 / 3.0) -> dict:
     """Deterministic, content-free split of patient ids into a discovery set
-    and a confirmation set.  The assignment depends only on the patient id, so
-    it is reproducible from the ids alone and cannot drift with the data."""
-    folds = {}
-    scale = float(1 << 32)
-    for patient in sorted(set(map(str, patients))):
-        digest = hashlib.sha256(patient.encode("utf-8")).digest()
-        unit = int.from_bytes(digest[:4], "big") / scale
-        folds[patient] = "confirmation" if unit < confirmation_share else "discovery"
-    return folds
+    and a confirmation set.  Patients are ordered by a hash of their id and the
+    first `confirmation_share` of that order is held out, so the assignment
+    depends only on the ids, is reproducible from them alone, and splits the
+    cohort at the requested proportion exactly rather than in expectation."""
+    unique = sorted(set(map(str, patients)))
+    ordered = sorted(unique, key=lambda pid: hashlib.sha256(pid.encode("utf-8")).hexdigest())
+    n_confirmation = int(round(len(ordered) * confirmation_share))
+    held_out = set(ordered[:n_confirmation])
+    return {pid: ("confirmation" if pid in held_out else "discovery") for pid in unique}
 
 
 def write_patient_folds(patients, path: Path, confirmation_share: float = 1.0 / 3.0) -> dict:
     folds = assign_patient_folds(patients, confirmation_share)
     payload = {
-        "method": "sha256 of the patient id, first 4 bytes as a fraction of 2**32",
+        "method": "patients ordered by sha256 of the patient id; first third held out",
         "confirmation_share": confirmation_share,
         "n_patients": len(folds),
         "n_discovery": sum(v == "discovery" for v in folds.values()),

@@ -48,9 +48,9 @@ def run_sternberg_diet_trial(front_end_mt, core, heads, image_bank, trial_steps_
     tick loop, condensed for the M=0/P=0/T=0/D=0 baseline cell (no
     reflective gate, identity-catch, or ablation-battery penalties -- none
     apply to this acceptance run), and using `front_end_mt` (task_vec_dim
-    = C_DIM_MULTITASK = 13) instead of the Sternberg-only pipeline's own
-    10-dim `FrontEnd` -- the two are separate module instances, so nothing
-    about Phases 0-4's tested front end changes."""
+    = C_DIM_MULTITASK) instead of the Sternberg-only pipeline's own
+    `FrontEnd` -- the two are separate module instances, so nothing about
+    the single-task front end changes."""
     B = len(trial_steps_batch)
     T = len(trial_steps_batch[0])
     state = _init_state(core, 0, 0, B, device)

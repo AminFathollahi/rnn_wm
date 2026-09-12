@@ -26,9 +26,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# Task order fixes the one-hot index below -- do not reorder without also
-# bumping every checkpoint that used the old order (none exist yet, this
-# arm is new in this phase).
 DIET_TASKS = ["sternberg", "bandit", "dawtwostep", "delaymatchsample", "gonogo", "contextdecisionmaking"]
 NEUROGYM_TASKS = DIET_TASKS[1:]
 
@@ -78,13 +75,17 @@ ENV_GT_TO_HEAD = {
 # imitation target; trained via REINFORCE on the native reward instead.
 HAS_GT = {"bandit": False, "dawtwostep": False, "delaymatchsample": True, "gonogo": True, "contextdecisionmaking": True}
 
-# Phase 3/5 item 5.4: c_t currently (Sternberg-only, C_DIM=10) wastes 3 dims
-# -- c_t[0] (WM_family) is always 1, c_t[8]/c_t[9] are permanently 0 (post
-# F1 leak fix). Reclaimed here for a 6-task one-hot: 10 - 3 + 6 = 13. This
-# is a SEPARATE schema from Sternberg's own C_DIM=10 (see
-# `task_context_vector`'s docstring) -- Phases 0-4's tested single-task
-# pipeline is untouched.
-C_DIM_MULTITASK = 13
+TASK_CUE_SCHEMA = "task_code_10_v1"
+LEGACY_TASK_CUE_SCHEMA = "task_one_hot_13_v1"
+C_DIM_MULTITASK = 10
+TASK_CODES = {
+    "sternberg": (1.0, 0.0, 0.0),
+    "bandit": (0.0, 1.0, 0.0),
+    "dawtwostep": (0.0, 0.0, 1.0),
+    "delaymatchsample": (1.0, 1.0, 0.0),
+    "gonogo": (1.0, 0.0, 1.0),
+    "contextdecisionmaking": (0.0, 1.0, 1.0),
+}
 TASK_ACTION_DIM = 3  # matches models.heads.N_ACTIONS; every task maps onto this, no per-task head
 
 
@@ -94,20 +95,27 @@ def task_one_hot(task_name: str) -> list[float]:
     return v
 
 
-def task_context_vector(task_name: str, sternberg_c: Optional[list[float]] = None) -> list[float]:
-    """13-dim multi-task cue. dims[0:7] = Sternberg's own 10-dim
-    `context_vector` with the 3 wasted bits (WM_family, the two reserved
-    zeros) dropped: `[aux_family, load1, load2, load3, epoch_encode,
-    epoch_maintain, epoch_probe]`. dims[7:13] = the task one-hot (item 5.4).
-    A NeuroGym trial has no encode/maintain/probe epoch structure, so its
-    first 7 dims are always zero -- only the task one-hot carries
-    information for it. `sternberg_c` is the trial's own `TrialStep.c_t`
-    (10-dim); pass `None` for a NeuroGym tick."""
-    if sternberg_c is not None:
-        base = [sternberg_c[1], sternberg_c[2], sternberg_c[3], sternberg_c[4], sternberg_c[5], sternberg_c[6], sternberg_c[7]]
-    else:
-        base = [0.0] * 7
-    return base + task_one_hot(task_name)
+def task_context_vector(
+    task_name: str,
+    sternberg_c: Optional[list[float]] = None,
+    schema: str = TASK_CUE_SCHEMA,
+) -> list[float]:
+    """Encode task identity without exposing an action or future outcome."""
+    if schema == LEGACY_TASK_CUE_SCHEMA:
+        base = [sternberg_c[i] for i in range(1, 8)] if sternberg_c is not None else [0.0] * 7
+        return base + task_one_hot(task_name)
+    if schema != TASK_CUE_SCHEMA:
+        raise ValueError(f"unknown task cue schema {schema!r}")
+    if task_name == "sternberg" and sternberg_c is not None:
+        return list(sternberg_c)
+    cue = [0.0] * C_DIM_MULTITASK
+    cue[0], cue[8], cue[9] = TASK_CODES[task_name]
+    return cue
+
+
+def task_cue_metadata(schema: str = TASK_CUE_SCHEMA) -> dict:
+    """Describe the cue schema stored with a continuation checkpoint."""
+    return {"schema": schema, "tasks": list(DIET_TASKS), "codes": {name: list(code) for name, code in TASK_CODES.items()}}
 
 
 class NeuroGymAdapter(nn.Module):

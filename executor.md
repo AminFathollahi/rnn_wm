@@ -7561,3 +7561,23 @@ Nothing broken and left unfixed by this follow-up.
 - `wm_dynamics/bin/python -m pytest -q tests/test_probe_peak_memory.py`
   reported `8 passed`.
 - No training was launched.
+
+### 2026-09-13 -- shared ten-entry task cue
+
+- The multi-task cue is ten entries, not thirteen. Task identity now rides in
+  the three entries the working-memory schema never varies -- index 0, its
+  constant family bit, and indices 8 and 9, permanently zero since the probe
+  leak was removed -- so a Sternberg cue passes through the multi-task path
+  byte for byte and a checkpoint trained on the single-task front end keeps
+  reading its own input. The previous thirteen-entry one-hot stays reachable
+  by name so checkpoints trained on it still decode.
+- Repaired the two tests that still asserted the thirteen-entry contract and
+  added coverage for the retained schema, the recorded cue metadata, and the
+  rejection of an unknown schema name.
+- Corrected three places that still stated the old width: the diet front-end
+  docstring in the run loop, the comment where the diet front end replaces
+  the single-task one, and the acceptance runner's docstring.
+- `wm_dynamics/bin/python -m pytest -q tests/test_multitask.py` reported
+  `16 passed`; the full `wm_dynamics/bin/python -m pytest` reported
+  `485 passed` in 126s.
+- No training was launched.

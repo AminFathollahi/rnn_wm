@@ -678,11 +678,12 @@ def _run_trial(
     `identity_catch` is `{"correct": int, "total": int}` accumulated over
     catch trials in this batch (identity-report accuracy, §9.4a), or None
     when `heads.identity_aux is None`.
-    `task_name_for_context` (Stage 1 multi-task-diet cells only, §4): when
-    set, `front_end` is assumed to be the diet's own 13-dim `front_end_mt`
-    and `ts.c_t` is wrapped through `multitask.task_context_vector` before
-    reaching it, instead of passed raw -- `None` (every other cell)
-    preserves the exact original 10-dim behavior.
+    `task_name_for_context` (multi-task-diet cells only): when set,
+    `front_end` is assumed to be the diet's own `front_end_mt` and `ts.c_t`
+    is wrapped through `multitask.task_context_vector` before reaching it,
+    instead of passed raw. The diet cue is the same width as the
+    Sternberg-only one and passes a Sternberg cue through unchanged, so
+    `None` (every other cell) is behaviourally identical here.
     `checkpoint_plastic`: run the plastic (P=1) recurrent core through
     `_segment_checkpoint_scan` instead of the plain per-tick loop -- only
     takes effect when `P == 1 and mode == "bptt"` (see `use_segment_checkpoint`
@@ -1968,14 +1969,13 @@ def train_one(run: dict, cfg: dict) -> dict:
     front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate, bioinit=bioinit)
     reflective_gate = ReflectiveGate(mech_cfg["reflection_lambda"], mech_cfg["reflection_beta"]) if M else None
 
-    # Stage 1 multi-task-diet cells (§4, §5): `front_end` (10-dim,
-    # Sternberg-only task_vec_dim) is REPLACED wholesale by the diet's own
-    # 13-dim `front_end_mt` (comments.txt item 5.4's task-one-hot-extended
-    # cue) -- mirrors `scripts/run_multitask_diet.py`'s own convention, so
+    # Multi-task-diet cells: the Sternberg-only `front_end` is REPLACED
+    # wholesale by the diet's own `front_end_mt`, built on the shared task
+    # cue -- mirrors `scripts/run_multitask_diet.py`'s own convention, so
     # every downstream use of the name `front_end` (training, checkpointing,
     # evaluation) is automatically diet-aware with no further branching.
-    # `adapters` (one per NeuroGym task, item 5.3) stays `{}` for every
-    # other cell -- every `adapters`-keyed loop below is then a no-op.
+    # `adapters` (one per NeuroGym task) stays `{}` for every other cell --
+    # every `adapters`-keyed loop below is then a no-op.
     adapters: dict = {}
     max_ticks = 0
     if diet == "multitask":

@@ -50,7 +50,7 @@ model:
   encoder: resnet18                        # frozen, ImageNet-pretrained
   feature_dim: 512
   task_vec_dim: 10
-  task_vec_dim_multitask: 13                # Phase 5 item 5.4: multi-task diet's own extended cue width
+  task_vec_dim_multitask: 10                # shared cue width for working-memory and auxiliary tasks
                                              # (brainalign_wm.tasks.multitask.C_DIM_MULTITASK) -- separate
                                              # from task_vec_dim, which stays 10 for the Sternberg-only
                                              # pipeline (Phases 0-4 and every test depend on that exact width)

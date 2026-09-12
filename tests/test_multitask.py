@@ -1,9 +1,8 @@
-"""Phase 5 (comments.txt §5, multi-task diet): one test per task in the
-6-task diet confirming the adapter/wrapper yields the expected observation
-and action shapes (item 5.1's explicit acceptance ask), plus the extended
-13-dim context vector and the multitask training loop's mechanics. Skips
-entirely if `neurogym` is not installed -- the Sternberg-only pipeline
-(Phases 0-4) never imports this module."""
+"""Multi-task diet: one test per task in the 6-task diet confirming the
+adapter/wrapper yields the expected observation and action shapes, plus the
+shared task cue and the multitask training loop's mechanics. Skips entirely
+if `neurogym` is not installed -- the Sternberg-only pipeline never imports
+this module."""
 import numpy as np
 import pytest
 import yaml
@@ -16,14 +15,18 @@ pytest.importorskip("neurogym")
 from brainalign_wm.tasks.multitask import (
     C_DIM_MULTITASK,
     DIET_TASKS,
+    LEGACY_TASK_CUE_SCHEMA,
     ENV_GT_TO_HEAD,
     HAS_GT,
     HEAD_TO_ENV,
     NEUROGYM_TASKS,
     NeuroGymAdapter,
     NeuroGymBatchEnv,
+    TASK_CODES,
+    TASK_CUE_SCHEMA,
     make_env,
     obs_dim_for,
+    task_cue_metadata,
     task_context_vector,
     task_one_hot,
 )
@@ -40,26 +43,68 @@ def test_diet_has_six_tasks_sternberg_anchor_first():
     assert len(NEUROGYM_TASKS) == 5
 
 
-def test_context_vector_is_13_dim_and_one_hot_matches_task_order():
+# The three entries the Sternberg cue never varies: index 0 is its constant
+# working-memory family bit and indices 8 and 9 are permanently zero, so a
+# task code placed in them costs the working-memory schema nothing.
+TASK_CODE_INDICES = (0, 8, 9)
+
+
+def test_task_cue_is_ten_dim_and_every_task_has_a_distinct_code():
+    seen = {}
     for task in DIET_TASKS:
         c = task_context_vector(task)
-        assert len(c) == C_DIM_MULTITASK == 13
-        assert c[7:] == task_one_hot(task)
-        assert sum(c[7:]) == 1.0
+        assert len(c) == C_DIM_MULTITASK == 10
+        assert tuple(c[i] for i in TASK_CODE_INDICES) == TASK_CODES[task]
+        assert all(c[i] == 0.0 for i in range(10) if i not in TASK_CODE_INDICES)
+        seen.setdefault(TASK_CODES[task], task)
+        assert seen[TASK_CODES[task]] == task, "two tasks share one code"
 
 
-def test_sternberg_context_vector_drops_wasted_dims_keeps_the_rest():
+def test_sternberg_cue_is_the_working_memory_vector_unchanged():
+    """The working-memory cue passes through verbatim -- that is what lets a
+    Sternberg-trained checkpoint keep reading its own input -- and its code
+    entries already spell the Sternberg code."""
     from brainalign_wm.tasks.sternberg import context_vector
 
     base = context_vector(epoch="encode", encoded_count=2)
     mc = task_context_vector("sternberg", sternberg_c=base)
+    assert mc == base
+    assert tuple(mc[i] for i in TASK_CODE_INDICES) == TASK_CODES["sternberg"]
+
+
+def test_legacy_schema_still_decodes_the_thirteen_entry_cue():
+    """Checkpoints trained on the wider cue must stay readable, so the old
+    schema remains addressable by name."""
+    from brainalign_wm.tasks.sternberg import context_vector
+
+    for task in DIET_TASKS:
+        c = task_context_vector(task, schema=LEGACY_TASK_CUE_SCHEMA)
+        assert len(c) == 13
+        assert c[:7] == [0.0] * 7
+        assert c[7:] == task_one_hot(task)
+        assert sum(c[7:]) == 1.0
+
+    base = context_vector(epoch="encode", encoded_count=2)
+    mc = task_context_vector("sternberg", sternberg_c=base, schema=LEGACY_TASK_CUE_SCHEMA)
     assert mc[:7] == [base[1], base[2], base[3], base[4], base[5], base[6], base[7]]
     assert mc[7:] == task_one_hot("sternberg")
 
 
+def test_cue_metadata_records_the_schema_a_checkpoint_was_trained_on():
+    meta = task_cue_metadata()
+    assert meta["schema"] == TASK_CUE_SCHEMA
+    assert meta["tasks"] == DIET_TASKS
+    assert meta["codes"] == {name: list(code) for name, code in TASK_CODES.items()}
+
+
+def test_unknown_cue_schema_is_rejected():
+    with pytest.raises(ValueError):
+        task_context_vector("sternberg", schema="no_such_schema")
+
+
 @pytest.mark.parametrize("task", NEUROGYM_TASKS)
 def test_neurogym_adapter_yields_expected_observation_and_action_shapes(task):
-    """Item 5.1's explicit acceptance ask, per task."""
+    """Observation and action shapes the adapter must produce, per task."""
     obs_dim = obs_dim_for(task)
     env = make_env(task)
     assert env.observation_space.shape == (obs_dim,)
@@ -75,7 +120,7 @@ def test_neurogym_adapter_yields_expected_observation_and_action_shapes(task):
     assert z_t.shape == (BATCH, BOTTLENECK)
 
     # Every head action (0,1,2) must map to a valid index in this task's
-    # native action space (item 5.5: shared 3-action head, no per-task head).
+    # native action space: one shared 3-action head, no per-task head.
     head_to_env = HEAD_TO_ENV[task]
     assert set(head_to_env.keys()) == {0, 1, 2}
     for env_action in head_to_env.values():

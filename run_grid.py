@@ -140,6 +140,17 @@ LOCAL_LEARNING_CELLS = [
     for s in (0, 1) for m in (0, 1)
 ]
 
+# Alternative recurrent substrates for the flat architecture: leaky rate
+# cores that solve the task without a multiplicative gate, at the same
+# effective-synapse budget (brainalign_wm/models/rate_rnn.py). The key is the
+# run_id tag, the value the `model.substrate` the arm trains under. Tags avoid
+# the "_s" digraph, which the run_id parsers split on.
+SUBSTRATE_ARMS = {
+    "ei": "excitatory_inhibitory",
+    "dynsyn": "dynamic_synapse",
+    "lowrank": "low_rank",
+}
+
 # D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
 #
@@ -318,7 +329,7 @@ def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
 
 def enumerate_runs(
     seeds: list[int], include_local_learning: bool = False, supervision: str | None = None,
-    cells: list[str] | None = None,
+    cells: list[str] | None = None, substrate_arm: str | None = None,
 ) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
@@ -341,7 +352,16 @@ def enumerate_runs(
     8-cell S=1 failure arm at a lower seed count, so the grid needs a subset
     filter; a second orchestrator would need its own copy of the resume,
     concurrency and manifest logic. An unknown id raises rather than
-    silently enumerating nothing."""
+    silently enumerating nothing.
+
+    `substrate_arm`: one of `SUBSTRATE_ARMS`, replacing the gated GRU core
+    with a leaky rate core. The tag is appended to the model_id, and so to
+    the run_id, because a cell's S/M/P/T/D bits no longer identify the
+    architecture its checkpoint holds. The rate cores carry no reflective
+    gate and no Hebbian fast weights, so the arm is restricted to flat,
+    unmodulated, non-plastic cells."""
+    if substrate_arm is not None and substrate_arm not in SUBSTRATE_ARMS:
+        raise ValueError(f"unknown substrate arm {substrate_arm!r}; known: {sorted(SUBSTRATE_ARMS)}")
     if cells is not None:
         known = {c["model_id"] for c in CELLS} | {c["model_id"] for c in LOCAL_LEARNING_CELLS}
         unknown = [c for c in cells if c not in known]
@@ -350,12 +370,25 @@ def enumerate_runs(
     selected = [c for c in CELLS if cells is None or c["model_id"] in cells]
     selected_local = [c for c in LOCAL_LEARNING_CELLS if cells is None or c["model_id"] in cells]
 
+    chosen = selected + (selected_local if include_local_learning else [])
+    if substrate_arm is not None:
+        unsupported = [c["model_id"] for c in chosen if c.get("S") or c.get("M") or c.get("P") or c.get("L")]
+        if unsupported:
+            raise ValueError(
+                f"substrate arm {substrate_arm!r} is defined for flat, unmodulated, non-plastic cells "
+                f"only; {unsupported} are not"
+            )
+
     runs = []
     for seed in seeds:
-        for cell in selected + (selected_local if include_local_learning else []):
-            run = {**cell, "seed": seed, "run_id": build_run_id(cell["model_id"], seed, supervision)}
+        for cell in chosen:
+            model_id = cell["model_id"] if substrate_arm is None else f"{cell['model_id']}_{substrate_arm}"
+            run = {**cell, "model_id": model_id, "seed": seed,
+                   "run_id": build_run_id(model_id, seed, supervision)}
             if supervision is not None:
                 run["supervision"] = supervision
+            if substrate_arm is not None:
+                run["substrate"] = SUBSTRATE_ARMS[substrate_arm]
             runs.append(run)
     return runs
 
@@ -834,6 +867,9 @@ def main(argv=None) -> int:
                           "conservative on this GPU as of 2026-08-07. A run that would exceed the budget "
                           "waits for one in-flight run to finish before submitting, so `--workers` is a "
                           "ceiling and not a guarantee. Pass a very large value to disable.")
+    ap.add_argument("--substrate", type=str, default=None, choices=sorted(SUBSTRATE_ARMS),
+                     help="replace the flat gated core with this leaky rate substrate; "
+                          "restricted to flat, unmodulated, non-plastic cells")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
@@ -851,7 +887,7 @@ def main(argv=None) -> int:
     seeds = list(range(args.seeds))
     cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
     runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
-                          supervision=args.supervision, cells=cells)
+                          supervision=args.supervision, cells=cells, substrate_arm=args.substrate)
     completed = load_completed(MANIFEST, args.tier)
     commit = git_commit()
 
@@ -900,9 +936,14 @@ def main(argv=None) -> int:
     # subset), computed once per invocation -- every run in this grid
     # invocation shares this one hash, and the resolved config is dumped
     # verbatim so a run is fully reproducible from the manifest alone.
+    model_overrides = dict(_SUBSTRATE)
+    run_for_resolve = {"supervision": args.supervision}
+    if args.substrate:
+        real_substrate = SUBSTRATE_ARMS[args.substrate]
+        model_overrides = {"substrate": real_substrate, "recurrent_init_spectral_radius": None}
+        run_for_resolve["substrate"] = real_substrate
     resolved_cfg = (
-        build_resolved_config(full_cfg, cfg, args.tier, model_overrides=dict(_SUBSTRATE),
-                              run={"supervision": args.supervision})
+        build_resolved_config(full_cfg, cfg, args.tier, model_overrides=model_overrides, run=run_for_resolve)
         if full_cfg else {"tier": {"name": args.tier, **cfg}}
     )
     cfg_hash = config_hash(resolved_cfg)
@@ -915,14 +956,16 @@ def main(argv=None) -> int:
         # `config_hash`es, and one file cannot be the audit trail for both --
         # whichever pass ran last would leave the other pass's manifest rows
         # citing a hash that matches nothing on disk.
-        resolved_path = resolved_config_path(f"grid_{args.supervision}")
+        config_tag = f"grid_{args.supervision}_{args.substrate}" if args.substrate else f"grid_{args.supervision}"
+        resolved_path = resolved_config_path(config_tag)
         try:
             resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))
         except (OSError, yaml.YAMLError) as e:
             print(f"[run_grid] failed to write resolved config as YAML ({e}); falling back to JSON.", flush=True)
             resolved_path.write_text(json.dumps(resolved_cfg, sort_keys=True, default=str, indent=2))
 
-    print(f"[run_grid] tier={args.tier} seeds={seeds} budget={budget_s/3600:.2f}h workers={args.workers} "
+    print(f"[run_grid] tier={args.tier} substrate={args.substrate or 'gru'} seeds={seeds} "
+          f"budget={budget_s/3600:.2f}h workers={args.workers} "
           f"gpu_budget_mib={args.gpu_budget_mib} runs={len(runs)} "
           # Progress against THIS grid, not the size of the whole completed
           # set: the manifest also holds pilots, vanilla arms and Stage-1

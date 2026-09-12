@@ -105,6 +105,19 @@ def test_cells_filter_restricts_the_grid():
         rg.enumerate_runs([0], supervision="RL", cells=["M00000", "M99999"])
 
 
+def test_substrate_arm_enumerates_expected_run_ids():
+    runs = rg.enumerate_runs([0, 1], supervision="SUP", cells=["M00000"], substrate_arm="ei")
+    assert {r["run_id"] for r in runs} == {"M00000_ei_SUP_s0", "M00000_ei_SUP_s1"}
+    assert all(r["substrate"] == "excitatory_inhibitory" for r in runs)
+
+
+def test_substrate_arm_refuses_gated_or_plastic_cells():
+    import pytest
+
+    with pytest.raises(ValueError, match="flat, unmodulated, non-plastic"):
+        rg.enumerate_runs([0], supervision="SUP", cells=["M11111"], substrate_arm="ei")
+
+
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
     when `--supervision` is omitted -- this is the actual defect §16.4
@@ -187,6 +200,21 @@ def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatc
     rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP"])
     assert captured["steps"] != gate_b and captured["steps"] < 1000
     assert "max_steps_if_criterion_unmet" not in captured
+
+
+def test_main_substrate_flag_records_real_substrate_in_resolved_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(rg, "REPORT", tmp_path / "RUN_REPORT.md")
+    monkeypatch.setattr(rg, "run_grid_loop", lambda *a, **k: None)
+
+    rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke",
+             "--supervision", "SUP", "--substrate", "ei", "--cells", "M00000"])
+
+    import yaml as _yaml
+
+    resolved = _yaml.safe_load((tmp_path / "resolved_config_grid_SUP_ei.yaml").read_text())
+    assert resolved["model"]["substrate"] == "excitatory_inhibitory"
 
 
 def test_every_cell_states_substrate_and_recurrent_init():

@@ -3,7 +3,7 @@ import math
 
 import pandas as pd
 
-from scripts.rsa_encoder_partial import Z_ALPHA_POWER, add_ranks_and_mdd
+from scripts.rsa_encoder_partial import Z_ALPHA_POWER, _top_excluding, add_ranks_and_mdd
 
 
 def _rows():
@@ -34,3 +34,9 @@ def test_mdd_only_defined_between_consecutive_ok_ranks():
 def test_runs_are_ranked_independently():
     df = add_ranks_and_mdd(pd.DataFrame(_rows()))
     assert df[df.run_id == "r2"].iloc[0]["rank"] == 1
+
+
+def test_top_excluding_falls_through_to_runner_up_on_collision():
+    ok = pd.DataFrame({"run_id": ["x", "y", "z"], "score": [3, 2, 1]})
+    assert _top_excluding(ok, "score", set()) == "x"
+    assert _top_excluding(ok, "score", {"x"}) == "y"

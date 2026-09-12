@@ -9,9 +9,14 @@ out of both sides (`task_structure.semipartial_correlation`, the same
 quantile-rank estimator `measurement_validation.py` uses for the
 task-structure covariate) and ranks regions by what is left.
 
-Two models are analysed: the best-aligned and the best-performing run,
-selected from `results/alignment_results.csv` / `results/performance_by_run.csv`
-among runs that cleared the accuracy inclusion criterion (see `select_runs`).
+Three models are analysed: the best-aligned (probe-epoch), best-performing,
+and best-maintenance-epoch-aligned run, selected from
+`results/alignment_results.csv` / `results/performance_by_run.csv` among runs
+that cleared the accuracy inclusion criterion (see `select_runs`). Probe
+alignment is pooled, unstratified, and the measure most exposed to
+task-structure confounding; maintenance alignment is the primary
+representational measure, so selecting on it guards against a ranking that
+mainly reflects stimulus-driven geometry.
 """
 from __future__ import annotations
 
@@ -38,20 +43,28 @@ N_BOOT = 500
 Z_ALPHA_POWER = 1.96 + 0.84  # two-sided alpha=0.05, power=0.80
 
 
+def _top_excluding(ok: pd.DataFrame, sort_col: str, taken: set[str]) -> str:
+    ranked = ok.sort_values(sort_col, ascending=False)["run_id"].tolist()
+    return next(r for r in ranked if r not in taken)
+
+
 def select_runs() -> dict[str, str]:
-    """Best-aligned and best-performing run ids, among runs that cleared the
-    accuracy inclusion criterion (excludes chance-level runs, whose raw
-    alignment can spuriously exceed a noisy ceiling estimate)."""
+    """Best-aligned (probe), best-performing, and best-maintenance-aligned
+    run ids, among runs that cleared the accuracy inclusion criterion
+    (excludes chance-level runs, whose raw alignment can spuriously exceed a
+    noisy ceiling estimate). Each pick excludes any run already picked,
+    falling through to the runner-up on a tie."""
     align = pd.read_csv(RESULTS / "alignment_results.csv")
     perf = pd.read_csv(RESULTS / "performance_by_run.csv")
     df = align.merge(perf[["run_id", "criterion_met_at_budget"]], on="run_id", how="left")
     ok = df[(df.probe_status == "ok") & (df.criterion_met_at_budget == True)].copy()  # noqa: E712
-    best_aligned = ok.sort_values("probe_raw_alignment", ascending=False).iloc[0]["run_id"]
     ok["perf"] = (ok.accuracy_load1 + ok.accuracy_load3) / 2
-    best_perf = ok.sort_values("perf", ascending=False).iloc[0]["run_id"]
-    if best_perf == best_aligned:
-        best_perf = ok.sort_values("perf", ascending=False).iloc[1]["run_id"]
-    return {"best_aligned": best_aligned, "best_performing": best_perf}
+
+    picks: dict[str, str] = {}
+    picks["best_aligned"] = _top_excluding(ok, "probe_raw_alignment", set(picks.values()))
+    picks["best_performing"] = _top_excluding(ok, "perf", set(picks.values()))
+    picks["best_maintenance"] = _top_excluding(ok, "maintenance_signed_raw_alignment", set(picks.values()))
+    return picks
 
 
 def _encoder_probe_rdm(model_df: pd.DataFrame, dandi_data) -> tuple[np.ndarray | None, list | None]:
@@ -235,6 +248,23 @@ def main(argv=None) -> int:
         bad = g[g.partial_status != "ok"]
         if len(bad):
             print("skipped:", dict(zip(bad.region, bad.partial_status.fillna(bad.status))))
+
+    print("\n=== agreement across the three selection criteria ===")
+    top = {g.criterion.iloc[0]: g.loc[g["rank"] == 1, "region"].iloc[0]
+           for _, g in df.groupby("run_id") if (g["rank"] == 1).any()}
+    print("top-ranked region per criterion:", top)
+    print("all three agree on the top region" if len(set(top.values())) == 1
+          else "the criteria disagree on the top region")
+    from scipy.stats import spearmanr
+    criteria = list(top.keys())
+    for i in range(len(criteria)):
+        for j in range(i + 1, len(criteria)):
+            a = df[df.criterion == criteria[i]].set_index("region")["rank"]
+            b = df[df.criterion == criteria[j]].set_index("region")["rank"]
+            shared = [r for r in a.index if r in b.index and pd.notna(a[r]) and pd.notna(b[r])]
+            if len(shared) >= 3:
+                rho, _ = spearmanr(a[shared], b[shared])
+                print(f"  rank correlation {criteria[i]} vs {criteria[j]} over {len(shared)} shared regions: {rho:.3f}")
     return 0
 
 

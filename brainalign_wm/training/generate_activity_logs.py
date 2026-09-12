@@ -128,6 +128,28 @@ def _arch_from_manifest(run_id: str) -> Optional[tuple[int, int, int, int, int]]
     return found
 
 
+def _substrate_for(run_id: str) -> Optional[str]:
+    """Trained substrate recorded in the manifest for this run_id, or None.
+    A rate-substrate run's run_id doesn't imply its substrate, and building the
+    wrong core makes `load_state_dict` fail on a shape mismatch."""
+    manifest = RESULTS / "manifest.jsonl"
+    if not manifest.exists():
+        return None
+    import json
+
+    found = None
+    for line in manifest.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("run_id") == run_id and rec.get("substrate"):
+            found = rec["substrate"]
+    return found
+
+
 def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
     """(pbwm_gate, identity_catch_fraction, flat_units_mult) implied by the
     run_id suffix convention above -- the S/M/P/T/D bits alone don't
@@ -314,6 +336,9 @@ def generate_activity_log(
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    substrate = _substrate_for(run_id)
+    if substrate:
+        cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}
     front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint_name)
     front_end.eval()
@@ -372,6 +397,9 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    substrate = _substrate_for(f"{model_id}_s{seed}")
+    if substrate:
+        cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}
     front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     front_end.eval()
     core.eval()
@@ -448,6 +476,9 @@ def generate_activity_log_reflection_shuffled(
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    substrate = _substrate_for(run_id)
+    if substrate:
+        cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}
     front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint_name)
     front_end.eval()

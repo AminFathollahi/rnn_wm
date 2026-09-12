@@ -72,6 +72,27 @@ def test_parse_run_id_handles_supervision_namespaced_ids():
     assert _parse_run_id("M01L_RL_s2") == ("M01L_RL", 0, 1, 0, 0, 0, 2)
 
 
+def test_parse_run_id_handles_rate_substrate_tags():
+    assert _parse_run_id("M00000_ei_SUP_s0") == ("M00000_ei_SUP", 0, 0, 0, 0, 0, 0)
+    assert _parse_run_id("M00000_dynsyn_s2") == ("M00000_dynsyn", 0, 0, 0, 0, 0, 2)
+    assert _parse_run_id("M00000_lowrank_RL_s1") == ("M00000_lowrank_RL", 0, 0, 0, 0, 0, 1)
+
+
+def test_substrate_for_reads_the_recorded_substrate_from_the_manifest(tmp_path, monkeypatch):
+    import json
+
+    import brainalign_wm.training.generate_activity_logs as gal
+
+    monkeypatch.setattr(gal, "RESULTS", tmp_path)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"run_id": "M00000_ei_SUP_s0", "substrate": "excitatory_inhibitory",
+                     "status": "completed"}) + "\n"
+    )
+
+    assert gal._substrate_for("M00000_ei_SUP_s0") == "excitatory_inhibitory"
+    assert gal._substrate_for("M00000_SUP_s0") is None
+
+
 def test_activity_log_path_namespaces_non_default_checkpoints():
     """advisor.md D33: the Gate A log must not overwrite the Gate B log.
     `ckpt.pt` keeps the original filename so nothing that already reads

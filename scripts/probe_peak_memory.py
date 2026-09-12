@@ -14,10 +14,15 @@ state cannot flatter the next (`--cell` is the internal single-cell worker
 mode; invoking the script with no arguments is the orchestrator that spawns
 one subprocess per cell and prints the acceptance table).
 
-D41's checkpointing fix has never executed on this GPU (D49, comments.txt
-§21.1): every manifest row for the four S=1-plastic cells predates the
-commit that landed it. This script is the cheap way to find out whether the
-fix's derivation matches the card before spending any GPU-hours on it.
+A cell may be named either by its bare five-bit id or by a tagged variant
+(`M00000_dense289`); a tag's model overrides are resolved the same way the
+training and replay paths resolve them, so a variant is measured at the core
+it will actually train, not at the config's default width.
+
+The scheduler's memory gate admits new runs against `_run_mib`'s prediction,
+so a prediction that is not conservative lets two runs on the card that do
+not both fit. This script is the cheap way to check the prediction against
+the hardware before spending GPU-hours on it.
 
     PY=/home/amin/miniconda3/envs/wm_dynamics/bin/python
     $PY scripts/probe_peak_memory.py
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,36 +45,46 @@ if str(ROOT) not in sys.path:
 
 import run_grid  # noqa: E402
 from brainalign_wm.config import get_path, load_config  # noqa: E402
+from brainalign_wm.training.model_variants import overrides_for_model  # noqa: E402
 from brainalign_wm.training.train import DEFAULT_FLAT_GRID  # noqa: E402
 
 RESOLVED_CONFIG = get_path("results") / "resolved_config_grid_SUP.yaml"
 CARD_CAPACITY_MIB = 12227
 
-# D49's cell list (comments.txt §21.1): the S=1 plastic worst case that
-# actually crashed, the S=1 non-plastic `_BASE_MIB`-branch cell at its
-# largest, the S=0 plastic survivor that calibrates the formula against a
-# real completion, and the cheapest cell as the floor.
+# The hierarchical plastic worst case that actually crashed, the hierarchical
+# non-plastic `_BASE_MIB`-branch cell at its largest, the flat plastic
+# survivor that calibrates the formula against a real completion, and the
+# cheapest cell as the floor.
 DEFAULT_CELLS = ["M11111", "M11011", "M01111", "M00000"]
+
+_ARM_BITS = re.compile(r"^M([01]{5})(?:_|$)")
 
 
 def _bits(model_id: str) -> tuple[int, int, int, int, int]:
-    digits = model_id[1:]
-    if len(digits) != 5 or not digits.isdigit():
-        raise ValueError(f"expected a model_id like 'M11111', got {model_id!r}")
-    s, m, p, t, d = (int(c) for c in digits)
+    """The five arm bits at the front of a bare or tagged model id."""
+    match = _ARM_BITS.match(model_id)
+    if match is None:
+        raise ValueError(f"expected a model_id like 'M11111' or 'M11111_tag', got {model_id!r}")
+    s, m, p, t, d = (int(c) for c in match.group(1))
     return s, m, p, t, d
 
 
-def load_full_cfg(checkpointing: bool | None = None) -> dict:
+def load_full_cfg(model_id: str = "", checkpointing: bool | None = None) -> dict:
+    """The resolved grid config with a tagged variant's model overrides
+    applied, so both the probe and the prediction it is checked against see
+    the core the run would really build."""
     cfg = load_config(RESOLVED_CONFIG)
+    overrides = overrides_for_model(model_id)
+    if overrides:
+        cfg = {**cfg, "model": {**cfg["model"], **overrides}}
     if checkpointing is not None:
         cfg = {**cfg, "mechanisms": {**cfg["mechanisms"], "plastic_gradient_checkpointing": checkpointing}}
     return cfg
 
 
 def build_load3_batch(task_gen, cfg: dict, batch_size: int, seed: int) -> list:
-    """B independent load-3 trials, the same generator call `evaluate_accuracy`
-    uses (`train.py:1555`), just fixed at the curriculum's longest load."""
+    """B independent load-3 trials, the same generator call the held-out
+    evaluation uses, just fixed at the curriculum's longest load."""
     rng = np.random.RandomState(seed)
     identity_catch_fraction = float(cfg["task"].get("identity_catch_fraction", 0.0))
     batch = []
@@ -87,7 +103,7 @@ def build_load3_batch(task_gen, cfg: dict, batch_size: int, seed: int) -> list:
 def probe_one_cell(model_id: str, checkpointing: bool, seed: int = 0) -> dict:
     """Runs in-process; the caller (`main`'s worker mode) is what a fresh
     subprocess invokes. Returns measured peak MiB and the trial length
-    actually used, or an `error` field if CUDA raised (e.g. the D49 control:
+    actually used, or an `error` field if CUDA raised (as the control does:
     `M11111` with checkpointing forced off)."""
     import torch
 
@@ -101,7 +117,7 @@ def probe_one_cell(model_id: str, checkpointing: bool, seed: int = 0) -> dict:
     device = torch.device("cuda")
     seed_everything(seed)
 
-    full_cfg = load_full_cfg(checkpointing=checkpointing)
+    full_cfg = load_full_cfg(model_id, checkpointing=checkpointing)
     S, M, P, T, D = _bits(model_id)
 
     image_bank = ImageTokenBank(
@@ -151,7 +167,7 @@ def probe_one_cell(model_id: str, checkpointing: bool, seed: int = 0) -> dict:
 
 def _predicted_mib(model_id: str, checkpointing: bool) -> int:
     s, _m, p, _t, _d = _bits(model_id)
-    return run_grid._run_mib({"S": s, "P": p}, load_full_cfg(checkpointing=checkpointing))
+    return run_grid._run_mib({"S": s, "P": p}, load_full_cfg(model_id, checkpointing=checkpointing))
 
 
 def _print_table(rows: list[dict]) -> None:
@@ -188,7 +204,7 @@ def main(argv=None) -> int:
 
     jobs = [(c, True) for c in args.cells]
     if not args.skip_control:
-        jobs.append(("M11111", False))  # D41's control: must OOM or predict > card capacity
+        jobs.append(("M11111", False))  # control: must OOM or predict > card capacity
 
     rows = []
     for cell, checkpointing in jobs:
@@ -213,7 +229,7 @@ def main(argv=None) -> int:
     over_budget = [r for r in rows if r.get("ratio", 0) > 1.0]
     if over_budget:
         print(f"\n{len(over_budget)} cell(s) measured ABOVE _run_mib's prediction -- "
-              "the estimator needs correction, do not adjust launch parameters to fit. See comments.txt §21.1.")
+              "the estimator needs correction; do not adjust launch parameters to fit.")
         return 1
     print("\nAll checkpointed cells measured at or under their prediction.")
     return 0

@@ -1,7 +1,8 @@
 """`scripts/probe_peak_memory.py` measures memory against `run_grid._run_mib`'s
-prediction (comments.txt §21.1, D49). If the probe's load-3 trial were a
-different length than the scheduler predicts for, it would silently agree
-with a broken memory estimate -- this test is the guard against that."""
+prediction. If the probe's load-3 trial were a different length than the
+scheduler predicts for, or if it built a tagged variant's core at the
+config's default width, it would silently agree with a broken memory
+estimate -- these tests are the guard against that."""
 import inspect
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
 import run_grid as rg  # noqa: E402
 import scripts.probe_peak_memory as probe  # noqa: E402
 from brainalign_wm.training.train import DEFAULT_FLAT_GRID, _run_trial  # noqa: E402
+from brainalign_wm.training.model_variants import FLAT_CONTROLS  # noqa: E402
 from scripts.probe_peak_memory import _bits, build_load3_batch, load_full_cfg  # noqa: E402
 
 STIMULI_READY = (ROOT / "stimuli").exists()
@@ -45,8 +47,21 @@ def test_bits_parses_model_id():
     assert _bits("M11111") == (1, 1, 1, 1, 1)
     assert _bits("M00000") == (0, 0, 0, 0, 0)
     assert _bits("M11011") == (1, 1, 0, 1, 1)
+    assert _bits("M00010_dense289") == (0, 0, 0, 1, 0)
     with pytest.raises(ValueError):
         _bits("M111")
+    with pytest.raises(ValueError):
+        _bits("M000001_dense289")
+
+
+@pytest.mark.parametrize("tag", sorted(FLAT_CONTROLS))
+def test_tagged_model_id_is_probed_at_the_core_it_would_train(tag):
+    """A crossed flat control is measured at its own width and connectivity,
+    not at the resolved config's default flat core."""
+    cfg = load_full_cfg(f"M00000_{tag}")["model"]
+    for key, value in FLAT_CONTROLS[tag].items():
+        assert cfg[key] == value
+    assert load_full_cfg("M00000")["model"] == load_full_cfg()["model"]
 
 
 def test_flat_grid_defaults_match_model_configuration():

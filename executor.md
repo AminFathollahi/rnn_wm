@@ -7519,3 +7519,45 @@ Nothing broken and left unfixed by this follow-up.
   tests/test_probe_peak_memory.py` reported `3 passed`; `wm_dynamics/bin/python
   -m pytest -q tests/test_param_budget.py` reported `12 passed`; bytecode
   compilation and `git diff --check` succeeded.
+
+### 2026-09-13 -- measured peak GPU memory for the flat width and connectivity controls
+
+- The scheduler's memory gate sizes every non-plastic run at a flat 500 MiB
+  regardless of core width. All five crossed flat-control arms and the
+  289-unit hierarchy budget control are non-plastic, so each was admitted on
+  that one constant -- including a 289x289 dense recurrent core, the widest
+  trained in this study. The constant was untested at those widths.
+- `scripts/probe_peak_memory.py` now accepts a tagged model id. The arm bits
+  are read from the five leading characters, and a tag's model overrides are
+  resolved through the same helper the training and replay paths use, so a
+  variant is built at the core it would really train instead of at the
+  resolved config's default flat core.
+- Measured, one forward + backward + optimizer step per core on a full
+  128-trial batch of the curriculum's longest trial, each core in a fresh
+  process:
+
+      cell                    predicted_mib  measured_mib  ratio
+      M00000                            500          95.1  0.190
+      M00000_local128                   500         109.4  0.219
+      M00000_random128                  500         109.4  0.219
+      M00000_dense289                   500         144.3  0.289
+      M00000_local289native             500         216.9  0.434
+      M00000_random289                  500         216.9  0.434
+      M00000_local289                   500         216.9  0.434
+
+      All checkpointed cells measured at or under their prediction.
+
+- The constant is conservative at every new width, `dense289` included, so no
+  launch parameter changes. The dense 128-unit baseline reproduced its
+  previously recorded 95.1 MiB exactly, which is what makes the rest of the
+  column comparable to the earlier campaign measurements.
+- A masked core costs 72.6 MiB more than the dense core of the same width
+  because the mask is applied inside the cell's forward pass, so every tick
+  retains its own masked [3H, H] copy for backward: 0.956 MiB x 76 ticks =
+  72.6 MiB, the measured difference to the decimal. Local and
+  degree-preserving random masks are identical in peak, as they must be.
+- Under `--gpu-budget-mib 10500` the gate admits 21 such runs at once, so
+  `--workers 8` is the binding limit and none of these cells serialise.
+- `wm_dynamics/bin/python -m pytest -q tests/test_probe_peak_memory.py`
+  reported `8 passed`.
+- No training was launched.

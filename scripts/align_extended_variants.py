@@ -59,6 +59,7 @@ FAMILIES = {
     "idcatch": None,
     "2x": "M00000", "l1": "M00000", "dropout": "M00000",
     "ei": "M00000", "dynsyn": "M00000", "lowrank": "M00000",
+    "w128": None,
 }
 IDENTITY_FAMILY = "idcatch"
 # Largest load-3 accuracy gap a seed pair may show and still count as

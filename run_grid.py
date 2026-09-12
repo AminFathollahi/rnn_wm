@@ -151,6 +151,21 @@ SUBSTRATE_ARMS = {
     "lowrank": "low_rank",
 }
 
+# Hierarchical arm whose worker population is rebuilt at the flat core's unit
+# count and grid, so the topographic smoothness penalty acts on the same
+# geometry in both architectures instead of on 196 units in a 14x14 sheet
+# against 128 in a 16x8 one. The resulting core is deliberately SMALLER than
+# either standard core -- 46,701 effective synapses against the flat core's
+# 73,728 and the 196-unit worker's 74,052 -- which makes it a one-sided
+# control: an advantage that survives at a strictly smaller network on the flat
+# sheet's own grid is explained by neither worker width nor grid shape.
+# `worker_density` is deliberately left alone; restoring the synapse budget at
+# 128 units would take ~0.65, a mean in-degree of ~84, which is no longer
+# sparse local connectivity. The tag avoids the "_s" digraph the run_id parsers
+# split on.
+MATCHED_WORKER_GRID_TAG = "w128"
+MATCHED_WORKER_GRID = {"worker_units": 128, "worker_grid": [16, 8]}
+
 # D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
 #
@@ -330,6 +345,7 @@ def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
 def enumerate_runs(
     seeds: list[int], include_local_learning: bool = False, supervision: str | None = None,
     cells: list[str] | None = None, substrate_arm: str | None = None,
+    matched_worker_grid: bool = False,
 ) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
@@ -360,7 +376,16 @@ def enumerate_runs(
     architecture its checkpoint holds. The rate cores carry no reflective
     gate, no Hebbian fast weights, and implement neither the topography
     nor the Dale's-law penalty, so the arm is restricted to flat,
-    unmodulated, non-plastic, penalty-free cells (S=M=P=T=D=0, plus L=0)."""
+    unmodulated, non-plastic, penalty-free cells (S=M=P=T=D=0, plus L=0).
+
+    `matched_worker_grid`: rebuild the hierarchical worker population at
+    `MATCHED_WORKER_GRID` (the flat core's 128 units on its 16x8 sheet)
+    instead of the config's 196 units on 14x14. The tag is appended to the
+    model_id, and so to the run_id, for the same reason the substrate tag is:
+    the S/M/P/T/D bits no longer identify the network the checkpoint holds.
+    Restricted to hierarchical cells -- a flat cell has no worker population
+    to resize, and silently enumerating it would produce run_ids claiming an
+    override that changed nothing."""
     if substrate_arm is not None and substrate_arm not in SUBSTRATE_ARMS:
         raise ValueError(f"unknown substrate arm {substrate_arm!r}; known: {sorted(SUBSTRATE_ARMS)}")
     if cells is not None:
@@ -381,16 +406,28 @@ def enumerate_runs(
                 f"only; {unsupported} are not"
             )
 
+    if matched_worker_grid:
+        flat = [c["model_id"] for c in chosen if not c.get("S")]
+        if flat:
+            raise ValueError(
+                f"the matched worker grid resizes the hierarchical worker population; "
+                f"{flat} are flat cells and have none"
+            )
+
     runs = []
     for seed in seeds:
         for cell in chosen:
             model_id = cell["model_id"] if substrate_arm is None else f"{cell['model_id']}_{substrate_arm}"
+            if matched_worker_grid:
+                model_id = f"{model_id}_{MATCHED_WORKER_GRID_TAG}"
             run = {**cell, "model_id": model_id, "seed": seed,
                    "run_id": build_run_id(model_id, seed, supervision)}
             if supervision is not None:
                 run["supervision"] = supervision
             if substrate_arm is not None:
                 run["substrate"] = SUBSTRATE_ARMS[substrate_arm]
+            if matched_worker_grid:
+                run.update(MATCHED_WORKER_GRID)
             runs.append(run)
     return runs
 
@@ -873,6 +910,13 @@ def main(argv=None) -> int:
                      help="replace the flat gated core with this leaky rate substrate; "
                           "restricted to flat, unmodulated, non-plastic cells with no "
                           "topography or Dale's-law penalty")
+    ap.add_argument("--matched-worker-grid", action="store_true",
+                     help=f"rebuild the hierarchical worker population at the flat core's unit count "
+                          f"and grid ({MATCHED_WORKER_GRID['worker_units']} units, "
+                          f"{MATCHED_WORKER_GRID['worker_grid'][0]}x{MATCHED_WORKER_GRID['worker_grid'][1]}) "
+                          f"so the topographic smoothness penalty acts on the same geometry in both "
+                          f"architectures; hierarchical cells only, and tagged "
+                          f"'{MATCHED_WORKER_GRID_TAG}' in the run_id")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
@@ -890,7 +934,8 @@ def main(argv=None) -> int:
     seeds = list(range(args.seeds))
     cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
     runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
-                          supervision=args.supervision, cells=cells, substrate_arm=args.substrate)
+                          supervision=args.supervision, cells=cells, substrate_arm=args.substrate,
+                          matched_worker_grid=args.matched_worker_grid)
     completed = load_completed(MANIFEST, args.tier)
     commit = git_commit()
 
@@ -945,6 +990,11 @@ def main(argv=None) -> int:
         real_substrate = SUBSTRATE_ARMS[args.substrate]
         model_overrides = {"substrate": real_substrate, "recurrent_init_spectral_radius": None}
         run_for_resolve["substrate"] = real_substrate
+    if args.matched_worker_grid:
+        # Without this the written audit trail -- and `_run_mib`, which sizes
+        # the memory gate from it -- would read config.yaml's 196-unit worker
+        # while a 128-unit one trained.
+        model_overrides = {**model_overrides, **MATCHED_WORKER_GRID}
     resolved_cfg = (
         build_resolved_config(full_cfg, cfg, args.tier, model_overrides=model_overrides, run=run_for_resolve)
         if full_cfg else {"tier": {"name": args.tier, **cfg}}
@@ -960,6 +1010,8 @@ def main(argv=None) -> int:
         # whichever pass ran last would leave the other pass's manifest rows
         # citing a hash that matches nothing on disk.
         config_tag = f"grid_{args.supervision}_{args.substrate}" if args.substrate else f"grid_{args.supervision}"
+        if args.matched_worker_grid:
+            config_tag = f"{config_tag}_{MATCHED_WORKER_GRID_TAG}"
         resolved_path = resolved_config_path(config_tag)
         try:
             resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))

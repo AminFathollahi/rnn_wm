@@ -59,6 +59,33 @@ def test_hrl_core_effective_count_sums_worker_manager_gproj():
     assert core.n_units() == 9 + 5
 
 
+def test_grid_matched_worker_core_is_smaller_than_both_standard_cores():
+    """The hierarchical core rebuilt at the flat core's unit count and 16x8
+    sheet, so arm T's smoothness penalty acts on one geometry in both
+    architectures. `worker_density` is unchanged, so this core is strictly
+    smaller than either standard core -- that is what makes it a one-sided
+    control rather than a second free parameter."""
+    from brainalign_wm.training.train import _build_model
+
+    matched_cfg = {**FULL_CFG, "model": {**CFG, "worker_units": 128, "worker_grid": [16, 8]}}
+    _fe, matched, _heads = _build_model(matched_cfg, S=1, M=0, P=0, device="cpu")
+    _fe, standard, _heads = _build_model(FULL_CFG, S=1, M=0, P=0, device="cpu")
+
+    assert (matched.worker_units, matched.grid) == (128, (16, 8))
+    assert tuple(CFG["flat_grid"]) == (16, 8), "the arm exists to share the flat core's sheet"
+    assert matched.pool_worker(torch.zeros(2, 128)).shape == (2, 32)
+    assert matched.effective_param_count() == 46_701
+
+    assert (standard.worker_units, standard.grid) == (196, (14, 14))
+    assert standard.pool_worker(torch.zeros(2, 196)).shape == (2, 49)
+    assert standard.effective_param_count() == 74_052
+
+    flat = MaskedGRUCell(CFG["bottleneck"], CFG["flat_units"], mask=None)
+    assert flat.effective_param_count() == 73_728
+    assert matched.effective_param_count() < min(flat.effective_param_count(),
+                                                  standard.effective_param_count())
+
+
 def test_vanilla_rnn_cell_forward_shape_and_effective_count():
     mask = torch.zeros(6, 6)
     mask[:3, :3] = 1.0  # 9 alive entries

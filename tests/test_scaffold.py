@@ -126,6 +126,54 @@ def test_substrate_arm_refuses_topography_and_dale_cells():
             rg.enumerate_runs([0], supervision="SUP", cells=[model_id], substrate_arm="ei")
 
 
+def test_matched_worker_grid_arm_enumerates_tagged_disjoint_run_ids():
+    """The arm reruns two hierarchical cells with the worker population rebuilt
+    at the flat core's width and sheet. Its run_ids must not collide with the
+    196-unit runs of the same cells and seeds: a collision would either skip
+    the arm as already-completed or resume a 196-unit checkpoint into a
+    128-unit core."""
+    cells = ["M10000", "M10010"]
+    runs = rg.enumerate_runs(range(8), supervision="SUP", cells=cells, matched_worker_grid=True)
+    ids = {r["run_id"] for r in runs}
+    assert len(ids) == 16
+    assert ids == {f"M{bits}_w128_SUP_s{seed}" for bits in ("10000", "10010") for seed in range(8)}
+    assert not ids & {r["run_id"] for r in rg.enumerate_runs(range(8), supervision="SUP")}
+    for r in runs:
+        assert r["worker_units"] == 128 and r["worker_grid"] == [16, 8], r["run_id"]
+        assert (r["S"], r["M"], r["P"]) == (1, 0, 0), r["run_id"]
+
+
+def test_matched_worker_grid_refuses_flat_cells():
+    """A flat cell has no worker population to resize, so its run_id would
+    carry a tag for an override that changed nothing."""
+    import pytest
+
+    with pytest.raises(ValueError, match="flat cells"):
+        rg.enumerate_runs([0], supervision="SUP", cells=["M00000"], matched_worker_grid=True)
+    with pytest.raises(ValueError, match="flat cells"):
+        rg.enumerate_runs([0], supervision="SUP", matched_worker_grid=True)  # the full grid: 7 flat cells
+
+
+def test_main_matched_worker_grid_flag_records_the_override_in_resolved_config(tmp_path, monkeypatch):
+    """The resolved config is the audit trail AND the memory estimate's input,
+    so it must state the width that actually trained, not config.yaml's."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(rg, "REPORT", tmp_path / "RUN_REPORT.md")
+    monkeypatch.setattr(rg, "run_grid_loop", lambda *a, **k: None)
+
+    rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP",
+             "--matched-worker-grid", "--cells", "M10000"])
+
+    import yaml as _yaml
+
+    resolved = _yaml.safe_load((tmp_path / "resolved_config_grid_SUP_w128.yaml").read_text())
+    assert resolved["model"]["worker_units"] == 128
+    assert resolved["model"]["worker_grid"] == [16, 8]
+    # The 196-unit campaign's own resolved config must not have been rewritten.
+    assert not (tmp_path / "resolved_config_grid_SUP.yaml").exists()
+
+
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
     when `--supervision` is omitted -- this is the actual defect §16.4

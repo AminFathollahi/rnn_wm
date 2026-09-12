@@ -1,19 +1,8 @@
-"""Demixed principal component analysis (Kobak & Machens 2016), implemented
-from scratch. Decomposes condition-mean, time-resolved activity into
-condition-independent, per-factor (e.g. item/category, load), and
-interaction marginalizations, each then reduced by ordinary PCA.
+"""Condition-marginalized PCA for descriptive variance decomposition.
 
-Marginalization via the standard inclusion-exclusion / ANOVA-style
-decomposition: for a subset S of factors (which may include `"time"` as a
-factor), phi_S = <R>_{not S} minus every lower-order phi_{S'} for S' subset
-S. This recursively strips out lower-order structure so each marginalization
-contains only the variance genuinely explained by exactly that combination
-of factors -- e.g. the "load" marginalization contains no item- or
-time-driven variance.
-
-`R` is a condition-mean tensor `[n_units, level(f1), level(f2), ..., n_time]`
--- the caller (recovery gate / real analysis) builds this by averaging
-per-trial rates over trials within each (f1, f2, ..., time-bin) cell.
+The module uses ANOVA-style marginalization followed by ordinary PCA. It
+does not implement the regularized encoder/decoder estimator used in full
+dPCA.
 """
 from __future__ import annotations
 

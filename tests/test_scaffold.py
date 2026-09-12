@@ -142,6 +142,7 @@ def test_locality_matched_flat_arm_enumerates_tagged_disjoint_run_ids():
     for r in runs:
         assert r["flat_units"] == 289 and r["flat_grid"] == [17, 17], r["run_id"]
         assert r["flat_density"] == 0.0681, r["run_id"]
+        assert r["flat_recurrent_init_units"] == 196, r["run_id"]
         assert (r["S"], r["M"], r["P"]) == (0, 0, 0), r["run_id"]
     # The tag must not contain the digraph the run_id parsers split the seed on.
     assert "_s" not in rg.LOCAL_CONNECTIVITY_FLAT_TAG
@@ -176,6 +177,7 @@ def test_main_locality_matched_flat_flag_records_the_override_in_resolved_config
     assert resolved["model"]["flat_units"] == 289
     assert resolved["model"]["flat_grid"] == [17, 17]
     assert resolved["model"]["flat_density"] == 0.0681
+    assert resolved["model"]["flat_recurrent_init_units"] == 196
     # The dense campaign's own resolved config must not have been rewritten.
     assert not (tmp_path / "resolved_config_grid_SUP.yaml").exists()
 

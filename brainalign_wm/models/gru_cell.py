@@ -63,10 +63,14 @@ def bioinit_weight_hh(hidden_dim: int, n_gates: int = 3, seed: Optional[int] = N
 
 
 class MaskedGRUCell(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None):
+    def __init__(self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None,
+                 recurrent_init_units: Optional[int] = None):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        # Width the recurrent draw is scaled by, which is this cell's own
+        # unless a caller states otherwise -- see `reset_parameters`.
+        self.recurrent_init_units = int(recurrent_init_units or hidden_dim)
         self.weight_ih = nn.Parameter(torch.empty(3 * hidden_dim, input_dim))
         self.weight_hh = nn.Parameter(torch.empty(3 * hidden_dim, hidden_dim))
         self.bias_ih = nn.Parameter(torch.zeros(3 * hidden_dim))
@@ -81,9 +85,28 @@ class MaskedGRUCell(nn.Module):
             self.mask = None
 
     def reset_parameters(self) -> None:
+        """`weight_hh` is drawn at 1/sqrt(`recurrent_init_units`), which
+        defaults to this cell's own width and is then exactly the standard
+        draw. It is settable because the locality mask is applied AFTER the
+        draw, so a masked cell's recurrent gain at initialization falls with
+        its width: on the sheets this study uses, a 289-unit masked core
+        drawn at its own width starts with a candidate-block spectral radius
+        of 0.167 against a 196-unit masked one's 0.208. Two cores meant to
+        differ only in architecture would then also differ in recurrent gain,
+        which is a training-dynamics variable and not an architectural one.
+        Drawing the wider core at the narrower one's per-synapse scale brings
+        the two within a few percent.
+
+        `weight_ih` is deliberately NOT covered by this and is always drawn
+        at the cell's own width. Input width differs between a hierarchical
+        worker (its bottleneck plus the top-down gate) and a flat core (the
+        bottleneck alone), and that difference IS the top-down pathway --
+        part of what an architecture contrast tests, not a nuisance to match
+        away."""
         std = 1.0 / (self.hidden_dim ** 0.5)
         nn.init.uniform_(self.weight_ih, -std, std)
-        nn.init.uniform_(self.weight_hh, -std, std)
+        recurrent_std = 1.0 / (self.recurrent_init_units ** 0.5)
+        nn.init.uniform_(self.weight_hh, -recurrent_std, recurrent_std)
 
     def forward(
         self,
@@ -148,8 +171,9 @@ class PlasticGRUCell(MaskedGRUCell):
     def __init__(
         self, input_dim: int, hidden_dim: int, mask: Optional[torch.Tensor] = None,
         eta_decay: float = 0.9, eta_hebb: float = 0.05, hebb_clip: float = 2.0,
+        recurrent_init_units: Optional[int] = None,
     ):
-        super().__init__(input_dim, hidden_dim, mask)
+        super().__init__(input_dim, hidden_dim, mask, recurrent_init_units=recurrent_init_units)
         self.alpha = nn.Parameter(torch.zeros(3 * hidden_dim, hidden_dim))
         self.eta_decay = eta_decay
         self.eta_hebb = eta_hebb

@@ -104,6 +104,65 @@ def test_three_cores_share_one_effective_synapse_budget_and_one_in_degree():
     assert abs(local_mask.sum(1).mean().item() - worker_mask.sum(1).mean().item()) < 0.5
 
 
+def _candidate_block_spectral_radius(cell) -> float:
+    """Largest |eigenvalue| of the masked candidate-gate recurrent block --
+    the gate that writes new content into the state, so the readable measure
+    of a cell's recurrent gain at initialization."""
+    import numpy as np
+
+    weight = cell.weight_hh if cell.mask is None else cell.weight_hh * cell.mask
+    hidden = cell.hidden_dim
+    return float(np.abs(np.linalg.eigvals(weight[2 * hidden:3 * hidden].detach().numpy())).max())
+
+
+def test_locality_matched_flat_core_starts_at_the_worker_s_recurrent_gain():
+    """A locality mask is applied AFTER the recurrent draw, so a masked
+    cell's initial gain falls with its width: at 289 units drawn at its own
+    width the control would start 18% below the 196-unit worker, a
+    training-dynamics difference riding along with the architecture contrast
+    the arm exists to isolate. Drawn at the worker's per-synapse scale it
+    starts within a few percent instead. These are eigenvalues of a random
+    draw, so the seed is fixed and the tolerance is loose."""
+    from brainalign_wm.models.gru_cell import make_locality_mask
+
+    def build(*args, **kwargs):
+        torch.manual_seed(0)
+        return MaskedGRUCell(*args, **kwargs)
+
+    worker_mask = make_locality_mask(tuple(CFG["worker_grid"]), CFG["worker_density"], seed=0)
+    local_mask = make_locality_mask((17, 17), 0.0681, seed=0)
+
+    dense_flat = build(CFG["bottleneck"], CFG["flat_units"])
+    worker = build(CFG["bottleneck"] + CFG["g_dim"], CFG["worker_units"], mask=worker_mask)
+    local_flat = build(CFG["bottleneck"], 289, mask=local_mask,
+                       recurrent_init_units=CFG["worker_units"])
+    local_flat_unmatched = build(CFG["bottleneck"], 289, mask=local_mask)
+
+    assert _candidate_block_spectral_radius(dense_flat) == pytest.approx(0.584, abs=0.01)
+    worker_radius = _candidate_block_spectral_radius(worker)
+    assert worker_radius == pytest.approx(0.208, abs=0.01)
+    assert _candidate_block_spectral_radius(local_flat) == pytest.approx(0.203, abs=0.01)
+    assert _candidate_block_spectral_radius(local_flat_unmatched) == pytest.approx(0.167, abs=0.01)
+    assert abs(_candidate_block_spectral_radius(local_flat) - worker_radius) / worker_radius < 0.05
+
+    # Matching the gain must not move the synapse budget.
+    assert local_flat.effective_param_count() == local_flat_unmatched.effective_param_count() == 72_612
+    # The input projection is deliberately drawn at the cell's OWN width
+    # (1/sqrt(289) = 0.0588), not the worker's wider draw (1/sqrt(196) =
+    # 0.0714): input width differs because of the top-down pathway, which is
+    # part of the contrast rather than a nuisance to match away.
+    assert local_flat.weight_ih.abs().max().item() <= 1.0 / 289 ** 0.5
+
+
+def test_recurrent_init_width_defaults_to_the_cell_s_own():
+    torch.manual_seed(0)
+    default = MaskedGRUCell(4, 16)
+    torch.manual_seed(0)
+    explicit = MaskedGRUCell(4, 16, recurrent_init_units=16)
+    assert torch.equal(default.weight_hh, explicit.weight_hh)
+    assert torch.equal(default.weight_ih, explicit.weight_ih)
+
+
 def test_flat_core_is_densely_recurrent_unless_a_density_is_set():
     """Null density is the setting for every battery cell, so the default
     build must stay bit-identical to the unmasked one."""

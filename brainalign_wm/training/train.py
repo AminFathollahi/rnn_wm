@@ -260,21 +260,26 @@ class _GatedFlatCore(torch.nn.Module):
     including the true M=0,P=0 baseline. `mask=None` (the default, and every
     battery cell) is dense recurrence; a mask gives this one population the
     hierarchical worker's connectivity statistics without any of its other
-    machinery -- see `_build_model`'s `flat_density`. Previously M=0,P=0 used a separate `FlatGRUCore`
+    machinery -- see `_build_model`'s `flat_density`. `recurrent_init_units`
+    goes with it: a mask is applied after the recurrent draw, so matching a
+    masked core's connectivity to another population's without also matching
+    the draw's scale leaves the two differing in initial recurrent gain. Previously M=0,P=0 used a separate `FlatGRUCore`
     wrapping plain `nn.GRUCell`, which inits its biases uniform where
     `MaskedGRUCell` inits them to zero -- a free confound between M00000
     and M01000 (B1). `extra_update_bias` defaults to None, so the M=0 case
     is just this class called with no bias, not a different class."""
 
     def __init__(self, input_dim: int, hidden_dim: int, plastic: bool = False, hebb_kwargs: Optional[dict] = None,
-                 mask: Optional[torch.Tensor] = None):
+                 mask: Optional[torch.Tensor] = None, recurrent_init_units: Optional[int] = None):
         super().__init__()
         from brainalign_wm.models.gru_cell import MaskedGRUCell, PlasticGRUCell
 
         self.plastic = plastic
         self.cell = (
-            PlasticGRUCell(input_dim, hidden_dim, mask=mask, **(hebb_kwargs or {}))
-            if plastic else MaskedGRUCell(input_dim, hidden_dim, mask=mask)
+            PlasticGRUCell(input_dim, hidden_dim, mask=mask, recurrent_init_units=recurrent_init_units,
+                           **(hebb_kwargs or {}))
+            if plastic else MaskedGRUCell(input_dim, hidden_dim, mask=mask,
+                                          recurrent_init_units=recurrent_init_units)
         )
         self.hidden_dim = hidden_dim
 
@@ -352,8 +357,15 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
                 from brainalign_wm.models.gru_cell import make_locality_mask
 
                 flat_mask = make_locality_mask(tuple(m["flat_grid"]), float(flat_density), seed=0)
+            # `flat_recurrent_init_units` states the width the recurrent draw
+            # is scaled by, so a masked flat core can be matched to another
+            # population's initial recurrent gain as well as its connectivity
+            # (the mask is applied after the draw, so gain otherwise falls
+            # with width). Null is this core's own width, which is the
+            # standard draw and every battery cell.
             core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs,
-                                  mask=flat_mask).to(device)
+                                  mask=flat_mask,
+                                  recurrent_init_units=m.get("flat_recurrent_init_units")).to(device)
             if bioinit:
                 # Item 8.9b: arm D + bio-statistics weight init (M00001_bioinit
                 # only) -- replaces the cell's own uniform reset_parameters()
@@ -1851,7 +1863,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # the grid's resolved copy, so an override that stopped at the run dict
     # would build a dense core at the config's width and train a different
     # network than the run_id claims.
-    for key in ("flat_grid", "flat_density"):
+    for key in ("flat_grid", "flat_density", "flat_recurrent_init_units"):
         if key in run:
             full_cfg = {**full_cfg, "model": {**full_cfg["model"], key: run[key]}}
     # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's

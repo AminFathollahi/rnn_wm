@@ -166,16 +166,28 @@ SUBSTRATE_ARMS = {
 # 72,612 effective structural synapses against the dense flat core's 73,728
 # and the hierarchical core's 74,052, a 1.98% three-way spread well inside
 # `model.param_budget_tol`, and a mean in-degree of 19.75 against the 14x14
-# worker's 19.69. Density is matched in-degree rather than as a global
+# worker's 19.69. Density is matched as in-degree rather than as a global
 # fraction: in-degree is the per-unit quantity that defines the connectivity
 # regime, and at a different width the two cannot both hold -- the same
 # 0.10 fraction on this sheet would mean 27.1 incoming connections per unit,
-# 38% above the worker's. Unit count is the dimension left unmatched (289
-# against 196+24 and 128): of units, synapses and in-degree only two can be
-# held at once, and the preregistered criterion is synapses. The tag avoids
-# the "_s" digraph the run_id parsers split on.
+# 38% above the worker's.
+#
+# `flat_recurrent_init_units` matches the initial recurrent gain as well as
+# the connectivity: the mask is applied after the recurrent draw, so drawing
+# this core at its own width would start it at a candidate-block spectral
+# radius of 0.167 against the worker's 0.208, an 18% difference riding along
+# with the contrast the arm exists to isolate. Drawn at the worker's width
+# instead it starts at 0.204. The input projection is deliberately not
+# rescaled -- the worker's input is wider because of the top-down gate,
+# which is part of what is under test.
+#
+# Unit count is the dimension left unmatched (289 against 196+24 and 128):
+# of units, synapses and in-degree only two can be held at once, and the
+# preregistered criterion is synapses. The tag avoids the "_s" digraph the
+# run_id parsers split on.
 LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
-LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681}
+LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681,
+                           "flat_recurrent_init_units": 196}
 
 # D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.

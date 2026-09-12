@@ -157,7 +157,8 @@ def _substrate_for(run_id: str) -> Optional[str]:
 # train time, so a replay that rebuilt the core from the default config
 # would load a dense 128-unit state dict into it and fail.
 LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
-LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681}
+LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681,
+                           "flat_recurrent_init_units": 196}
 
 
 def _run_id_extras(model_id: str) -> tuple[bool, float, int, dict]:

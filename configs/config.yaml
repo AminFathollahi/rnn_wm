@@ -136,6 +136,15 @@ model:
                                             # carry the worker's connectivity statistics with none of its
                                             # hierarchy: no manager, no pooled bottleneck, no top-down gate.
                                             # `flat_units` must equal the product of `flat_grid` for it.
+  flat_recurrent_init_units: null          # width the S=0 recurrent draw is scaled by (std 1/sqrt of it).
+                                            # null = this core's own `flat_units`, the standard draw and the
+                                            # setting for every battery cell. Set it to another population's
+                                            # width to match that population's initial recurrent gain: the
+                                            # locality mask is applied after the draw, so a masked core's
+                                            # gain otherwise falls with its width and would differ from the
+                                            # core it is being contrasted against. `weight_ih` is never
+                                            # rescaled by this -- input width differs because of the
+                                            # top-down pathway, which is part of the contrast.
   flat_grid: [16, 8]                       # arm T on S=0 (§1.2): imposed layout on the flat_units, product
                                             # must equal flat_units (128 = 16*8; was 16x16=256 pre-Phase-1)
                                             # (All-TNNs "topography without hierarchy" test) -- arbitrary unit

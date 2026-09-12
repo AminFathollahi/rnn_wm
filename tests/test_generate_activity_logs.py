@@ -100,7 +100,8 @@ def test_run_id_extras_rebuilds_the_locality_matched_flat_core():
     assert _parse_run_id("M00000_local289_SUP_s0") == ("M00000_local289_SUP", 0, 0, 0, 0, 0, 0)
     assert _parse_run_id("M00010_local289_SUP_s7") == ("M00010_local289_SUP", 0, 0, 0, 1, 0, 7)
     assert _run_id_extras("M00010_local289") == (
-        False, 0.0, 1, {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681})
+        False, 0.0, 1, {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681,
+                        "flat_recurrent_init_units": 196})
     assert _run_id_extras("M00010")[3] == {}
     # The launcher and the replay path must agree on what the tag means.
     assert rg.LOCAL_CONNECTIVITY_FLAT == _run_id_extras(f"M00000_{rg.LOCAL_CONNECTIVITY_FLAT_TAG}")[3]

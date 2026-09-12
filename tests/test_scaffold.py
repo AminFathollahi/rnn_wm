@@ -118,6 +118,14 @@ def test_substrate_arm_refuses_gated_or_plastic_cells():
         rg.enumerate_runs([0], supervision="SUP", cells=["M11111"], substrate_arm="ei")
 
 
+def test_substrate_arm_refuses_topography_and_dale_cells():
+    import pytest
+
+    for model_id in ("M00010", "M00001", "M00011"):  # +T, +D, T+D
+        with pytest.raises(ValueError, match="flat, unmodulated, non-plastic"):
+            rg.enumerate_runs([0], supervision="SUP", cells=[model_id], substrate_arm="ei")
+
+
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
     when `--supervision` is omitted -- this is the actual defect §16.4

@@ -358,8 +358,9 @@ def enumerate_runs(
     with a leaky rate core. The tag is appended to the model_id, and so to
     the run_id, because a cell's S/M/P/T/D bits no longer identify the
     architecture its checkpoint holds. The rate cores carry no reflective
-    gate and no Hebbian fast weights, so the arm is restricted to flat,
-    unmodulated, non-plastic cells."""
+    gate, no Hebbian fast weights, and implement neither the topography
+    nor the Dale's-law penalty, so the arm is restricted to flat,
+    unmodulated, non-plastic, penalty-free cells (S=M=P=T=D=0, plus L=0)."""
     if substrate_arm is not None and substrate_arm not in SUBSTRATE_ARMS:
         raise ValueError(f"unknown substrate arm {substrate_arm!r}; known: {sorted(SUBSTRATE_ARMS)}")
     if cells is not None:
@@ -372,7 +373,8 @@ def enumerate_runs(
 
     chosen = selected + (selected_local if include_local_learning else [])
     if substrate_arm is not None:
-        unsupported = [c["model_id"] for c in chosen if c.get("S") or c.get("M") or c.get("P") or c.get("L")]
+        unsupported = [c["model_id"] for c in chosen
+                       if c.get("S") or c.get("M") or c.get("P") or c.get("L") or c.get("T") or c.get("D")]
         if unsupported:
             raise ValueError(
                 f"substrate arm {substrate_arm!r} is defined for flat, unmodulated, non-plastic cells "
@@ -869,7 +871,8 @@ def main(argv=None) -> int:
                           "ceiling and not a guarantee. Pass a very large value to disable.")
     ap.add_argument("--substrate", type=str, default=None, choices=sorted(SUBSTRATE_ARMS),
                      help="replace the flat gated core with this leaky rate substrate; "
-                          "restricted to flat, unmodulated, non-plastic cells")
+                          "restricted to flat, unmodulated, non-plastic cells with no "
+                          "topography or Dale's-law penalty")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "

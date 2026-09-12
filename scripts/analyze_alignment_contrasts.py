@@ -24,6 +24,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from brainalign_wm.analysis.contrasts import (
+    CORE_CELL,
     build_panels,
     contrast_specifications,
     enabled_arm_count,
@@ -55,7 +56,10 @@ def _arm_count_correlation(panel, boot_values, signal, rng) -> dict | None:
 
     rows = panel.runs
     sel = rows[rows["signal"] == signal]
-    cells = sorted(sel["model_id"].unique())
+    # Only the battery's own cells carry an arm count. A control variant of a
+    # cell (tagged model_id) and the local-learning family are separate
+    # designs, not extra points on this description of the battery.
+    cells = sorted(c for c in sel["model_id"].unique() if CORE_CELL.match(c))
     if len(cells) < 4:
         return None
     positions = np.arange(len(rows))

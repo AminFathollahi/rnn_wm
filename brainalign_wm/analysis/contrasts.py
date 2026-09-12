@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,19 +118,42 @@ class AlignmentPanel:
         return out
 
 
+def _population_rows(table: pd.DataFrame, region: str, population: str) -> pd.DataFrame:
+    """Rows of a (run, region, subpop) table for one population: a
+    hierarchical run (S=1) contributes its named `worker`/`manager`
+    subpopulation, a flat run (S=0, one population only) always
+    contributes its `subpop="all"` row -- the flat side of a
+    flat-vs-population contrast, never a restriction to hierarchical runs.
+    `population="all"` reproduces the original pooled, whole-vector rows."""
+    in_region = table[table["region"] == region]
+    if population == "all":
+        return in_region[in_region["subpop"] == "all"]
+    is_hier = in_region["S"].astype(int) == 1
+    return in_region[(is_hier & (in_region["subpop"] == population)) | (~is_hier & (in_region["subpop"] == "all"))]
+
+
 def build_panels(
     run_df: pd.DataFrame,
     session_df: pd.DataFrame | None,
     fold_patients: set | None = None,
+    region: str = "pooled",
+    population: str = "all",
+    probe_df: pd.DataFrame | None = None,
 ) -> dict:
-    """One panel per dependent variable.
+    """One panel per dependent variable, for one (region, population) slice.
 
     Maintenance alignment is rebuilt from the per-session table so that a fold
     of patients can be selected and so that patients can be resampled; the run
     table's own column is the mean over all sessions and is used only when the
-    per-session table is absent.  Probe alignment is computed against a
-    condition-averaged neural matrix and has no per-session decomposition, so
-    its interval resamples seeds alone.
+    per-session table is absent (only possible for the original pooled/"all"
+    slice). Probe alignment is computed against a condition-averaged neural
+    matrix and has no per-session decomposition, so its interval resamples
+    seeds alone; it is read from the run table for the original pooled/"all"
+    slice and from `probe_df` (one row per run x region x subpop) otherwise.
+
+    `region`/`population` default to the original whole-vector pooled DV, so
+    every pre-existing caller is unaffected. A non-default slice names its dv
+    `"{dv}__{region}__{population}"` so the two are never confused in output.
     """
     runs = run_df.set_index("run_id")
     base = pd.DataFrame(
@@ -140,16 +164,18 @@ def build_panels(
             "accuracy_load3": runs["accuracy_load3"].astype(float),
         }
     )
+    is_default_slice = region == "pooled" and population == "all"
+    suffix = "" if is_default_slice else f"__{region}__{population}"
 
     panels = {}
 
     maintenance = base.copy()
     session_values = session_patient = None
     if session_df is not None and len(session_df):
-        pooled = session_df[(session_df["region"] == "pooled") & (session_df["subpop"] == "all")]
+        sel = _population_rows(session_df, region, population)
         if fold_patients is not None:
-            pooled = pooled[pooled["patient"].astype(str).isin(fold_patients)]
-        wide = pooled.pivot_table(
+            sel = sel[sel["patient"].astype(str).isin(fold_patients)]
+        wide = sel.pivot_table(
             index="session", columns="run_id", values="raw_alignment", aggfunc="mean"
         )
         wide = wide.reindex(columns=[r for r in base.index if r in wide.columns])
@@ -157,13 +183,14 @@ def build_panels(
         maintenance["value"] = wide.mean(axis=0).to_numpy(dtype=float)
         session_values = wide.to_numpy(dtype=float)
         patient_of_session = (
-            pooled.drop_duplicates("session").set_index("session")["patient"].astype(str)
+            sel.drop_duplicates("session").set_index("session")["patient"].astype(str)
         )
         session_patient = patient_of_session.reindex(wide.index).to_numpy()
-    else:
+    elif is_default_slice:
         maintenance["value"] = runs["maintenance_signed_raw_alignment"].astype(float)
-    panels["maintenance_signed_alignment"] = AlignmentPanel(
-        dv="maintenance_signed_alignment",
+    dv = f"maintenance_signed_alignment{suffix}"
+    panels[dv] = AlignmentPanel(
+        dv=dv,
         cluster_unit="patient" if session_values is not None else "seed",
         runs=maintenance,
         session_values=session_values,
@@ -171,10 +198,17 @@ def build_panels(
     )
 
     probe = base.copy()
-    probe["value"] = runs["probe_raw_alignment"].astype(float)
+    if is_default_slice or probe_df is None:
+        probe["value"] = runs["probe_raw_alignment"].astype(float)
+    else:
+        sel = _population_rows(probe_df[probe_df["status"] == "ok"], region, population)
+        vals = sel.drop_duplicates("run_id").set_index("run_id")["raw_alignment"].astype(float)
+        probe = base.loc[[r for r in base.index if r in vals.index]].copy()
+        probe["value"] = vals.reindex(probe.index)
     probe = probe[np.isfinite(probe["value"])]
-    panels["probe_alignment"] = AlignmentPanel(
-        dv="probe_alignment", cluster_unit="seed", runs=probe
+    dv = f"probe_alignment{suffix}"
+    panels[dv] = AlignmentPanel(
+        dv=dv, cluster_unit="seed", runs=probe
     )
     return panels
 
@@ -205,6 +239,7 @@ def paired_seed_contrast(
     seeds = sorted(set.intersection(*(set(c.index) for c in columns.values())))
     accuracy = panel.runs["accuracy_load3"].to_numpy(dtype=float)
     index = {cell: np.array([columns[cell][s] for s in seeds], dtype=int) for cell in cell_weights}
+    accuracy_by_cell = np.zeros((len(cell_weights), 0))
     if seeds:
         accuracy_by_cell = np.stack([accuracy[index[cell]] for cell in cell_weights])
         gap = accuracy_by_cell.max(axis=0) - accuracy_by_cell.min(axis=0)
@@ -213,6 +248,7 @@ def paired_seed_contrast(
             seeds = [s for s, k in zip(seeds, keep) if k]
             index = {cell: index[cell][keep] for cell in cell_weights}
             gap = gap[keep]
+            accuracy_by_cell = accuracy_by_cell[:, keep]
     if len(seeds) < 2:
         return None
     point = panel.point_values()
@@ -234,6 +270,7 @@ def paired_seed_contrast(
         "mde": MDE_MULTIPLIER * se,
         "residual_accuracy_load3": float(np.mean(signed_accuracy)),
         "max_accuracy_load3_spread": float(np.max(gap)),
+        "min_accuracy_load3": float(np.mean(accuracy_by_cell.min(axis=0))),
     }
 
 
@@ -278,5 +315,15 @@ def contrast_specifications() -> list:
     return specs
 
 
+# The five arm bits are the first five characters after the "M"; a control
+# variant of a cell carries a trailing tag ("M10010_w128", "M00000_idcatch")
+# that names what was varied, and leaves the bits themselves untouched.
+_ARM_BITS = re.compile(r"^M([01]{5})")
+CORE_CELL = re.compile(r"^M[01]{5}$")
+
+
 def enabled_arm_count(model_id: str) -> int:
-    return sum(int(bit) for bit in model_id[1:])
+    bits = _ARM_BITS.match(model_id)
+    if bits is None:
+        raise ValueError(f"{model_id!r} does not start with the five arm bits")
+    return sum(int(bit) for bit in bits.group(1))

@@ -5,9 +5,11 @@ import pandas as pd
 import pytest
 
 from brainalign_wm.analysis.contrasts import (
+    CORE_CELL,
     add_one_cell,
     assign_patient_folds,
     build_panels,
+    enabled_arm_count,
     knock_out_cell,
     paired_seed_contrast,
     training_signal,
@@ -125,3 +127,17 @@ def test_knock_out_cell_complements_add_one_cell():
         assert add_one_cell(arm).count("1") == 1
         assert knock_out_cell(arm).count("0") == 1
         assert add_one_cell(arm)[1:].index("1") == knock_out_cell(arm)[1:].index("0")
+
+
+def test_arm_count_reads_the_bits_of_a_tagged_control_variant():
+    assert enabled_arm_count("M10010") == 2
+    assert enabled_arm_count("M10010_w128") == 2
+    assert enabled_arm_count("M00000_idcatch") == 0
+    with pytest.raises(ValueError):
+        enabled_arm_count("M10L")
+
+
+def test_only_untagged_battery_cells_match_the_core_pattern():
+    assert CORE_CELL.match("M11111")
+    assert not CORE_CELL.match("M11111_energy")
+    assert not CORE_CELL.match("M10L")

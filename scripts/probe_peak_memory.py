@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
 
 import run_grid  # noqa: E402
 from brainalign_wm.config import get_path, load_config  # noqa: E402
+from brainalign_wm.training.train import DEFAULT_FLAT_GRID  # noqa: E402
 
 RESOLVED_CONFIG = get_path("results") / "resolved_config_grid_SUP.yaml"
 CARD_CAPACITY_MIB = 12227
@@ -128,7 +129,7 @@ def probe_one_cell(model_id: str, checkpointing: bool, seed: int = 0) -> dict:
             m["feature_dim"], m["action_dim"], _gate_width(S, m), device, mode="bptt",
             signal="ce", value_weight=float(t_cfg["value_loss_weight"]),
             entropy_coef=float(t_cfg.get("entropy_coef", 0.0)),
-            topo_loss_weight=topo_loss_weight, flat_grid=tuple(m.get("flat_grid", [16, 16])),
+            topo_loss_weight=topo_loss_weight, flat_grid=tuple(m.get("flat_grid", DEFAULT_FLAT_GRID)),
             categories=full_cfg["task"]["categories"], checkpoint_plastic=checkpoint_plastic,
         )
         if dale_penalty_weight > 0:

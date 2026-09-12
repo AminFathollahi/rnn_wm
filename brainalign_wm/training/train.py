@@ -142,6 +142,7 @@ from brainalign_wm.config import get_path, load_config
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS = get_path("results")
+DEFAULT_FLAT_GRID = (16, 8)
 # `scripts/` has no __init__.py (namespace package) and is only on sys.path
 # when the interpreter's own entry point lives at the repo root (e.g. `python
 # run_grid.py`, or pytest's rootdir insertion) -- NOT when a script inside
@@ -641,7 +642,7 @@ def _run_trial(
     entropy_coef: float = 0.0,
     energy_cost_weight: float = 0.0,
     topo_loss_weight: float = 0.0,
-    flat_grid: tuple = (16, 16),
+    flat_grid: tuple = DEFAULT_FLAT_GRID,
     recurrent_noise_sigma: float = 0.0,
     core_dropout_p: float = 0.0,
     categories: Optional[list] = None,
@@ -658,7 +659,7 @@ def _run_trial(
     `topo_loss_weight`/`flat_grid` (arm T, §1.2): a spatial-smoothness penalty
     on the RECURRENT population's own activity (never `h_star`) -- the S=1
     worker reshaped onto its intrinsic `core.grid` (14x14), or the S=0 flat
-    core's hidden state reshaped onto the imposed `flat_grid` (16x16, the
+    core's hidden state reshaped onto the imposed `flat_grid` (16x8, the
     All-TNNs "topography without hierarchy" test). S owns the spatial
     locality MASK; T owns this smoothness LOSS -- kept orthogonal so their
     ablation effects don't bleed into each other. 0.0 (off) for every Core
@@ -1919,7 +1920,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     else:
         dale_penalty_weight = float(t_cfg.get("dale_penalty_weight_on", 0.01)) if run.get("D", 0) else float(t_cfg.get("dale_penalty_weight", 0.0))
     dale_ei_split = float(run.get("dale_ei_split", m.get("dale_ei_split", 0.8)))
-    flat_grid = tuple(run.get("flat_grid", m.get("flat_grid", [16, 16])))
+    flat_grid = tuple(run.get("flat_grid", m.get("flat_grid", DEFAULT_FLAT_GRID)))
     recurrent_noise_sigma = float(m.get("recurrent_noise_sigma", 0.0))
     core_dropout_p = float(run.get("core_dropout_p", m.get("core_dropout_p", 0.0)))
     # Gradient checkpointing over the plastic recurrent core (comments.txt's

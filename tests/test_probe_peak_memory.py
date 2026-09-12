@@ -2,6 +2,7 @@
 prediction (comments.txt §21.1, D49). If the probe's load-3 trial were a
 different length than the scheduler predicts for, it would silently agree
 with a broken memory estimate -- this test is the guard against that."""
+import inspect
 import sys
 from pathlib import Path
 
@@ -14,6 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import run_grid as rg  # noqa: E402
+import scripts.probe_peak_memory as probe  # noqa: E402
+from brainalign_wm.training.train import DEFAULT_FLAT_GRID, _run_trial  # noqa: E402
 from scripts.probe_peak_memory import _bits, build_load3_batch, load_full_cfg  # noqa: E402
 
 STIMULI_READY = (ROOT / "stimuli").exists()
@@ -44,3 +47,10 @@ def test_bits_parses_model_id():
     assert _bits("M11011") == (1, 1, 0, 1, 1)
     with pytest.raises(ValueError):
         _bits("M111")
+
+
+def test_flat_grid_defaults_match_model_configuration():
+    expected = tuple(load_full_cfg()["model"]["flat_grid"])
+    assert DEFAULT_FLAT_GRID == expected
+    assert probe.DEFAULT_FLAT_GRID == expected
+    assert inspect.signature(_run_trial).parameters["flat_grid"].default == expected

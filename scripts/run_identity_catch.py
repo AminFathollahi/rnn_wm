@@ -14,7 +14,11 @@ per-run override (`train_one`'s `run` dict), not a global config.yaml edit.
 
 Run_id convention, consumed by `training/generate_activity_logs.py::
 _run_id_extras` and the variant guard in `analysis/run_all.py::
-_is_ablation_or_catch_variant`: `M{SMPTD}_idcatch_s{seed}`.
+_is_ablation_or_catch_variant`: `M{SMPTD}_idcatch_{supervision}_s{seed}`
+(the manifest `model_id` stays `M{SMPTD}_idcatch`, unsuffixed by signal;
+`run_grid.build_run_id` adds the signal to the run_id only, so the two
+training-signal passes never collide on checkpoint directory, metrics
+CSV, or manifest key).
 
 Usage:
   python scripts/run_identity_catch.py --supervision SUP --seeds 4 --budget 10h
@@ -36,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from brainalign_wm.config import DEFAULT_CONFIG_PATH, load_config  # noqa: E402
 from run_grid import (  # noqa: E402
     MANIFEST, REPORT, RESULTS, ROOT,
-    build_resolved_config, config_hash, git_commit, load_completed, parse_budget, resolve_train_fn,
+    build_resolved_config, build_run_id, config_hash, git_commit, load_completed, parse_budget, resolve_train_fn,
     resolved_config_path, write_report,
 )
 
@@ -68,7 +72,11 @@ def parse_cells(spec: str) -> list[dict]:
 
 def enumerate_runs(seeds: list[int], cells: list[dict], supervision: str) -> list[dict]:
     """Seed-major ordering (breadth before depth), same convention as
-    `run_grid.enumerate_runs`."""
+    `run_grid.enumerate_runs`. `model_id` stays unsuffixed by signal so the
+    two signal passes are recognized as the same architecture; `run_id`
+    gains the signal via `run_grid.build_run_id`, the same namespacing the
+    main battery uses, so the two passes never collide on checkpoint
+    directory, metrics CSV, or manifest key."""
     runs = []
     for seed in seeds:
         for cell in cells:
@@ -77,7 +85,7 @@ def enumerate_runs(seeds: list[int], cells: list[dict], supervision: str) -> lis
                 **{k: cell[k] for k in "SMPTD"},
                 "model_id": model_id,
                 "seed": seed,
-                "run_id": f"{model_id}_s{seed}",
+                "run_id": build_run_id(model_id, seed, supervision),
                 "supervision": supervision,
                 "identity_catch_fraction": IDENTITY_CATCH_FRACTION,
             })
@@ -86,9 +94,11 @@ def enumerate_runs(seeds: list[int], cells: list[dict], supervision: str) -> lis
 
 def recorded_supervision(manifest: Path) -> dict[str, str]:
     """run_id -> the training signal its last manifest row recorded. The
-    run_id does not encode the signal here, so a second pass under a
-    different one would resume the first pass's checkpoint and label the
-    result with the new signal; `main` refuses that."""
+    run_id now carries the signal (`build_run_id`), so two signal passes
+    never share a run_id; this is a manifest-consistency check for a run_id
+    whose recorded `supervision` field disagrees with what its own id
+    encodes -- `main` refuses to resume such a row rather than silently
+    continuing it under the wrong label."""
     out: dict[str, str] = {}
     if not manifest.exists():
         return out

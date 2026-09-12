@@ -56,6 +56,13 @@ def test_run_id_extras_detects_pbwm_and_identity_catch():
     assert _run_id_extras("M11111_idcatch") == (False, 0.12, 1)
 
 
+def test_run_id_extras_detects_identity_catch_with_a_signal_tag():
+    """The identity-catch run_id carries a training-signal tag after the
+    family suffix (`M00000_idcatch_SUP`); it must still read as idcatch."""
+    assert _run_id_extras("M00000_idcatch_SUP") == (False, 0.12, 1)
+    assert _run_id_extras("M10010_idcatch_RL") == (False, 0.12, 1)
+
+
 def test_run_id_extras_detects_perf_matched_baselines():
     assert _run_id_extras("M00000_2x") == (False, 0.0, 2)
     assert _run_id_extras("M00000_l1") == (False, 0.0, 1)
@@ -68,6 +75,10 @@ def test_parse_run_id_handles_supervision_namespaced_ids():
     architecture, and `model_id` keeps the full string so the parquet
     filename stays unambiguous -- same convention as the `_pbwm` suffix."""
     assert _parse_run_id("M00000_SUP_s0") == ("M00000_SUP", 0, 0, 0, 0, 0, 0)
+
+
+def test_parse_run_id_handles_identity_catch_with_a_signal_tag():
+    assert _parse_run_id("M10010_idcatch_SUP_s5") == ("M10010_idcatch_SUP", 1, 0, 0, 1, 0, 5)
     assert _parse_run_id("M11111_RL_s7") == ("M11111_RL", 1, 1, 1, 1, 1, 7)
     assert _parse_run_id("M01L_RL_s2") == ("M01L_RL", 0, 1, 0, 0, 0, 2)
 

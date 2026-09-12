@@ -30,14 +30,23 @@ def test_cells_are_selectable_and_validated():
 def test_enumerated_runs_are_seed_major_and_name_their_signal():
     runs = run_identity_catch.enumerate_runs([0, 1], run_identity_catch.parse_cells("M00000,M10010"), "SUP")
     assert [r["run_id"] for r in runs] == [
-        "M00000_idcatch_s0", "M10010_idcatch_s0", "M00000_idcatch_s1", "M10010_idcatch_s1",
+        "M00000_idcatch_SUP_s0", "M10010_idcatch_SUP_s0", "M00000_idcatch_SUP_s1", "M10010_idcatch_SUP_s1",
     ]
+    assert all(r["model_id"] in ("M00000_idcatch", "M10010_idcatch") for r in runs)  # unsuffixed by signal
     assert all(r["supervision"] == "SUP" for r in runs)
     assert all(r["identity_catch_fraction"] == run_identity_catch.IDENTITY_CATCH_FRACTION for r in runs)
     assert runs[1]["S"] == 1 and runs[1]["T"] == 1
 
 
+def test_enumerated_run_ids_never_collide_across_signal_passes():
+    cells = run_identity_catch.parse_cells("M00000,M10010")
+    sup_ids = {r["run_id"] for r in run_identity_catch.enumerate_runs([0, 1], cells, "SUP")}
+    rl_ids = {r["run_id"] for r in run_identity_catch.enumerate_runs([0, 1], cells, "RL")}
+    assert sup_ids.isdisjoint(rl_ids)
+
+
 def test_run_id_reaches_replay_and_variant_guard():
+    """Pre-namespacing ids already on disk (never renamed) still parse."""
     assert _parse_run_id("M10010_idcatch_s5") == ("M10010_idcatch", 1, 0, 0, 1, 0, 5)
     assert _run_id_extras("M10010_idcatch") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1)
     assert _is_ablation_or_catch_variant(
@@ -45,6 +54,14 @@ def test_run_id_reaches_replay_and_variant_guard():
     )
     assert not _is_ablation_or_catch_variant(
         {"model_id": "M10010", "S": 1, "M": 0, "P": 0, "T": 1, "D": 0}
+    )
+
+
+def test_signal_namespaced_run_id_reaches_replay_and_variant_guard():
+    assert _parse_run_id("M10010_idcatch_RL_s5") == ("M10010_idcatch_RL", 1, 0, 0, 1, 0, 5)
+    assert _run_id_extras("M10010_idcatch_RL") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1)
+    assert _is_ablation_or_catch_variant(
+        {"model_id": "M10010_idcatch", "S": 1, "M": 0, "P": 0, "T": 1, "D": 0}
     )
 
 

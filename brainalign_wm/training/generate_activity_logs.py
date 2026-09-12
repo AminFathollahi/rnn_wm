@@ -160,11 +160,17 @@ def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
     §4.1: M00000_2x): the S=0 core's hidden width was doubled at train time,
     which changes every `weight_ih`/`weight_hh` shape -- `_l1`/`_dropout`
     baselines don't change any parameter shape (pure training-time
-    regularizers), so they need no entry here."""
+    regularizers), so they need no entry here.
+
+    Checked as underscore-separated components, not a suffix: the
+    identity-catch family's run_id also carries a training-signal tag
+    (`M00000_idcatch_SUP`), which would sit after `_idcatch` and break a
+    plain `.endswith("_idcatch")` check."""
+    parts = model_id.split("_")
     return (
-        model_id.endswith("_pbwm"),
-        0.12 if model_id.endswith("_idcatch") else 0.0,
-        2 if model_id.endswith("_2x") else 1,
+        "pbwm" in parts,
+        0.12 if "idcatch" in parts else 0.0,
+        2 if "2x" in parts else 1,
     )
 
 

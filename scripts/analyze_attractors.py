@@ -252,11 +252,13 @@ def main(argv=None) -> int:
                 continue
 
             t0 = time.time()
-            pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+            pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides = _run_id_extras(model_id)
             if identity_catch_fraction:
                 cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
             if flat_units_mult != 1:
                 cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+            if model_overrides:
+                cfg = {**cfg, "model": {**cfg["model"], **model_overrides}}
             front_end, core, heads = _build_model(cfg, S, M, P, device, pbwm_gate=pbwm_gate)
             _load_checkpoint(front_end, core, heads, run_id, device)
             front_end.eval(); core.eval()

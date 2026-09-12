@@ -150,17 +150,32 @@ def _substrate_for(run_id: str) -> Optional[str]:
     return found
 
 
-def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
-    """(pbwm_gate, identity_catch_fraction, flat_units_mult) implied by the
-    run_id suffix convention above -- the S/M/P/T/D bits alone don't
-    distinguish M11111_pbwm or M11111_idcatch/M00000_idcatch from the plain
-    Core cell, but `_build_model`/`Heads` need to match the checkpoint's
-    actual trained architecture or `load_state_dict` fails on a shape/key
-    mismatch. `flat_units_mult` (performance-matched baseline family,
-    §4.1: M00000_2x): the S=0 core's hidden width was doubled at train time,
-    which changes every `weight_ih`/`weight_hh` shape -- `_l1`/`_dropout`
-    baselines don't change any parameter shape (pure training-time
-    regularizers), so they need no entry here.
+# The locality-matched flat control: one recurrent population with the
+# hierarchical worker's connectivity statistics -- masked on a square sheet
+# at the worker's mean in-degree, at the battery's effective-synapse budget
+# -- and none of its hierarchy. Width, sheet and density all changed at
+# train time, so a replay that rebuilt the core from the default config
+# would load a dense 128-unit state dict into it and fail.
+LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
+LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681}
+
+
+def _run_id_extras(model_id: str) -> tuple[bool, float, int, dict]:
+    """(pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides)
+    implied by the run_id suffix convention above -- the S/M/P/T/D bits alone
+    don't distinguish M11111_pbwm or M11111_idcatch/M00000_idcatch from the
+    plain Core cell, but `_build_model`/`Heads` need to match the
+    checkpoint's actual trained architecture or `load_state_dict` fails on a
+    shape/key mismatch. `flat_units_mult` (performance-matched baseline
+    family, §4.1: M00000_2x): the S=0 core's hidden width was doubled at
+    train time, which changes every `weight_ih`/`weight_hh` shape --
+    `_l1`/`_dropout` baselines don't change any parameter shape (pure
+    training-time regularizers), so they need no entry here.
+    `model_overrides` carries `model.*` values that a variant trained under
+    and that a replay must restore verbatim rather than as a multiple of the
+    config's: the locality-matched flat control trained a masked core at its
+    own width and sheet, and rebuilding it from the default config would fail
+    on the same shape mismatch.
 
     Checked as underscore-separated components, not a suffix: the
     identity-catch family's run_id also carries a training-signal tag
@@ -171,6 +186,7 @@ def _run_id_extras(model_id: str) -> tuple[bool, float, int]:
         "pbwm" in parts,
         0.12 if "idcatch" in parts else 0.0,
         2 if "2x" in parts else 1,
+        dict(LOCAL_CONNECTIVITY_FLAT) if LOCAL_CONNECTIVITY_FLAT_TAG in parts else {},
     )
 
 
@@ -337,11 +353,13 @@ def generate_activity_log(
 
     from brainalign_wm.mechanisms.reflective_gate import ReflectiveGate
 
-    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides = _run_id_extras(model_id)
     if identity_catch_fraction:
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    if model_overrides:
+        cfg = {**cfg, "model": {**cfg["model"], **model_overrides}}
     substrate = _substrate_for(run_id)
     if substrate:
         cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}
@@ -398,11 +416,13 @@ def generate_chance_activity_log(model_id: str, seed: int, dandi_data, out_dir: 
     from brainalign_wm.mechanisms.reflective_gate import ReflectiveGate
 
     seed_everything(seed)
-    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides = _run_id_extras(model_id)
     if identity_catch_fraction:
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    if model_overrides:
+        cfg = {**cfg, "model": {**cfg["model"], **model_overrides}}
     substrate = _substrate_for(f"{model_id}_s{seed}")
     if substrate:
         cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}
@@ -477,11 +497,13 @@ def generate_activity_log_reflection_shuffled(
         assert R_seq.shape[1] == 1, "replay is batch=1; a batch-major R_seq would silently mis-shuffle across trials"
         shuffled_R[(session_id, trial_id)] = shuffle_reflection(R_seq, generator=gen).view(-1)  # [T]
 
-    pbwm_gate, identity_catch_fraction, flat_units_mult = _run_id_extras(model_id)
+    pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides = _run_id_extras(model_id)
     if identity_catch_fraction:
         cfg = {**cfg, "task": {**cfg["task"], "identity_catch_fraction": identity_catch_fraction}}
     if flat_units_mult != 1:
         cfg = {**cfg, "model": {**cfg["model"], "flat_units": cfg["model"]["flat_units"] * flat_units_mult}}
+    if model_overrides:
+        cfg = {**cfg, "model": {**cfg["model"], **model_overrides}}
     substrate = _substrate_for(run_id)
     if substrate:
         cfg = {**cfg, "model": {**cfg["model"], "substrate": substrate}}

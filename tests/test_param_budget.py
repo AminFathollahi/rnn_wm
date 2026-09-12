@@ -59,6 +59,62 @@ def test_hrl_core_effective_count_sums_worker_manager_gproj():
     assert core.n_units() == 9 + 5
 
 
+def test_three_cores_share_one_effective_synapse_budget_and_one_in_degree():
+    """The three cores the structure contrast runs over, built the way
+    `_build_model` builds them. Matching on effective synapses is what
+    licenses the contrast, so the numbers are pinned here rather than being
+    recomputed per arm:
+
+      dense flat            128 units, no mask                     73,728
+      locality-matched flat 289 units on 17x17, density 0.0681      72,612
+      hierarchical          196-unit worker on 14x14 + 24 manager   74,052
+
+    The masked flat core also matches the worker's mean in-degree (19.75
+    against 19.69), which is the per-unit quantity that defines the
+    connectivity regime; the mask's density target differs from the worker's
+    0.10 precisely because the sheet is wider, and at a different width
+    in-degree and global density cannot both be held. Unit count is the
+    dimension left unmatched: of units, synapses and in-degree only two can
+    be held at once, and synapses is the criterion this study matches on."""
+    from brainalign_wm.models.gru_cell import make_locality_mask
+    from brainalign_wm.training.train import _build_model
+
+    dense_flat = MaskedGRUCell(CFG["bottleneck"], CFG["flat_units"], mask=None)
+    assert dense_flat.effective_param_count() == 73_728
+
+    grid, density = (17, 17), 0.0681
+    assert grid[0] * grid[1] == 289, "the sheet's cells number the units"
+    local_cfg = {**FULL_CFG, "model": {**CFG, "flat_units": 289, "flat_grid": list(grid),
+                                       "flat_density": density}}
+    _fe, local_flat, _heads = _build_model(local_cfg, S=0, M=0, P=0, device="cpu")
+    assert local_flat.n_units() == 289
+    assert local_flat.effective_param_count() == 72_612
+    # The cell tiles one [H, H] locality mask across the three gate blocks.
+    local_mask = make_locality_mask(grid, density, seed=0)
+    assert torch.equal(local_flat.cell.mask, local_mask.repeat(3, 1))
+
+    _fe, hierarchical, _heads = _build_model(FULL_CFG, S=1, M=0, P=0, device="cpu")
+    assert hierarchical.effective_param_count() == 74_052
+
+    counts = [dense_flat.effective_param_count(), local_flat.effective_param_count(),
+              hierarchical.effective_param_count()]
+    assert (max(counts) - min(counts)) / min(counts) <= CFG["param_budget_tol"]
+
+    worker_mask = make_locality_mask(tuple(CFG["worker_grid"]), CFG["worker_density"], seed=0)
+    assert abs(local_mask.sum(1).mean().item() - worker_mask.sum(1).mean().item()) < 0.5
+
+
+def test_flat_core_is_densely_recurrent_unless_a_density_is_set():
+    """Null density is the setting for every battery cell, so the default
+    build must stay bit-identical to the unmasked one."""
+    from brainalign_wm.training.train import _build_model
+
+    _fe, core, _heads = _build_model(FULL_CFG, S=0, M=0, P=0, device="cpu")
+    assert core.cell.mask is None
+    assert core.effective_param_count() == MaskedGRUCell(
+        CFG["bottleneck"], CFG["flat_units"], mask=None).effective_param_count()
+
+
 def test_vanilla_rnn_cell_forward_shape_and_effective_count():
     mask = torch.zeros(6, 6)
     mask[:3, :3] = 1.0  # 9 alive entries

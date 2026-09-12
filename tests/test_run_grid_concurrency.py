@@ -206,6 +206,16 @@ def test_non_plastic_runs_are_cheap_regardless_of_substrate():
     assert 4 * rg._BASE_MIB < rg.DEFAULT_GPU_BUDGET_MIB
 
 
+def test_the_locality_matched_flat_control_stays_in_the_cheap_branch():
+    """Its two cells are non-plastic, so they build no [B, 3H, H] graph and
+    pack under the budget alongside others -- the wider recurrence is not a
+    reason to serialize them."""
+    cfg = {**_mem_cfg(), "model": {**_mem_cfg()["model"], **rg.LOCAL_CONNECTIVITY_FLAT}}
+    for run in ({"S": 0, "P": 0, "run_id": "M00000_local289_SUP_s0"},
+                {"S": 0, "P": 0, "run_id": "M00010_local289_SUP_s0"}):
+        assert rg._run_mib(run, cfg) == rg._BASE_MIB
+
+
 def test_estimate_falls_back_to_constants_without_a_resolved_config():
     """`run_grid_loop` is also driven by the scaffold path and by
     `scripts/run_stage1_grid.py`, which pass a tier dict rather than a resolved

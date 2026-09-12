@@ -151,6 +151,32 @@ SUBSTRATE_ARMS = {
     "lowrank": "low_rank",
 }
 
+# Flat control carrying the hierarchical worker's connectivity statistics.
+# One recurrent population, no manager, no pooled bottom-up bottleneck, no
+# top-down gate and no slow clock -- but locality-masked on a square sheet
+# with the worker's mean in-degree, at the battery's effective-synapse
+# budget. It exists because structure is otherwise confounded with recurrent
+# sparsity and locality -- the flat core is densely recurrent, the worker is
+# masked on a sheet -- and locality-masked connectivity is the leading rival
+# explanation for topographic structure in the sparse-RNN literature. It is
+# also the first flat cell whose sheet IS its connectivity rather than an
+# ordering imposed on dense recurrence.
+#
+# 289 units on a 17x17 sheet, mask target density 0.0681 (mask seed 0):
+# 72,612 effective structural synapses against the dense flat core's 73,728
+# and the hierarchical core's 74,052, a 1.98% three-way spread well inside
+# `model.param_budget_tol`, and a mean in-degree of 19.75 against the 14x14
+# worker's 19.69. Density is matched in-degree rather than as a global
+# fraction: in-degree is the per-unit quantity that defines the connectivity
+# regime, and at a different width the two cannot both hold -- the same
+# 0.10 fraction on this sheet would mean 27.1 incoming connections per unit,
+# 38% above the worker's. Unit count is the dimension left unmatched (289
+# against 196+24 and 128): of units, synapses and in-degree only two can be
+# held at once, and the preregistered criterion is synapses. The tag avoids
+# the "_s" digraph the run_id parsers split on.
+LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
+LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681}
+
 # D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
 #
@@ -330,6 +356,7 @@ def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
 def enumerate_runs(
     seeds: list[int], include_local_learning: bool = False, supervision: str | None = None,
     cells: list[str] | None = None, substrate_arm: str | None = None,
+    local_connectivity_flat: bool = False,
 ) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
@@ -360,7 +387,16 @@ def enumerate_runs(
     architecture its checkpoint holds. The rate cores carry no reflective
     gate, no Hebbian fast weights, and implement neither the topography
     nor the Dale's-law penalty, so the arm is restricted to flat,
-    unmodulated, non-plastic, penalty-free cells (S=M=P=T=D=0, plus L=0)."""
+    unmodulated, non-plastic, penalty-free cells (S=M=P=T=D=0, plus L=0).
+
+    `local_connectivity_flat`: rebuild the flat core at
+    `LOCAL_CONNECTIVITY_FLAT` -- locality-masked recurrence on a sheet at the
+    hierarchical worker's density, at the same effective-synapse budget. The
+    tag is appended to the model_id, and so to the run_id, for the same
+    reason the substrate tag is: the S/M/P/T/D bits no longer identify the
+    network the checkpoint holds. Restricted to flat cells -- a hierarchical
+    cell's recurrence is the worker's and already masked, so the override
+    would change nothing while its run_id claimed otherwise."""
     if substrate_arm is not None and substrate_arm not in SUBSTRATE_ARMS:
         raise ValueError(f"unknown substrate arm {substrate_arm!r}; known: {sorted(SUBSTRATE_ARMS)}")
     if cells is not None:
@@ -381,16 +417,28 @@ def enumerate_runs(
                 f"only; {unsupported} are not"
             )
 
+    if local_connectivity_flat:
+        hierarchical = [c["model_id"] for c in chosen if c.get("S")]
+        if hierarchical:
+            raise ValueError(
+                f"the locality-matched flat control replaces the flat core's dense recurrence; "
+                f"{hierarchical} are hierarchical cells and have none"
+            )
+
     runs = []
     for seed in seeds:
         for cell in chosen:
             model_id = cell["model_id"] if substrate_arm is None else f"{cell['model_id']}_{substrate_arm}"
+            if local_connectivity_flat:
+                model_id = f"{model_id}_{LOCAL_CONNECTIVITY_FLAT_TAG}"
             run = {**cell, "model_id": model_id, "seed": seed,
                    "run_id": build_run_id(model_id, seed, supervision)}
             if supervision is not None:
                 run["supervision"] = supervision
             if substrate_arm is not None:
                 run["substrate"] = SUBSTRATE_ARMS[substrate_arm]
+            if local_connectivity_flat:
+                run.update(LOCAL_CONNECTIVITY_FLAT)
             runs.append(run)
     return runs
 
@@ -873,6 +921,15 @@ def main(argv=None) -> int:
                      help="replace the flat gated core with this leaky rate substrate; "
                           "restricted to flat, unmodulated, non-plastic cells with no "
                           "topography or Dale's-law penalty")
+    ap.add_argument("--local-connectivity-flat", action="store_true",
+                     help=f"replace the flat core's dense recurrence with a locality mask on a sheet "
+                          f"carrying the hierarchical worker's mean in-degree, at the same "
+                          f"effective-synapse budget "
+                          f"({LOCAL_CONNECTIVITY_FLAT['flat_units']} units on a "
+                          f"{LOCAL_CONNECTIVITY_FLAT['flat_grid'][0]}x{LOCAL_CONNECTIVITY_FLAT['flat_grid'][1]} "
+                          f"sheet at density {LOCAL_CONNECTIVITY_FLAT['flat_density']}), so hierarchy is not "
+                          f"confounded with recurrent sparsity; flat cells only, and tagged "
+                          f"'{LOCAL_CONNECTIVITY_FLAT_TAG}' in the run_id")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
@@ -890,7 +947,8 @@ def main(argv=None) -> int:
     seeds = list(range(args.seeds))
     cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
     runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
-                          supervision=args.supervision, cells=cells, substrate_arm=args.substrate)
+                          supervision=args.supervision, cells=cells, substrate_arm=args.substrate,
+                          local_connectivity_flat=args.local_connectivity_flat)
     completed = load_completed(MANIFEST, args.tier)
     commit = git_commit()
 
@@ -945,6 +1003,11 @@ def main(argv=None) -> int:
         real_substrate = SUBSTRATE_ARMS[args.substrate]
         model_overrides = {"substrate": real_substrate, "recurrent_init_spectral_radius": None}
         run_for_resolve["substrate"] = real_substrate
+    if args.local_connectivity_flat:
+        # Without this the written audit trail -- and `_run_mib`, which sizes
+        # the memory gate from it -- would read config.yaml's dense 128-unit
+        # flat core while a masked 270-unit one trained.
+        model_overrides = {**model_overrides, **LOCAL_CONNECTIVITY_FLAT}
     resolved_cfg = (
         build_resolved_config(full_cfg, cfg, args.tier, model_overrides=model_overrides, run=run_for_resolve)
         if full_cfg else {"tier": {"name": args.tier, **cfg}}
@@ -960,6 +1023,8 @@ def main(argv=None) -> int:
         # whichever pass ran last would leave the other pass's manifest rows
         # citing a hash that matches nothing on disk.
         config_tag = f"grid_{args.supervision}_{args.substrate}" if args.substrate else f"grid_{args.supervision}"
+        if args.local_connectivity_flat:
+            config_tag = f"{config_tag}_{LOCAL_CONNECTIVITY_FLAT_TAG}"
         resolved_path = resolved_config_path(config_tag)
         try:
             resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))

@@ -48,7 +48,7 @@ def test_enumerated_run_ids_never_collide_across_signal_passes():
 def test_run_id_reaches_replay_and_variant_guard():
     """Pre-namespacing ids already on disk (never renamed) still parse."""
     assert _parse_run_id("M10010_idcatch_s5") == ("M10010_idcatch", 1, 0, 0, 1, 0, 5)
-    assert _run_id_extras("M10010_idcatch") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1)
+    assert _run_id_extras("M10010_idcatch") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1, {})
     assert _is_ablation_or_catch_variant(
         {"model_id": "M10010_idcatch", "S": 1, "M": 0, "P": 0, "T": 1, "D": 0}
     )
@@ -59,7 +59,7 @@ def test_run_id_reaches_replay_and_variant_guard():
 
 def test_signal_namespaced_run_id_reaches_replay_and_variant_guard():
     assert _parse_run_id("M10010_idcatch_RL_s5") == ("M10010_idcatch_RL", 1, 0, 0, 1, 0, 5)
-    assert _run_id_extras("M10010_idcatch_RL") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1)
+    assert _run_id_extras("M10010_idcatch_RL") == (False, run_identity_catch.IDENTITY_CATCH_FRACTION, 1, {})
     assert _is_ablation_or_catch_variant(
         {"model_id": "M10010_idcatch", "S": 1, "M": 0, "P": 0, "T": 1, "D": 0}
     )

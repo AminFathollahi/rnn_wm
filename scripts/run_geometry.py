@@ -125,8 +125,10 @@ def _topology_metrics(run_id: str, model_id: str, checkpoint: str = "ckpt.pt") -
     from brainalign_wm.training.train import _build_model, _load_full_config
 
     S, M, P, _T, _D = _parse_model_id(model_id)
-    pbwm_gate, _idcatch, _mult = _run_id_extras(model_id)
+    pbwm_gate, _idcatch, _mult, model_overrides = _run_id_extras(model_id)
     full_cfg = _load_full_config()
+    if model_overrides:  # a variant trained at its own core width/sheet/density
+        full_cfg = {**full_cfg, "model": {**full_cfg["model"], **model_overrides}}
     device = torch.device("cpu")
     front_end, core, heads = _build_model(full_cfg, S, M, P, device, pbwm_gate=pbwm_gate)
     _load_checkpoint(front_end, core, heads, run_id, device, checkpoint_name=checkpoint)

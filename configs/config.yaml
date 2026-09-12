@@ -128,6 +128,14 @@ model:
   action_dim: 3                            # {0: fixate/no-response, 1: in-set/yes, 2: not-in-set/no}
   g_dim: 32                                # Phase 1: was 128, a rank-64 signal in a 128-d box
   worker_pool_block: 2                     # spatial mean-pool block size on the 14x14 worker grid -> s_t
+  flat_density: null                       # S=0 recurrent connection density. null = dense recurrence, the
+                                            # setting for every battery cell. A value (e.g. 0.10) builds the
+                                            # flat core's recurrence as a locality mask over `flat_grid` --
+                                            # the same exponential-kernel construction and fixed mask seed
+                                            # the hierarchical worker uses -- so one flat population can
+                                            # carry the worker's connectivity statistics with none of its
+                                            # hierarchy: no manager, no pooled bottleneck, no top-down gate.
+                                            # `flat_units` must equal the product of `flat_grid` for it.
   flat_grid: [16, 8]                       # arm T on S=0 (§1.2): imposed layout on the flat_units, product
                                             # must equal flat_units (128 = 16*8; was 16x16=256 pre-Phase-1)
                                             # (All-TNNs "topography without hierarchy" test) -- arbitrary unit

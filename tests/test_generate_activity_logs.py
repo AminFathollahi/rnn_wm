@@ -48,25 +48,25 @@ def test_parse_run_id_ablation_and_identity_catch_suffixes():
 
 
 def test_run_id_extras_detects_pbwm_and_identity_catch():
-    assert _run_id_extras("M11111") == (False, 0.0, 1)
-    assert _run_id_extras("M11111_pbwm") == (True, 0.0, 1)
-    assert _run_id_extras("M11111_energy") == (False, 0.0, 1)
-    assert _run_id_extras("M11111_noise") == (False, 0.0, 1)
-    assert _run_id_extras("M00000_idcatch") == (False, 0.12, 1)
-    assert _run_id_extras("M11111_idcatch") == (False, 0.12, 1)
+    assert _run_id_extras("M11111") == (False, 0.0, 1, {})
+    assert _run_id_extras("M11111_pbwm") == (True, 0.0, 1, {})
+    assert _run_id_extras("M11111_energy") == (False, 0.0, 1, {})
+    assert _run_id_extras("M11111_noise") == (False, 0.0, 1, {})
+    assert _run_id_extras("M00000_idcatch") == (False, 0.12, 1, {})
+    assert _run_id_extras("M11111_idcatch") == (False, 0.12, 1, {})
 
 
 def test_run_id_extras_detects_identity_catch_with_a_signal_tag():
     """The identity-catch run_id carries a training-signal tag after the
     family suffix (`M00000_idcatch_SUP`); it must still read as idcatch."""
-    assert _run_id_extras("M00000_idcatch_SUP") == (False, 0.12, 1)
-    assert _run_id_extras("M10010_idcatch_RL") == (False, 0.12, 1)
+    assert _run_id_extras("M00000_idcatch_SUP") == (False, 0.12, 1, {})
+    assert _run_id_extras("M10010_idcatch_RL") == (False, 0.12, 1, {})
 
 
 def test_run_id_extras_detects_perf_matched_baselines():
-    assert _run_id_extras("M00000_2x") == (False, 0.0, 2)
-    assert _run_id_extras("M00000_l1") == (False, 0.0, 1)
-    assert _run_id_extras("M00000_dropout") == (False, 0.0, 1)
+    assert _run_id_extras("M00000_2x") == (False, 0.0, 2, {})
+    assert _run_id_extras("M00000_l1") == (False, 0.0, 1, {})
+    assert _run_id_extras("M00000_dropout") == (False, 0.0, 1, {})
 
 
 def test_parse_run_id_handles_supervision_namespaced_ids():
@@ -87,6 +87,23 @@ def test_parse_run_id_handles_rate_substrate_tags():
     assert _parse_run_id("M00000_ei_SUP_s0") == ("M00000_ei_SUP", 0, 0, 0, 0, 0, 0)
     assert _parse_run_id("M00000_dynsyn_s2") == ("M00000_dynsyn", 0, 0, 0, 0, 0, 2)
     assert _parse_run_id("M00000_lowrank_RL_s1") == ("M00000_lowrank_RL", 0, 0, 0, 0, 0, 1)
+
+
+def test_run_id_extras_rebuilds_the_locality_matched_flat_core():
+    """The replay path builds the model from the DEFAULT config and then
+    loads the checkpoint, so a control that trained at its own width, sheet
+    and recurrent density must have all three restored from its run_id or
+    `load_state_dict` fails on a shape mismatch and the run gets no activity
+    log at all. The tag leaves the base cell's S/M/P/T/D bits alone."""
+    import run_grid as rg
+
+    assert _parse_run_id("M00000_local289_SUP_s0") == ("M00000_local289_SUP", 0, 0, 0, 0, 0, 0)
+    assert _parse_run_id("M00010_local289_SUP_s7") == ("M00010_local289_SUP", 0, 0, 0, 1, 0, 7)
+    assert _run_id_extras("M00010_local289") == (
+        False, 0.0, 1, {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681})
+    assert _run_id_extras("M00010")[3] == {}
+    # The launcher and the replay path must agree on what the tag means.
+    assert rg.LOCAL_CONNECTIVITY_FLAT == _run_id_extras(f"M00000_{rg.LOCAL_CONNECTIVITY_FLAT_TAG}")[3]
 
 
 def test_substrate_for_reads_the_recorded_substrate_from_the_manifest(tmp_path, monkeypatch):

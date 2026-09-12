@@ -256,22 +256,25 @@ def _restore_checkpoint_rng(state: dict) -> None:
 
 class _GatedFlatCore(torch.nn.Module):
     """The S=0 (flat, GRU-substrate) core, for every M/P combination
-    (Phase 1, B1/1.5): uses `MaskedGRUCell`/`PlasticGRUCell` (mask=None --
-    only the S=1 worker is spatially masked) uniformly, including the true
-    M=0,P=0 baseline. Previously M=0,P=0 used a separate `FlatGRUCore`
+    (Phase 1, B1/1.5): uses `MaskedGRUCell`/`PlasticGRUCell` uniformly,
+    including the true M=0,P=0 baseline. `mask=None` (the default, and every
+    battery cell) is dense recurrence; a mask gives this one population the
+    hierarchical worker's connectivity statistics without any of its other
+    machinery -- see `_build_model`'s `flat_density`. Previously M=0,P=0 used a separate `FlatGRUCore`
     wrapping plain `nn.GRUCell`, which inits its biases uniform where
     `MaskedGRUCell` inits them to zero -- a free confound between M00000
     and M01000 (B1). `extra_update_bias` defaults to None, so the M=0 case
     is just this class called with no bias, not a different class."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, plastic: bool = False, hebb_kwargs: Optional[dict] = None):
+    def __init__(self, input_dim: int, hidden_dim: int, plastic: bool = False, hebb_kwargs: Optional[dict] = None,
+                 mask: Optional[torch.Tensor] = None):
         super().__init__()
         from brainalign_wm.models.gru_cell import MaskedGRUCell, PlasticGRUCell
 
         self.plastic = plastic
         self.cell = (
-            PlasticGRUCell(input_dim, hidden_dim, mask=None, **(hebb_kwargs or {}))
-            if plastic else MaskedGRUCell(input_dim, hidden_dim, mask=None)
+            PlasticGRUCell(input_dim, hidden_dim, mask=mask, **(hebb_kwargs or {}))
+            if plastic else MaskedGRUCell(input_dim, hidden_dim, mask=mask)
         )
         self.hidden_dim = hidden_dim
 
@@ -335,7 +338,22 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
                 )
             core = build_rate_cell(substrate, m["bottleneck"], m["rate_rnn"]).to(device)
         else:
-            core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs).to(device)
+            # `flat_density` (non-null) is the locality-matched flat control:
+            # one recurrent population, no manager, no pooled bottleneck and
+            # no top-down gate, but locality-masked on `flat_grid` at this
+            # density, by the same construction and the same fixed mask seed
+            # the hierarchical worker uses. It isolates hierarchy from sparse
+            # local connectivity, which is otherwise confounded with it --
+            # the flat core is densely recurrent and the worker is not. Null
+            # (the default, and every battery cell) is dense recurrence.
+            flat_density = m.get("flat_density")
+            flat_mask = None
+            if flat_density:
+                from brainalign_wm.models.gru_cell import make_locality_mask
+
+                flat_mask = make_locality_mask(tuple(m["flat_grid"]), float(flat_density), seed=0)
+            core = _GatedFlatCore(m["bottleneck"], m["flat_units"], plastic=bool(P), hebb_kwargs=hebb_kwargs,
+                                  mask=flat_mask).to(device)
             if bioinit:
                 # Item 8.9b: arm D + bio-statistics weight init (M00001_bioinit
                 # only) -- replaces the cell's own uniform reset_parameters()
@@ -1827,6 +1845,15 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `run` below without touching `full_cfg`.
     if "flat_units" in run:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "flat_units": int(run["flat_units"])}}
+    # The locality-matched flat control moves width, sheet and recurrent
+    # density together, and `_build_model` reads all three out of
+    # `full_cfg["model"]`. `train_one` loads the config itself rather than
+    # the grid's resolved copy, so an override that stopped at the run dict
+    # would build a dense core at the config's width and train a different
+    # network than the run_id claims.
+    for key in ("flat_grid", "flat_density"):
+        if key in run:
+            full_cfg = {**full_cfg, "model": {**full_cfg["model"], key: run[key]}}
     # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's
     # default GRU -- must also be folded in before `_build_model` reads
     # `m.get("substrate", "gru")`.

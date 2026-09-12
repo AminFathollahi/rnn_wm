@@ -126,6 +126,60 @@ def test_substrate_arm_refuses_topography_and_dale_cells():
             rg.enumerate_runs([0], supervision="SUP", cells=[model_id], substrate_arm="ei")
 
 
+def test_locality_matched_flat_arm_enumerates_tagged_disjoint_run_ids():
+    """The control reruns the two flat cells that carry the structure
+    contrast with the core's dense recurrence replaced by a locality mask on
+    a sheet. Its run_ids must not collide with the dense runs of the same
+    cells and seeds: a collision would either skip the arm as
+    already-completed or resume a 128-unit dense checkpoint into a 289-unit
+    masked core."""
+    cells = ["M00000", "M00010"]
+    runs = rg.enumerate_runs(range(8), supervision="SUP", cells=cells, local_connectivity_flat=True)
+    ids = {r["run_id"] for r in runs}
+    assert len(ids) == 16
+    assert ids == {f"M{bits}_local289_SUP_s{seed}" for bits in ("00000", "00010") for seed in range(8)}
+    assert not ids & {r["run_id"] for r in rg.enumerate_runs(range(8), supervision="SUP")}
+    for r in runs:
+        assert r["flat_units"] == 289 and r["flat_grid"] == [17, 17], r["run_id"]
+        assert r["flat_density"] == 0.0681, r["run_id"]
+        assert (r["S"], r["M"], r["P"]) == (0, 0, 0), r["run_id"]
+    # The tag must not contain the digraph the run_id parsers split the seed on.
+    assert "_s" not in rg.LOCAL_CONNECTIVITY_FLAT_TAG
+
+
+def test_locality_matched_flat_arm_refuses_hierarchical_cells():
+    """A hierarchical cell's recurrence is the worker's and is already
+    locality-masked, so the override would change nothing while its run_id
+    claimed otherwise."""
+    import pytest
+
+    with pytest.raises(ValueError, match="hierarchical cells"):
+        rg.enumerate_runs([0], supervision="SUP", cells=["M10000"], local_connectivity_flat=True)
+    with pytest.raises(ValueError, match="hierarchical cells"):
+        rg.enumerate_runs([0], supervision="SUP", local_connectivity_flat=True)  # the full grid: 8 S=1 cells
+
+
+def test_main_locality_matched_flat_flag_records_the_override_in_resolved_config(tmp_path, monkeypatch):
+    """The resolved config is the audit trail AND the memory estimate's input,
+    so it must state the core that actually trained, not config.yaml's."""
+    monkeypatch.setattr(rg, "RESULTS", tmp_path)
+    monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(rg, "REPORT", tmp_path / "RUN_REPORT.md")
+    monkeypatch.setattr(rg, "run_grid_loop", lambda *a, **k: None)
+
+    rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP",
+             "--local-connectivity-flat", "--cells", "M00000"])
+
+    import yaml as _yaml
+
+    resolved = _yaml.safe_load((tmp_path / "resolved_config_grid_SUP_local289.yaml").read_text())
+    assert resolved["model"]["flat_units"] == 289
+    assert resolved["model"]["flat_grid"] == [17, 17]
+    assert resolved["model"]["flat_density"] == 0.0681
+    # The dense campaign's own resolved config must not have been rewritten.
+    assert not (tmp_path / "resolved_config_grid_SUP.yaml").exists()
+
+
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
     when `--supervision` is omitted -- this is the actual defect §16.4

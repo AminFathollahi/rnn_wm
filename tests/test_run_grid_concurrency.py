@@ -195,17 +195,6 @@ def test_plastic_s1_at_load3_uncheckpointed_exceeds_the_whole_card():
     assert rg._run_mib(plastic_s1, _mem_cfg(max_load=3)) < rg.DEFAULT_GPU_BUDGET_MIB
 
 
-def test_estimate_follows_a_resized_worker_population():
-    """`_run_mib` sizes a plastic run's activation graph from the resolved
-    config's worker width, so an arm that rebuilds the worker narrower must be
-    estimated at its own width -- the desynchronisation between the scheduler's
-    numbers and the model's is what caused every memory failure here so far."""
-    plastic_s1 = {"model_id": "M11111", "S": 1, "P": 1, "seed": 0, "run_id": "M11111_s0"}
-    cfg = _mem_cfg()
-    narrow = {**cfg, "model": {**cfg["model"], **rg.MATCHED_WORKER_GRID}}
-    assert rg._run_mib(plastic_s1, narrow) < rg._run_mib(plastic_s1, cfg)
-
-
 def test_non_plastic_runs_are_cheap_regardless_of_substrate():
     """Corrects D39's premise. A non-plastic cell never builds the [B, 3H, H]
     tensor at all, so an S=1 non-plastic run is cheap -- measured ~320 MiB --

@@ -1827,17 +1827,6 @@ def train_one(run: dict, cfg: dict) -> dict:
     # `run` below without touching `full_cfg`.
     if "flat_units" in run:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "flat_units": int(run["flat_units"])}}
-    # Grid-matched worker arm: the S=1 worker population is resized to the flat
-    # core's unit count and sheet, so like `flat_units` it changes the core's
-    # actual parameter shape and must be folded in before `_build_model` reads
-    # it. The two keys move together -- `HRLCore` rejects a grid whose cells
-    # don't number `worker_units` -- and the topographic penalty reads the
-    # grid off the built core, so nothing downstream needs telling twice.
-    if "worker_units" in run:
-        full_cfg = {**full_cfg, "model": {
-            **full_cfg["model"], "worker_units": int(run["worker_units"]),
-            "worker_grid": list(run.get("worker_grid", full_cfg["model"]["worker_grid"])),
-        }}
     # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's
     # default GRU -- must also be folded in before `_build_model` reads
     # `m.get("substrate", "gru")`.

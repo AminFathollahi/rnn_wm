@@ -89,14 +89,6 @@ def test_parse_run_id_handles_rate_substrate_tags():
     assert _parse_run_id("M00000_lowrank_RL_s1") == ("M00000_lowrank_RL", 0, 0, 0, 0, 0, 1)
 
 
-def test_parse_run_id_handles_the_matched_worker_grid_tag():
-    """The grid-matched worker arm keeps its base cell's S/M/P/T/D bits: the
-    tag changes the worker's width and sheet, not which arms are enabled."""
-    assert _parse_run_id("M10000_w128_SUP_s0") == ("M10000_w128_SUP", 1, 0, 0, 0, 0, 0)
-    assert _parse_run_id("M10010_w128_SUP_s7") == ("M10010_w128_SUP", 1, 0, 0, 1, 0, 7)
-    assert _run_id_extras("M10010_w128") == (False, 0.0, 1)
-
-
 def test_substrate_for_reads_the_recorded_substrate_from_the_manifest(tmp_path, monkeypatch):
     import json
 

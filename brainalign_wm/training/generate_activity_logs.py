@@ -150,17 +150,6 @@ def _substrate_for(run_id: str) -> Optional[str]:
     return found
 
 
-# The locality-matched flat control: one recurrent population with the
-# hierarchical worker's connectivity statistics -- masked on a square sheet
-# at the worker's mean in-degree, at the battery's effective-synapse budget
-# -- and none of its hierarchy. Width, sheet and density all changed at
-# train time, so a replay that rebuilt the core from the default config
-# would load a dense 128-unit state dict into it and fail.
-LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
-LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681,
-                           "flat_recurrent_init_units": 196}
-
-
 def _run_id_extras(model_id: str) -> tuple[bool, float, int, dict]:
     """(pbwm_gate, identity_catch_fraction, flat_units_mult, model_overrides)
     implied by the run_id suffix convention above -- the S/M/P/T/D bits alone
@@ -182,12 +171,14 @@ def _run_id_extras(model_id: str) -> tuple[bool, float, int, dict]:
     identity-catch family's run_id also carries a training-signal tag
     (`M00000_idcatch_SUP`), which would sit after `_idcatch` and break a
     plain `.endswith("_idcatch")` check."""
+    from brainalign_wm.training.model_variants import overrides_for_model
+
     parts = model_id.split("_")
     return (
         "pbwm" in parts,
         0.12 if "idcatch" in parts else 0.0,
         2 if "2x" in parts else 1,
-        dict(LOCAL_CONNECTIVITY_FLAT) if LOCAL_CONNECTIVITY_FLAT_TAG in parts else {},
+        overrides_for_model(model_id),
     )
 
 

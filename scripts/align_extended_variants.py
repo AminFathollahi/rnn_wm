@@ -48,6 +48,7 @@ from brainalign_wm.analysis.run_all import _aggregate_maintenance, align_one_run
 RESULTS = get_path("results")
 MANIFEST = RESULTS / "manifest.jsonl"
 OUT_PATH = RESULTS / "alignment_extended_variants.csv"
+DETAIL_PATH = RESULTS / "alignment_extended_variants_detail.csv"
 DEMAND_CONTRAST_PATH = RESULTS / "alignment_identity_demand_contrast.csv"
 
 # Variant run_id family -> the base core cell it is compared against. Every
@@ -59,7 +60,8 @@ FAMILIES = {
     "idcatch": None,
     "2x": "M00000", "l1": "M00000", "dropout": "M00000",
     "ei": "M00000", "dynsyn": "M00000", "lowrank": "M00000",
-    "local289": None,
+    "local289": None, "local128": None, "random128": None,
+    "dense289": None, "local289native": None, "random289": None,
 }
 IDENTITY_FAMILY = "idcatch"
 # Largest load-3 accuracy gap a seed pair may show and still count as
@@ -139,6 +141,7 @@ def demand_contrast(
     within `ACCURACY_TOLERANCE`, so a difference cannot be a behavioural
     difference in disguise."""
     rows = []
+    detail_rows = []
     by_architecture: dict[str, list[dict]] = {}
     for pair in pairs:
         by_architecture.setdefault(pair["base_model_id"], []).append(pair)
@@ -219,6 +222,8 @@ def main() -> int:
         except FileNotFoundError as e:
             print(f"[align_extended_variants]   skipped ({e})")
             continue
+        for epoch in ("maintenance", "probe"):
+            detail_rows.extend({"run_id": run_id, "epoch": epoch, **row} for row in result[epoch])
         ok = [r for r in result["maintenance"] if r.get("region") == "pooled" and r.get("status") == "ok"]
         maint_agg = _aggregate_maintenance(ok) if ok else {}
         session_alignment[run_id] = _session_alignment(result)
@@ -254,6 +259,7 @@ def main() -> int:
         })
     out_df = pd.DataFrame(out_rows)
     out_df.to_csv(OUT_PATH, index=False)
+    pd.DataFrame(detail_rows).to_csv(DETAIL_PATH, index=False)
     print(f"\n[align_extended_variants] wrote {OUT_PATH} ({len(out_df)} rows)")
     if len(out_df):
         print(out_df.to_string(index=False))

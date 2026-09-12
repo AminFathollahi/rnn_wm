@@ -71,6 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from brainalign_wm.config import DEFAULT_CONFIG_PATH, get_path, load_config
+from brainalign_wm.training.model_variants import FLAT_CONTROLS, LOCALITY_BUDGET, LOCALITY_BUDGET_TAG
 
 ROOT = Path(__file__).resolve().parent
 RESULTS = get_path("results")
@@ -185,9 +186,8 @@ SUBSTRATE_ARMS = {
 # of units, synapses and in-degree only two can be held at once, and the
 # preregistered criterion is synapses. The tag avoids the "_s" digraph the
 # run_id parsers split on.
-LOCAL_CONNECTIVITY_FLAT_TAG = "local289"
-LOCAL_CONNECTIVITY_FLAT = {"flat_units": 289, "flat_grid": [17, 17], "flat_density": 0.0681,
-                           "flat_recurrent_init_units": 196}
+LOCAL_CONNECTIVITY_FLAT_TAG = LOCALITY_BUDGET_TAG
+LOCAL_CONNECTIVITY_FLAT = LOCALITY_BUDGET
 
 # D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
@@ -368,7 +368,7 @@ def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
 def enumerate_runs(
     seeds: list[int], include_local_learning: bool = False, supervision: str | None = None,
     cells: list[str] | None = None, substrate_arm: str | None = None,
-    local_connectivity_flat: bool = False,
+    local_connectivity_flat: bool = False, flat_control: str | None = None,
 ) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
@@ -411,6 +411,10 @@ def enumerate_runs(
     would change nothing while its run_id claimed otherwise."""
     if substrate_arm is not None and substrate_arm not in SUBSTRATE_ARMS:
         raise ValueError(f"unknown substrate arm {substrate_arm!r}; known: {sorted(SUBSTRATE_ARMS)}")
+    if flat_control is not None and flat_control not in FLAT_CONTROLS:
+        raise ValueError(f"unknown flat control {flat_control!r}; known: {sorted(FLAT_CONTROLS)}")
+    if local_connectivity_flat and flat_control is not None:
+        raise ValueError("choose either the locality budget control or one crossed flat control")
     if cells is not None:
         known = {c["model_id"] for c in CELLS} | {c["model_id"] for c in LOCAL_LEARNING_CELLS}
         unknown = [c for c in cells if c not in known]
@@ -436,6 +440,22 @@ def enumerate_runs(
                 f"the locality-matched flat control replaces the flat core's dense recurrence; "
                 f"{hierarchical} are hierarchical cells and have none"
             )
+    if flat_control is not None:
+        unsupported = [c["model_id"] for c in chosen if c["model_id"] not in {"M00000", "M00010"}]
+        if unsupported:
+            raise ValueError(f"crossed flat controls are defined only for M00000 and M00010; {unsupported} are not")
+        if supervision not in (None, "SUP"):
+            raise ValueError("crossed flat controls are defined for supervised training only")
+
+    flat_metadata = {}
+    if flat_control is not None and FLAT_CONTROLS[flat_control].get("flat_density"):
+        from brainalign_wm.models.gru_cell import make_locality_mask, mask_digest, rewire_mask
+
+        spec = FLAT_CONTROLS[flat_control]
+        mask = make_locality_mask(tuple(spec["flat_grid"]), spec["flat_density"], seed=spec["flat_mask_seed"])
+        if spec["flat_connectivity"] == "random":
+            mask = rewire_mask(mask, seed=spec["flat_mask_seed"])
+        flat_metadata = {"flat_mask_edges": int(mask.sum().item()), "flat_mask_sha256": mask_digest(mask)}
 
     runs = []
     for seed in seeds:
@@ -443,6 +463,8 @@ def enumerate_runs(
             model_id = cell["model_id"] if substrate_arm is None else f"{cell['model_id']}_{substrate_arm}"
             if local_connectivity_flat:
                 model_id = f"{model_id}_{LOCAL_CONNECTIVITY_FLAT_TAG}"
+            if flat_control is not None:
+                model_id = f"{model_id}_{flat_control}"
             run = {**cell, "model_id": model_id, "seed": seed,
                    "run_id": build_run_id(model_id, seed, supervision)}
             if supervision is not None:
@@ -451,6 +473,9 @@ def enumerate_runs(
                 run["substrate"] = SUBSTRATE_ARMS[substrate_arm]
             if local_connectivity_flat:
                 run.update(LOCAL_CONNECTIVITY_FLAT)
+            if flat_control is not None:
+                run.update(FLAT_CONTROLS[flat_control])
+                run.update(flat_metadata)
             runs.append(run)
     return runs
 
@@ -942,6 +967,8 @@ def main(argv=None) -> int:
                           f"sheet at density {LOCAL_CONNECTIVITY_FLAT['flat_density']}), so hierarchy is not "
                           f"confounded with recurrent sparsity; flat cells only, and tagged "
                           f"'{LOCAL_CONNECTIVITY_FLAT_TAG}' in the run_id")
+    ap.add_argument("--flat-control", choices=sorted(FLAT_CONTROLS),
+                    help="enumerate one width/connectivity control for M00000 and M00010 under SUP")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
                      help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
@@ -960,7 +987,7 @@ def main(argv=None) -> int:
     cells = [c.strip() for c in args.cells.split(",") if c.strip()] if args.cells else None
     runs = enumerate_runs(seeds, include_local_learning=args.local_learning,
                           supervision=args.supervision, cells=cells, substrate_arm=args.substrate,
-                          local_connectivity_flat=args.local_connectivity_flat)
+                          local_connectivity_flat=args.local_connectivity_flat, flat_control=args.flat_control)
     completed = load_completed(MANIFEST, args.tier)
     commit = git_commit()
 
@@ -1020,6 +1047,8 @@ def main(argv=None) -> int:
         # the memory gate from it -- would read config.yaml's dense 128-unit
         # flat core while a masked 270-unit one trained.
         model_overrides = {**model_overrides, **LOCAL_CONNECTIVITY_FLAT}
+    if args.flat_control:
+        model_overrides = {**model_overrides, **FLAT_CONTROLS[args.flat_control]}
     resolved_cfg = (
         build_resolved_config(full_cfg, cfg, args.tier, model_overrides=model_overrides, run=run_for_resolve)
         if full_cfg else {"tier": {"name": args.tier, **cfg}}
@@ -1037,6 +1066,8 @@ def main(argv=None) -> int:
         config_tag = f"grid_{args.supervision}_{args.substrate}" if args.substrate else f"grid_{args.supervision}"
         if args.local_connectivity_flat:
             config_tag = f"{config_tag}_{LOCAL_CONNECTIVITY_FLAT_TAG}"
+        if args.flat_control:
+            config_tag = f"{config_tag}_{args.flat_control}"
         resolved_path = resolved_config_path(config_tag)
         try:
             resolved_path.write_text(yaml.safe_dump(resolved_cfg, sort_keys=True))

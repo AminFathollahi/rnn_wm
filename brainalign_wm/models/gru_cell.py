@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import hashlib
+
 import torch
 import torch.nn as nn
 
@@ -246,6 +248,50 @@ def make_locality_mask(
     mask = (rng.uniform(size=(n, n)) < p).astype(np.float32)
     np.fill_diagonal(mask, 0.0)
     return torch.from_numpy(mask)
+
+
+def rewire_mask(mask: torch.Tensor, seed: int = 0, swaps_per_edge: int = 10) -> torch.Tensor:
+    """Randomize a directed mask while preserving every in/out degree."""
+    import numpy as np
+
+    edges = np.argwhere(mask.detach().cpu().numpy() > 0)
+    edge_set = {tuple(edge) for edge in edges.tolist()}
+    rng = np.random.default_rng(seed)
+    target = swaps_per_edge * len(edges)
+    accepted = 0
+    for _ in range(max(target * 20, 1)):
+        if accepted >= target or len(edges) < 2:
+            break
+        first, second = rng.choice(len(edges), size=2, replace=False)
+        src_a, dst_a = edges[first]
+        src_b, dst_b = edges[second]
+        new_a = (int(src_a), int(dst_b))
+        new_b = (int(src_b), int(dst_a))
+        old_a = (int(src_a), int(dst_a))
+        old_b = (int(src_b), int(dst_b))
+        if src_a == src_b or dst_a == dst_b or new_a[0] == new_a[1] or new_b[0] == new_b[1]:
+            continue
+        if new_a in edge_set or new_b in edge_set:
+            continue
+        edge_set.remove(old_a)
+        edge_set.remove(old_b)
+        edge_set.add(new_a)
+        edge_set.add(new_b)
+        edges[first] = new_a
+        edges[second] = new_b
+        accepted += 1
+    if accepted < target:
+        raise RuntimeError(f"accepted {accepted} of {target} requested degree-preserving swaps")
+    out = torch.zeros_like(mask)
+    rows, cols = zip(*edge_set)
+    out[list(rows), list(cols)] = 1
+    return out
+
+
+def mask_digest(mask: torch.Tensor) -> str:
+    """Return a stable checksum for a binary connectivity mask."""
+    data = mask.detach().cpu().to(torch.uint8).contiguous().numpy().tobytes()
+    return hashlib.sha256(data).hexdigest()
 
 
 class PBWMManagerCell(nn.Module):

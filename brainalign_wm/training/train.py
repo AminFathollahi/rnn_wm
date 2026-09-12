@@ -353,11 +353,18 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
             # the flat core is densely recurrent and the worker is not. Null
             # (the default, and every battery cell) is dense recurrence.
             flat_density = m.get("flat_density")
+            flat_connectivity = m.get("flat_connectivity") or ("local" if flat_density else "dense")
             flat_mask = None
             if flat_density:
-                from brainalign_wm.models.gru_cell import make_locality_mask
+                from brainalign_wm.models.gru_cell import make_locality_mask, rewire_mask
 
-                flat_mask = make_locality_mask(tuple(m["flat_grid"]), float(flat_density), seed=0)
+                flat_mask = make_locality_mask(
+                    tuple(m["flat_grid"]), float(flat_density), seed=int(m.get("flat_mask_seed", 0))
+                )
+                if flat_connectivity == "random":
+                    flat_mask = rewire_mask(flat_mask, seed=int(m.get("flat_mask_seed", 0)))
+                elif flat_connectivity != "local":
+                    raise ValueError(f"unknown flat connectivity {flat_connectivity!r}")
             # `flat_recurrent_init_units` states the width the recurrent draw
             # is scaled by, so a masked flat core can be matched to another
             # population's initial recurrent gain as well as its connectivity
@@ -1864,7 +1871,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     # the grid's resolved copy, so an override that stopped at the run dict
     # would build a dense core at the config's width and train a different
     # network than the run_id claims.
-    for key in ("flat_grid", "flat_density", "flat_recurrent_init_units"):
+    for key in ("flat_grid", "flat_density", "flat_connectivity", "flat_mask_seed", "flat_recurrent_init_units"):
         if key in run:
             full_cfg = {**full_cfg, "model": {**full_cfg["model"], key: run[key]}}
     # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's

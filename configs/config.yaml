@@ -136,6 +136,8 @@ model:
                                             # carry the worker's connectivity statistics with none of its
                                             # hierarchy: no manager, no pooled bottleneck, no top-down gate.
                                             # `flat_units` must equal the product of `flat_grid` for it.
+  flat_connectivity: null                  # local or degree-preserving random recurrence when density is set
+  flat_mask_seed: 0                        # fixed mask and rewiring seed for sparse flat cores
   flat_recurrent_init_units: null          # width the S=0 recurrent draw is scaled by (std 1/sqrt of it).
                                             # null = this core's own `flat_units`, the standard draw and the
                                             # setting for every battery cell. Set it to another population's

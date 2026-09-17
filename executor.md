@@ -8000,3 +8000,38 @@ Acceptance:
     python -m pytest -q tests/test_multitask.py tests/test_multitask_seeding.py \
         tests/test_continuation_verification.py
     exit 0
+
+### 2026-09-17 -- multi-task continuation run ids already replay correctly
+
+Checked whether `generate_activity_logs.py` can replay a continuation run id
+like `M00000_contmulti_SUP_s0` on the working-memory task: read
+`_parse_run_id`, `_parse_model_id`, `_arch_from_manifest`, `_substrate_for`
+and `_run_id_extras` against every one of the 4 continuation cells
+(`M00000`, `M10000`, `M00100`, `M11111`) crossed with both diet tags
+(`_contwm`, `_contmulti`).
+
+All five already handle it. The 5-bit architecture match is a prefix regex,
+so it is unaffected by anything appended after the cell id, and the diet's
+front end during training uses the same cue width as the plain Sternberg
+front end (`multitask.C_DIM_MULTITASK == model.task_vec_dim == 10`), so a
+continuation checkpoint's `front_end` state dict loads into the default
+model the replay path builds. Confirmed against real, currently-training
+checkpoints rather than by inspection alone: `M00000_contwm_SUP_s0` (S=M=P=0),
+`M10000_contwm_SUP_s0` (S=1), and `M00100_contwm_SUP_s0` (P=1) all load end to
+end through `_build_model` + `_load_checkpoint`. No `_contmulti` checkpoint
+exists yet (training has not reached that diet arm for any seed), so the
+hierarchical-plus-plastic case was checked by loading a real `M11111_SUP_s0`
+checkpoint's weights into a model built from `_parse_run_id
+("M11111_contmulti_SUP_s0")`'s own S/M/P -- shapes match.
+
+Nothing was broken and nothing was changed in `generate_activity_logs.py`.
+Added a regression test locking the parse in, so a future change cannot
+silently regress it.
+
+Acceptance:
+
+    python -m pytest -q tests/test_generate_activity_logs.py
+    16 passed, exit 0
+
+    python -m pytest -q
+    exit 0 (full suite, includes the new test)

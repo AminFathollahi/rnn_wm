@@ -570,6 +570,22 @@ unevidenced.
       hidden-width capacity probes that carry no training signal, and the
       earlier hybrid signal. The 64 continuations match without a further
       change.
+- [x] F1a Verify the replay path itself (not just the run list F1 fixed)
+      against a multi-task-tagged run id, e.g. `M00000_contmulti_SUP_s0`.
+      Checked `generate_activity_logs.py::_parse_run_id`, `_parse_model_id`,
+      `_arch_from_manifest`, `_substrate_for` and `_run_id_extras` against
+      every one of the 4 continuation cells and both diet tags. All five
+      already parse the tag correctly -- the 5-bit prefix match is
+      suffix-agnostic, and the diet-trained checkpoint's front end has the
+      same shape as the plain Sternberg one (`C_DIM_MULTITASK ==
+      task_vec_dim == 10`), verified by loading three real in-progress
+      `_contwm` checkpoints (`M00000`, `M10000`, `M00100`) end to end through
+      `_build_model` + `_load_checkpoint`, and by loading a real `M11111_SUP`
+      checkpoint's weights into a model built from an `M11111_contmulti_...`
+      parse. No fix was needed; a regression test now locks the parse in
+      (`tests/test_generate_activity_logs.py::
+      test_parse_run_id_handles_continuation_diet_tags`,
+      `test_run_id_extras_leaves_continuation_diet_tags_as_the_plain_cell`).
 - [ ] F2 Write the replay activity logs for the arms in F1 and run the
       existing alignment stage over them. Reuse the replay and alignment paths
       unchanged -- this is coverage, not a new estimator. Storage is roughly

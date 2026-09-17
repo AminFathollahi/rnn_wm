@@ -7520,6 +7520,26 @@ Nothing broken and left unfixed by this follow-up.
   -m pytest -q tests/test_param_budget.py` reported `12 passed`; bytecode
   compilation and `git diff --check` succeeded.
 
+### 2026-09-12 -- crossed flat width and connectivity controls
+
+- Added five supervised flat-control arms spanning local and degree-preserving
+  random recurrence at 128 units and dense, local, and random recurrence at
+  289 units. Together with the existing dense 128-unit runs, they form 12
+  width, connectivity, and topographic-loss cells over eight paired seeds.
+- Kept the 289-unit hierarchy budget control separate because it draws
+  recurrent weights at the 196-unit worker scale. The factorial arms use each
+  width's native input and recurrent initialization scale across all three
+  connectivity conditions, requiring 80 new runs rather than 64.
+- Random masks preserve the matching local mask's full in-degree and
+  out-degree sequences. Each sparse run records its active-edge count and mask
+  checksum, and the checkpoint stores the realized mask as model state.
+- Added replay reconstruction for every tag, detailed region/population
+  alignment output, and paired main-effect and interaction summaries.
+- Verified 80 unique run ids with no overlap against the manifest. The focused
+  test set passed: 69 tests covering enumeration, replay, masks, initialization,
+  configuration, parameter budgets, and scheduling.
+- No training was launched.
+
 ### 2026-09-13 -- measured peak GPU memory for the flat width and connectivity controls
 
 - The scheduler's memory gate sizes every non-plastic run at a flat 500 MiB
@@ -7580,4 +7600,39 @@ Nothing broken and left unfixed by this follow-up.
 - `wm_dynamics/bin/python -m pytest -q tests/test_multitask.py` reported
   `16 passed`; the full `wm_dynamics/bin/python -m pytest` reported
   `485 passed` in 126s.
+- No training was launched.
+
+### 2026-09-17 -- multi-task diet continuation, verified and ready to launch
+
+- The continuation runner enumerates 64 paired runs -- 4 cells (M00000,
+  M10000, M00100, M11111) x 8 seeds x 2 diets -- each continuing a finished
+  supervised checkpoint for a further 24,000 updates under either Sternberg
+  alone or the six-task diet. Verified: 64 unique run_ids, none colliding
+  with the manifest's 434 rows, and all 64 source checkpoints present.
+- The training batch size now defaults to the configured value rather than a
+  hardcoded 32. A continuation at a smaller batch is not a continuation of the
+  run it extends; the diet contrast would have carried a gradient-noise
+  difference on top of the task difference. The resolved value goes onto the
+  manifest row.
+- The manifest append takes an exclusive lock, so the four per-cell streams in
+  the launch commands can run concurrently without interleaving a record.
+- `verify_neurogym_semantics.py --contract` reports **0 failures**: six
+  distinct ten-entry task codes, the working-memory cue passing through
+  unchanged at all six epochs, every observation reaching the same (4, 64)
+  bottleneck, one shared 3-way policy head mapped onto each native action
+  space, seed-reproducible per-trial reset, and reward arriving for the action
+  that earned it in every task that exposes a target.
+- `verify_neurogym_semantics.py --learn --updates 400` puts all five auxiliary
+  tasks above their own measured random-policy reward: bandit 0.898 vs 0.369,
+  dawtwostep 0.694 vs 0.264, delaymatchsample 0.498 vs 0.316, gonogo 0.516 vs
+  0.233, contextdecisionmaking 0.283 vs 0.165. Report at
+  `docs/auxiliary_task_learning.json`.
+- Two scope facts recorded with the arm: bandit and dawtwostep resolve in 1-2
+  ticks and so exercise almost no recurrent dynamics, and bandit exposes no
+  ground-truth target and contributes reward alone. The diet's working-memory
+  content comes from delaymatchsample, gonogo and contextdecisionmaking.
+- `wm_dynamics/bin/python -m pytest -q tests/test_continuations.py` exited 0.
+- `../training_commands.txt` is rewritten around this study, which is now the
+  only outstanding training; its verification, status and completion blocks
+  were executed and report 64/64 enumerated and 0/64 complete.
 - No training was launched.

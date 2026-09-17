@@ -1,0 +1,47 @@
+{
+  "bandit": {
+    "updates": 400,
+    "batch_size": 32,
+    "chance_reward": 0.3691,
+    "first_block_reward": 0.6156,
+    "final_block_reward": 0.8977,
+    "above_chance": true,
+    "s_per_update": 0.0118
+  },
+  "dawtwostep": {
+    "updates": 400,
+    "batch_size": 32,
+    "chance_reward": 0.2635,
+    "first_block_reward": 0.4817,
+    "final_block_reward": 0.6937,
+    "above_chance": true,
+    "s_per_update": 0.0111
+  },
+  "delaymatchsample": {
+    "updates": 400,
+    "batch_size": 32,
+    "chance_reward": 0.3158,
+    "first_block_reward": 0.3834,
+    "final_block_reward": 0.4976,
+    "above_chance": true,
+    "s_per_update": 0.0385
+  },
+  "gonogo": {
+    "updates": 400,
+    "batch_size": 32,
+    "chance_reward": 0.2334,
+    "first_block_reward": 0.2121,
+    "final_block_reward": 0.5164,
+    "above_chance": true,
+    "s_per_update": 0.0246
+  },
+  "contextdecisionmaking": {
+    "updates": 400,
+    "batch_size": 32,
+    "chance_reward": 0.1654,
+    "first_block_reward": 0.0503,
+    "final_block_reward": 0.2826,
+    "above_chance": true,
+    "s_per_update": 0.0519
+  }
+}

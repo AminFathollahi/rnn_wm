@@ -84,12 +84,13 @@ line; what remained of it is A9(c).
       count, which stays a stated limitation. Conclusion: the flat core is
       already budget-matched, a 196-unit flat grid is an optional wide
       control and not a repair, and flat 128 keeps its 16x8 sheet.
-- [~] A7b Locality-matched flat control (implementation prepared; training
-      not launched).
+- [x] A7b Locality-matched flat control (trained 2026-09-14; all 16 runs
+      recorded complete at the full tier, re-verified 2026-09-17).
       Structure is confounded with recurrent sparsity. The hierarchical
       worker's recurrence is locality-masked on a sheet at density 0.10; the
-      flat core's is dense. For a claim about brain-like geometry that is the
-      a plausible alternative explanation that this control tests. The
+      flat core's is dense. Local connectivity, rather than hierarchy, is a
+      plausible alternative source of brain-like geometry, and that is what
+      this control tests. The
       sheet's status differs too: flat topography is imposed on an arbitrary
       unit ordering while hierarchical topography is the connectivity itself.
       Train `M00000` and `M00010` as flat cores of 289 units on a 17x17
@@ -143,15 +144,15 @@ line; what remained of it is A9(c).
       the default config before loading a checkpoint, so any run trained at a
       non-default width would have failed the state-dict load and produced no
       log to analyze. The replacement fixes that.
-      Existing runs are untouched. NOT LAUNCHED -- the launch is the user's
-      call.
-- [ ] A7c Cross width, connectivity and topographic loss to estimate their
+      Existing runs are untouched. LAUNCHED 2026-09-13 00:53 as part of the
+      168-run outstanding set (see the launch record below).
+- [x] A7c Cross width, connectivity and topographic loss to estimate their
       effects separately. Use flat GRUs with widths {128,289}, connectivity
       {dense, random sparse, spatially local sparse}, and T={0,1}, with
       M=P=D=0. Initial scope: SUP, eight paired seeds, 12 cells/96 total runs.
-      Existing dense128 cells supply 16 runs and the prepared local289 arm
-      supplies 16 pending runs. The other four width/connectivity combinations
-      require 64 runs; 80 of the 96 runs are new if existing runs are reusable.
+      Existing dense128 cells supply 16 runs. The prepared local289 arm uses a
+      different recurrent initialization scale and remains a separate budget
+      control. The other five width/connectivity combinations require 80 runs.
       Match the random and local masks at each width in active edge count and
       in/out-degree sequence where feasible, using degree-preserving rewiring;
       log the realized masks and do not pick one based on alignment. Keep
@@ -169,10 +170,17 @@ line; what remained of it is A9(c).
       contrast are part of the intervention. Compare hierarchy to the existing
       budget control separately. Preserve training/evaluation schedules, seed
       pairing, all applicable analyses and ROI/population coverage. This scope
-      does not cross every biological mechanism or training signal. Update the
-      command inventory: its current 88 runnable jobs exclude these 64 planned
-      additions and the unprepared multi-task continuation study.
-- [ ] A9 Multi-task versus WM-only continuation from matched saved
+      does not cross every biological mechanism or training signal.
+      Implemented in `fd44b95`, verified 2026-09-13: all 96 factorial ids and
+      the 16 budget-control ids enumerate uniquely with zero manifest overlap;
+      local and random masks at each width share an identical edge count and
+      degree sequence (2,517 edges at 128, 5,708 at 289) and differ only in
+      topology; every factorial cell draws its recurrent weights at its own
+      width, so initialization does not move with the connectivity label.
+      `../training_commands.txt` section 6 carries the 80 commands and reports
+      168 outstanding runs. LAUNCHED 2026-09-13 00:53 (see the launch record
+      below).
+- [x] A9 Multi-task versus WM-only continuation from matched saved
       checkpoints, using the implemented Sternberg, two-arm bandit, two-step
       decision, delayed-match-to-sample, go/no-go and context-decision tasks
       on one shared recurrent model. Prerequisites, in order, before any
@@ -205,6 +213,48 @@ line; what remained of it is A9(c).
       result as an effect of additional multi-task training, never as
       multi-task training from initialization. Prepare unique commands and
       run ids; no full-grid restart.
+      Closed 2026-09-17. (a) The contract report passes with 0 failures over
+      all six tasks -- distinct ten-entry codes, the WM cue unchanged at all
+      six epochs, every observation reaching the same (4, 64) bottleneck, one
+      shared 3-way head mapped onto each native action space, seed-reproducible
+      per-trial reset, and reward credited to the action that earned it. All
+      five auxiliary tasks learn above their own measured random-policy reward
+      within 400 updates (bandit 0.898 vs 0.369, dawtwostep 0.694 vs 0.264,
+      delaymatchsample 0.498 vs 0.316, gonogo 0.516 vs 0.233,
+      contextdecisionmaking 0.283 vs 0.165). (b) The auxiliary loop was missing
+      the reflective gate and the topographic penalty and credited only the
+      tick that received a reward; all three are fixed and mechanism scope is
+      stated at the loop (`cd6975e`). (c) The ten-entry cue landed in
+      `a8c0718`. Continuation enumeration verified: 64 unique run_ids, none
+      colliding with the manifest, all 64 source checkpoints present, batch
+      size following the configured value so each arm matches the run it
+      extends (`c3625a6`). Two scope facts recorded with the arm: bandit and
+      dawtwostep resolve in 1-2 ticks and exercise almost no recurrent
+      dynamics, and bandit exposes no ground-truth target. Commands are in
+      `../training_commands.txt`; nothing was launched.
+
+## Launch record
+
+All 168 outstanding runs were launched 2026-09-13 00:53 (+03:30) on user
+authorization, after the gate passed: `make verify-gpu` clean, full
+`pytest -q` 486 passed, `make audit-campaign` 0 violations, all 168 run ids
+re-enumerated unique and disjoint from the manifest's 266, and the new flat
+cores' peak GPU memory measured rather than estimated (worst case 216.9 MiB
+allocator peak plus a 196 MiB CUDA context, so eight concurrent runs occupy
+~3.3 GiB of the 12,227 MiB card and `--workers 8` binds before the memory
+gate does).
+
+The fourteen prepared invocations run one at a time under a driver, in the
+order the command inventory lists them -- rate substrates (48), memory-demand
+arm (24), locality-matched flat control (16), crossed flat controls (80) --
+so no two invocations contend for the card while each fills it with its own
+worker pool. Per-invocation logs are `logs/<name>.log`; the driver's own
+start/exit ledger is `logs/campaign_driver.log` and its pid is in
+`logs/campaign_driver.pid`.
+
+The uncommitted working-tree change to `train.py` at launch time was confined
+to `run_multitask_neurogym_trial`, which the Sternberg grid never calls, so
+every launched run uses committed code on its own path.
 
 ## B. Measurement repairs
 
@@ -312,12 +362,21 @@ line; what remained of it is A9(c).
       `maintenance_signed_raw_alignment`, which does vary in the same file,
       state the accuracy-matched sample size, and report the null honestly if
       it stays null at this n rather than quietly reporting the clipped fit.
-- [ ] C6 Survey `/media/amin/ADATA HD710 PRO/Research/Representation/Working
+- [x] C6 Survey `/media/amin/ADATA HD710 PRO/Research/Representation/Working
       Memory/data` for an independent confirmation set. Present are 000004,
       000469, 000574, 000673, 001187, ds004752, ds005034, ds005489, ds005557,
       ds006848, Panichello_2024, Wolff, Watters, Inagaki, Campbell,
       Soldado-Magraner, kai miller, PFC-3, alagapan, CLAM-tACS. Only propose
       a download if a planned analysis actually needs one.
+      Surveyed 2026-09-16. The Daume 2024 medial temporal lobe
+      working-memory maintenance recordings (20 GB, 46 files) are already on
+      the volume and are the independent confirmation set: separate patients,
+      separate acquisition, same task family and file standard. The verbal
+      Sternberg collection is a different stimulus modality and the
+      declarative-memory collection has no maintenance delay, so neither
+      confirms this claim. No download is proposed. Wiring the confirmation
+      set through the existing reader is a measurement item, not a training
+      one.
 - [~] C7 Distributions, not only pooled means: per load, per condition field,
       per region, per patient and their crossings, with counts behind every
       row and the spread reported, not just the centre. Say which conditions
@@ -325,11 +384,24 @@ line; what remained of it is A9(c).
 
 ## D. Housekeeping
 
-- [ ] D1 Full `pytest -q` and `make verify-gpu` once the tree settles.
+- [x] D1 Full `pytest -q` and `make verify-gpu` -- 2026-09-13: 486 passed,
+      `verify-gpu` clean (RTX 5070 Ti Laptop, torch 2.11.0+cu128, sm_120
+      present), `make audit-campaign` 0 violations. One nondeterminism was
+      found and fixed while clearing this: `measurement_validation`'s mixture
+      generator seeded its RNG from `hash()` of a string, which Python salts
+      per process, so the same nominal seed produced a different mixture every
+      interpreter run and the monotonicity test failed for some values of
+      `PYTHONHASHSEED` (113 and 157 reproduce it). Seeding now derives from a
+      crc32 of the encoded key; the file's seven tests pass under every hash
+      seed tried. No saved result depended on the old derivation.
 - [x] D2 `advisor.md` entries for the September decisions.
-- [ ] D3 After the round lands: re-read `training_commands.txt` end to end and
-      confirm every command still enumerates the run ids it claims -- now 88
-      runs, once A7b's section is in.
+- [x] D3 After the round lands: re-read `training_commands.txt` end to end and
+      confirm every command still enumerates the run ids it claims.
+      Rewritten 2026-09-17 around the continuation study, now the only
+      outstanding training -- all 168 runs of the previous four sections are
+      complete. Its verification, status and completion blocks were executed
+      as written: 64 unique run_ids, 0 manifest collisions, 0 missing source
+      checkpoints, 0/64 complete, completion check exits 1.
 - [x] D5 `contrasts.enabled_arm_count` raised on any tagged `model_id`
       (`invalid literal for int() with base 10: '_'`), so the contrast stage
       would have broken on every pending run the first time one was analyzed.
@@ -337,7 +409,7 @@ line; what remained of it is A9(c).
       exploratory arm-count correlation is restricted to the battery's own
       untagged cells, since a control variant and the local-learning family
       are separate designs rather than extra points on it.
-- [ ] D6 Arm D is applied ~3.3x more strongly to hierarchical cells than to
+- [x] D6 Arm D is applied ~3.3x more strongly to hierarchical cells than to
       flat ones. `_dale_penalty` returns a SUM of per-population means: one
       mean for the flat cell, worker mean plus manager mean for the
       hierarchical core. Measured at initialization with `dale_ei_split` 0.8:
@@ -353,7 +425,15 @@ line; what remained of it is A9(c).
       not equalize weight scale or gradient strength. State the limitation
       and specify the intended normalization before any targeted follow-up;
       do not prescribe a replacement D grid from the initial penalty ratio.
-- [ ] D7 Recurrent initialization gain is not comparable across the S arm in
+      Closed 2026-09-16. Re-measured over the eight seeds the study trains
+      rather than one draw: flat 0.0221 (sd 0.0001) against hierarchical
+      0.0692 (sd 0.0012), worker 0.0179 plus manager 0.0513, a ratio of 3.13.
+      The limitation and the intended normalization -- weight each
+      population's mean violation by its share of the core's surviving
+      recurrent synapses -- are recorded, with the required annotation for
+      any contrast that crosses the architecture arm while the penalty is on.
+      No replacement grid is prescribed and no completed cell is changed.
+- [x] D7 Recurrent initialization gain is not comparable across the S arm in
       the completed battery. Measured candidate-block spectral radius at
       init: flat dense 128 = 0.584, hierarchical worker 196 at density 0.10 =
       0.208. The mask is applied after a draw whose scale depends only on
@@ -364,11 +444,16 @@ line; what remained of it is A9(c).
       must appear as one. A7b approximately matches candidate-weight gain to the worker, but
       also changes width and connectivity. It is a budget control, not an
       isolated hierarchy intervention; A7c addresses the separate contrasts.
-- [x] D4 Correct stale flat-topography defaults and comments in `train.py` -- `312f14c`.
-      that say 16x16. The configured and tested flat sheet is 16x8 at 128
-      units; verify every fallback agrees with `model.flat_grid`, without
-      changing completed run behaviour. `scripts/probe_peak_memory.py` carries
-      the same stale default.
+      Closed 2026-09-16. Re-measured over eight seeds: candidate-block
+      spectral radius 0.608 (sd 0.016) flat dense at 128 units against 0.201
+      (sd 0.004) for the 196-unit worker at realized density 0.1005, a ratio
+      of 3.03; the 24-unit dense manager is 0.606 (sd 0.045). Recorded as a
+      named alternative account of any architecture effect.
+- [x] D4 Stale flat-topography defaults corrected -- `312f14c`. The fallbacks
+      in `train.py` and `scripts/probe_peak_memory.py` said 16x16; the
+      configured and tested flat sheet is 16x8 at 128 units, and every
+      fallback now agrees with `model.flat_grid`. Completed run behaviour is
+      unchanged.
 
 - [x] D8 Clarified the dPCA label in the status Markdown/TeX/PDF and module
       description. `analysis/dpca.py` marginalizes the condition tensor and

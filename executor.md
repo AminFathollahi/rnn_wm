@@ -7636,3 +7636,24 @@ Nothing broken and left unfixed by this follow-up.
   only outstanding training; its verification, status and completion blocks
   were executed and report 64/64 enumerated and 0/64 complete.
 - No training was launched.
+
+### 2026-09-17 -- the auxiliary loop now runs the same mechanisms as the working-memory loop
+
+- Three mechanisms were silently inactive on the five auxiliary tasks, so a
+  diet run would have trained its mechanisms on Sternberg trials only and the
+  diet contrast would have confounded "more tasks" with "less mechanism".
+  Closed: the reflective gate now receives the previous tick's feedback,
+  reward, value and chosen log-probability and biases the core as it does in
+  the working-memory loop, and the topographic penalty applies to the same
+  sheet-shaped hidden population.
+- Reward credit was wrong for the two reward-only tasks. The advantage was the
+  CURRENT tick's reward minus the baseline, so a reward arriving at the end of
+  a trial credited only the final action and none of the actions that earned
+  it. It is now a discounted return accumulated backward over the trial, with
+  the value baseline fit to that same return.
+- Mechanism scope is stated where the loop is defined: fast plasticity travels
+  inside the core's own state, and only the sign penalty stays with the caller
+  because it reads weights rather than the trial.
+- `wm_dynamics/bin/python -m pytest -q tests/test_multitask.py
+  tests/test_continuations.py` exited 0.
+- No training was launched.

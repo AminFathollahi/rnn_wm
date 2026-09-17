@@ -510,22 +510,20 @@ def _analytic_flops_per_tick(front_end, core, heads) -> int:
 
 
 def _dale_penalty(core, S: int, ei_split: float) -> torch.Tensor:
-    """Arm D (§1.3, soft Dale's-law penalty): over each recurrent
-    `weight_hh` [3*H, H] (flat cell for S=0; worker AND manager for S=1),
-    designate the first `ei_split*H` hidden units (the COLUMNS = a unit's
-    OUTGOING weights) excitatory and the rest inhibitory, and penalize sign
-    violations. A soft penalty (not a hard clamp) is used deliberately --
-    hard-clamping weight signs fights the optimizer / the `MaskedGRUCell`
-    layout (§1.3).
+    """Penalize recurrent sign violations, summed over the core's populations.
 
-    AUDIT 2026-07-26: the penalty is now taken over the MASKED (effective)
-    recurrent weights. The S=1 worker's locality mask leaves ~4.1% of
-    `weight_hh` alive (4,755 of 115,248 entries); the previous unmasked
-    version spent ~96% of arm D's gradient on synapses that are multiplied
-    by zero in the forward pass and therefore do not exist, which both
-    diluted the mean by ~24x and made D substantially weaker on S=1 than
-    on S=0 -- an S x D confound in a battery whose whole point is to
-    separate the two arms."""
+    The leading `ei_split` fraction of hidden units are excitatory and the rest
+    inhibitory, read down the columns of `weight_hh` (a unit's outgoing
+    weights). The penalty is soft rather than a hard sign clamp, which would
+    fight both the optimizer and the cell's stacked-gate weight layout. A
+    masked cell averages over surviving synapses only, so the penalty is not
+    diluted by weights the forward pass multiplies by zero.
+
+    The sum runs over one population for a flat core and two for a hierarchical
+    one, and each population's mean is unweighted, so at one nominal weight the
+    penalty's scale differs across architectures and only its direction is
+    comparable.
+    """
     cells = [core.cell] if S == 0 else [core.worker, core.manager]
     total = torch.zeros((), device=cells[0].weight_hh.device)
     for cell in cells:
@@ -1043,27 +1041,32 @@ def _run_trial(
 
 def run_multitask_neurogym_trial(
     adapter, core, heads, S: int, M: int, P: int, task_name: str, batch_env, B: int, max_ticks: int,
-    device, mode: str = "bptt", value_weight: float = 0.5,
+    device, mode: str = "bptt", value_weight: float = 0.5, reflective_gate=None,
+    topo_loss_weight: float = 0.0, flat_grid: tuple = DEFAULT_FLAT_GRID, discount: float = 0.99,
 ) -> tuple[Optional[torch.Tensor], list[float]]:
-    """Phase 5 (comments.txt §5): the multi-task-diet analog of `_run_trial`,
-    for one of the 5 NeuroGym tasks (`multitask.py::NeuroGymBatchEnv`).
-    Unlike `_run_trial`, this interleaves rollout and forward pass in the
-    SAME loop -- a NeuroGym trial's length and content depend on the
-    model's own actions (see `multitask.py`'s module docstring), so there
-    is no pre-generated batch to unroll over.
+    """Run one batched auxiliary trial, the multi-task analog of `_run_trial`.
 
-    Training signal per task (item 5's Phase-5-scoped simplification --
-    the full SUP-vs-RL supervision-arm factorial is Phase 7's job): tasks
-    that provide a `gt` (DelayMatchSample, GoNogo, ContextDecisionMaking)
-    train via per-tick cross-entropy against it; tasks with no `gt`
-    (Bandit, DawTwoStep -- bandit-style, reward-only) train via per-tick
-    REINFORCE with a value baseline, using the env's own native reward.
-    Both accumulate only over `active` (not-yet-`done`) ticks.
+    Rollout and forward pass interleave in the same loop because an auxiliary
+    trial's length and content depend on the model's own actions, so there is
+    no pre-generated batch to unroll over.
 
-    Returns `(loss_or_None, reward_per_trial: list[float] len B)` --
-    `reward_per_trial` is each trial's total native-env reward, the
-    per-task "accuracy" proxy reported in executor.md (uniform across
-    gt-having and gt-less tasks alike, unlike a bespoke match rule)."""
+    Tasks that expose a ground-truth target train by per-tick cross-entropy
+    against it; the reward-only tasks train by REINFORCE against a discounted
+    return with a learned value baseline, so a reward arriving at the end of a
+    trial credits the actions that earned it. Both accumulate over active
+    (not-yet-done) ticks only.
+
+    Mechanism scope matches the working-memory loop: the reflective gate, when
+    supplied, receives the previous tick's feedback, reward, value and chosen
+    log-probability and biases the core exactly as it does there, and the
+    topographic penalty applies to the same sheet-shaped hidden population.
+    Fast plasticity travels inside the core's own state. Only the Dale penalty
+    is applied by the caller rather than here, since it reads the weights and
+    not the trial.
+
+    Returns the loss (None in eval mode) and each trial's total native reward,
+    the per-task behavioural measure, uniform across tasks with and without a
+    ground-truth target."""
     from brainalign_wm.tasks.multitask import HAS_GT, task_context_vector
 
     has_gt = HAS_GT[task_name]
@@ -1071,11 +1074,17 @@ def run_multitask_neurogym_trial(
     state = _init_state(core, S, P, B, device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
     reward_per_trial = torch.zeros(B, device=device)
+    reflection = reflective_gate.init_state(B, device) if reflective_gate is not None else None
+    prev_value = torch.zeros(B, 1, device=device)
+    prev_logp = torch.zeros(B, 1, device=device)
+    prev_reward = torch.zeros(B, 1, device=device)
+    prev_feedback = torch.zeros(B, 1, device=device)
 
     ce_terms: list[torch.Tensor] = []
-    policy_terms: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []  # (logp_a, value, active_mask)
-    value_only_terms: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []  # (value, reward_t, active_mask)
+    policy_terms: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    reward_terms: list[torch.Tensor] = []
     entropy_terms: list[torch.Tensor] = []
+    topo_terms: list[torch.Tensor] = []
 
     for t in range(max_ticks):
         if bool(done.all()):
@@ -1083,7 +1092,16 @@ def run_multitask_neurogym_trial(
         active = (~done).float()
         obs_t = torch.as_tensor(batch_env.obs, dtype=torch.float32, device=device)
         z_t = adapter(obs_t, c_t)
-        h_star, new_state, _u_t = _step_core(core, S, M, P, z_t, state, t=t, gate_bias=None, training=(mode == "bptt"))
+        gate_bias = None
+        if reflective_gate is not None:
+            gate_units = core.n_units() if S == 0 else core.manager.hidden_dim
+            gate_bias, reflection = _gate_bias_step(
+                reflective_gate, reflection, prev_feedback, prev_reward, prev_value, prev_logp,
+                gate_units, B, device,
+            )
+        h_star, new_state, _u_t = _step_core(
+            core, S, M, P, z_t, state, t=t, gate_bias=gate_bias, R_t=reflection, training=(mode == "bptt")
+        )
         policy, value, logits = heads(h_star)
 
         if mode == "eval":
@@ -1094,6 +1112,15 @@ def run_multitask_neurogym_trial(
         obs_np, reward_np, gt_head_np, newly_done_np = batch_env.step(action.cpu().numpy())
         reward_t = torch.as_tensor(reward_np, dtype=torch.float32, device=device) * active
         reward_per_trial = reward_per_trial + reward_t
+
+        if mode == "bptt" and topo_loss_weight > 0:
+            grid = flat_grid if S == 0 else core.grid
+            hidden = new_state["h"] if S == 0 else new_state["h_worker"]
+            grid_act = hidden[~done].view(-1, *grid)
+            if len(grid_act):
+                topo_terms.append(
+                    torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
+                )
 
         if mode == "bptt":
             if has_gt:
@@ -1111,13 +1138,17 @@ def run_multitask_neurogym_trial(
                 ce_terms.append((ce_per_sample * per_sample_weight).sum() / per_sample_weight.sum().clamp_min(1e-8))
             else:
                 logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))
-                advantage = reward_t - value.detach()
-                policy_terms.append((logp_a, advantage, active))
-                value_only_terms.append((value, reward_t, active))
+                policy_terms.append((logp_a, value, active))
+                reward_terms.append(reward_t)
                 probs = policy.clamp_min(1e-8)
                 entropy_terms.append(-(probs * torch.log(probs)).sum(dim=-1).mean())
 
         done = done | torch.as_tensor(newly_done_np, dtype=torch.bool, device=device)
+        chosen_logp = torch.log(policy.gather(1, action.unsqueeze(-1)).clamp_min(1e-8))
+        prev_logp = chosen_logp.detach()
+        prev_value = value.detach().unsqueeze(-1)
+        prev_reward = reward_t.detach().unsqueeze(-1)
+        prev_feedback = ((reward_t != 0) | torch.as_tensor(newly_done_np, dtype=torch.bool, device=device)).float().unsqueeze(-1)
         state = new_state
 
     loss = None
@@ -1126,10 +1157,24 @@ def run_multitask_neurogym_trial(
         if ce_terms:
             loss = loss + torch.stack(ce_terms).mean()
         if policy_terms:
-            policy_loss = sum((-logp_a * adv * mask).sum() / mask.sum().clamp_min(1.0) for logp_a, adv, mask in policy_terms) / len(policy_terms)
-            value_loss = sum(((v - r).pow(2) * mask).sum() / mask.sum().clamp_min(1.0) for v, r, mask in value_only_terms) / len(value_only_terms)
+            returns = []
+            future = torch.zeros(B, device=device)
+            for reward_t in reversed(reward_terms):
+                future = reward_t + discount * future
+                returns.append(future)
+            returns.reverse()
+            policy_loss = sum(
+                (-logp_a * (ret - value.detach()) * mask).sum() / mask.sum().clamp_min(1.0)
+                for (logp_a, value, mask), ret in zip(policy_terms, returns)
+            ) / len(policy_terms)
+            value_loss = sum(
+                ((value - ret).pow(2) * mask).sum() / mask.sum().clamp_min(1.0)
+                for (_logp, value, mask), ret in zip(policy_terms, returns)
+            ) / len(policy_terms)
             mean_entropy = torch.stack(entropy_terms).mean()
             loss = loss + policy_loss + value_weight * value_loss - 0.01 * mean_entropy
+        if topo_terms:
+            loss = loss + topo_loss_weight * torch.stack(topo_terms).mean()
     return loss, reward_per_trial.detach().cpu().tolist()
 
 

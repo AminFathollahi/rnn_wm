@@ -514,6 +514,15 @@ record and cite themselves by design.
 - [ ] E8 Final sweep: re-grep the whole tree, confirm zero remaining, run
       `pytest -q` and `make audit-campaign`.
 
+## Sequencing (revised 2026-09-17)
+
+Train everything, replay everything, then analyze everything -- in that order,
+once each. The alternative analyzes an arm, trains another, and repeats the
+same analysis over a larger set, which is how the current coverage gap arose.
+
+Analysis work is paused while the 64 continuations train. The GPU is the
+shared resource: the replay pass needs it and training is using it.
+
 ## Priority and order
 
 Work is serialized: one agent at a time, each finishing and committing before
@@ -522,19 +531,20 @@ the next starts, so a session interruption loses at most one item.
 1. `../training_commands.txt` -- done 2026-09-17. The 64-run continuation
    study is the only outstanding network training and its commands are
    verified and resumable.
-2. C4, C5 -- a finished sweep needs only its selectivity check and result
-   table, and a null needs reporting honestly.
-3. C1, C2, C7 -- the per-population dependent variable, coverage under both
-   signals, and distributions behind the pooled means.
-4. B1, B2 -- the equal-performance run ids and the persistence estimator.
-   Both have corrected code sitting uncommitted.
+2. F2 -- one replay pass over all 392 runs once training ends, writing the
+   activity logs every downstream analysis reads. Commands are in
+   `../training_commands.txt` section 6.
+3. C1, C2, C7 -- per-population dependent variable, coverage under both
+   signals, distributions behind the pooled means. First analyses to run on
+   the full set.
+4. B1, B2 -- equal-performance run ids and the persistence estimator. Both
+   have corrected code sitting uncommitted.
 5. B3, B4 -- two result tables whose implementations already exist.
 6. B5 -- full-delay maintenance RSA, the largest measurement item.
 7. B6, B7 -- estimand and timestamp quality control.
-8. F1-F4 -- alignment coverage for the control and extension arms, and the
-   downstream reruns it forces. Sequenced here because it needs the
-   per-population column from C1 in place first.
-9. E1-E8 -- hygiene, last, because every item above edits the same files.
+8. F3, F4 -- confirm each analysis ran over the full set and record what
+   stayed out and why.
+9. E2-E8 -- hygiene, last, because every item above edits the same files.
 
 ## F. Alignment coverage for the control and extension arms
 
@@ -551,11 +561,14 @@ flat control is the clearest case: it exists to separate hierarchy from
 recurrent sparsity, and until its alignment is computed that separation is
 unevidenced.
 
-- [ ] F1 Enumerate exactly which completed full-tier runs lack an alignment
-      estimate, by arm. The approximate split is 16 locality-matched flat, 16
-      width/connectivity flat controls, 32 rate substrates, 24 memory-demand
-      and 48 local-learning runs. Every one has its checkpoint on disk; only 4
-      of 231 have a replay activity log.
+- [x] F1 -- `9354cf7`. The cause was the run list, not the arms: it matched a
+      five-bit cell selector exactly, so every tagged run fell outside it. The
+      selector now also accepts the local-learning short form and an arm tag,
+      and a run qualifies when its id is exactly selector, signal and seed.
+      Coverage 192 -> 392; the 26 still outside are named pilots, the
+      hidden-width capacity probes that carry no training signal, and the
+      earlier hybrid signal. The 64 continuations match without a further
+      change.
 - [ ] F2 Write the replay activity logs for the arms in F1 and run the
       existing alignment stage over them. Reuse the replay and alignment paths
       unchanged -- this is coverage, not a new estimator. Storage is roughly

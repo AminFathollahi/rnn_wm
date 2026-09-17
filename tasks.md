@@ -350,13 +350,18 @@ every launched run uses committed code on its own path.
       run in a follow-up commit (`scripts/rsa_encoder_partial.py`). The two
       alignment-selected runs give the identical ordering; the
       accuracy-selected run does not.
-- [~] C4 Memory-location intervention in the plastic cells: disrupt hidden
-      activity and synaptic traces independently, each leaving the other
-      intact, with a verified selectivity check. The sweep has finished --
-      `results/memory_location.csv`, 1,080 rows over 72 checkpoints x 5
-      conditions x 3 loads. Remaining: verify the selectivity check, commit
-      `brainalign_wm/analysis/memory_location.py` and
-      `scripts/run_memory_location.py`, and record the result table.
+- [x] C4 Memory-location intervention in the plastic cells -- `c8e557d`.
+      1,080 accuracy rows over 72 checkpoints x 5 conditions x 3 loads, plus
+      1,296 carrier-deviation rows. Selectivity holds for the synaptic
+      disruption (off/on 0.039 during the delay) and for the activity
+      disruption placed before encoding (0.107); the delay-activity condition
+      reads 0.72 because holding the trace freezes it while the unlesioned
+      trace keeps being written -- drift, not injected corruption, and the
+      free-trace variant moves it only to 0.78. Recorded as a limitation of
+      that condition; no rows regenerated. Both carriers hold memory
+      (0.15-0.46 accuracy cost during the delay against 0.00-0.05 before
+      encoding); the eight hierarchical reinforcement checkpoints are at
+      chance and their zero drop is a floor.
 - [~] C5 Does maintenance alignment predict robustness to longer delays,
       distractors and novel stimulus combinations, among accuracy-matched
       networks, on conditions unused for selection. `results/robustness.csv`

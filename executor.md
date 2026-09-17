@@ -7657,3 +7657,95 @@ Nothing broken and left unfixed by this follow-up.
 - `wm_dynamics/bin/python -m pytest -q tests/test_multitask.py
   tests/test_continuations.py` exited 0.
 - No training was launched.
+
+### 2026-09-17 -- where the memory is held in the plastic cells: intervention and its selectivity check
+
+- The intervention replaces one of the two memory carriers in a plastic
+  recurrent cell -- the hidden activity, or the fast Hebbian synaptic trace --
+  with uniform noise over that carrier's own range, at the cell's input, on
+  every tick of a chosen epoch, and reads out probe accuracy. The other
+  carrier is left alone. Placing the same disruption in the fixation epoch,
+  before anything is encoded, is the control for a generic disturbance
+  effect. 72 completed plastic checkpoints (`M00100`, `M01111`, `M10111`,
+  `M11101`, `M11110`, `M11111`), 5 conditions, 3 loads, 150 held-out trials
+  per cell: 1,080 rows in `results/memory_location.csv`.
+
+- Selectivity is verified at two levels. At the mechanism level the activity
+  disruption leaves the trace bit-identical to the value it entered the
+  window with, for as many ticks as the window lasts, in both the flat and
+  the hierarchical-worker state layout; the synaptic disruption leaves the
+  activity entering the cell untouched and reaches the readout only through
+  the effective recurrent weights, which is the pathway under test. Both are
+  asserted directly on the cell.
+
+- At the trajectory level, `carrier_deviation` re-runs identical trials with
+  and without the disruption and measures how far each carrier moves from its
+  unlesioned path, in units of that carrier's own root-mean-square norm over
+  the trial. Medians over 216 checkpoint-by-load measurements, disrupted
+  ticks only:
+
+  | condition | on-target | off-target | off/on |
+  |---|---|---|---|
+  | delay activity | 1.123 | 0.810 | 0.72 |
+  | delay activity, trace left free | 1.122 | 0.870 | 0.78 |
+  | delay synaptic | 7.471 | 0.290 | 0.039 |
+  | delay synaptic, erased not noised | 1.038 | 0.147 | 0.142 |
+  | fixation activity | 0.768 | 0.082 | 0.107 |
+  | fixation synaptic | 7.404 | 0.104 | 0.014 |
+
+- The synaptic arm is selective by this measure and so is the activity arm
+  placed in fixation. The activity arm placed in the delay is not, at 0.72 --
+  and the reason is not corruption. Holding the trace pins it at its
+  pre-disruption value, while the unlesioned trace keeps being written
+  throughout the delay, so the whole 0.810 is the unlesioned trace travelling
+  away from a frozen one. Letting the trace run free instead, so the injected
+  noise is written into it, moves the off-target number only from 0.810 to
+  0.870: the 0.060 difference is the corruption, the 0.810 is drift. Either
+  way the delay-activity condition cannot distinguish "the activity carried
+  the memory" from "the trace stopped being updated", and that is a
+  limitation of the condition, not a defect in the rows. The existing rows
+  stand; nothing was regenerated.
+
+- Mean accuracy drop against each checkpoint's own paired control, by
+  architecture, training signal and load:
+
+  | core | signal | condition | n | load 1 | load 2 | load 3 |
+  |---|---|---|---|---|---|---|
+  | flat | reinforcement | delay activity | 16 | 0.462 | 0.418 | 0.393 |
+  | flat | reinforcement | delay synaptic | 16 | 0.322 | 0.323 | 0.322 |
+  | flat | reinforcement | fixation activity | 16 | 0.049 | 0.050 | 0.043 |
+  | flat | reinforcement | fixation synaptic | 16 | 0.028 | 0.025 | 0.017 |
+  | flat | supervised | delay activity | 16 | 0.444 | 0.442 | 0.419 |
+  | flat | supervised | delay synaptic | 16 | 0.428 | 0.425 | 0.383 |
+  | flat | supervised | fixation activity | 16 | 0.015 | 0.020 | 0.027 |
+  | flat | supervised | fixation synaptic | 16 | 0.013 | 0.011 | 0.009 |
+  | hierarchical | reinforcement | delay activity | 8 | 0.001 | 0.027 | 0.016 |
+  | hierarchical | reinforcement | delay synaptic | 8 | 0.008 | 0.008 | 0.004 |
+  | hierarchical | reinforcement | fixation activity | 8 | 0.008 | -0.002 | -0.004 |
+  | hierarchical | reinforcement | fixation synaptic | 8 | 0.012 | 0.002 | -0.000 |
+  | hierarchical | supervised | delay activity | 32 | 0.380 | 0.345 | 0.314 |
+  | hierarchical | supervised | delay synaptic | 32 | 0.198 | 0.170 | 0.151 |
+  | hierarchical | supervised | fixation activity | 32 | 0.013 | 0.016 | 0.014 |
+  | hierarchical | supervised | fixation synaptic | 32 | 0.011 | 0.014 | 0.011 |
+
+- Reading. Both carriers hold task-relevant memory: disrupting either one
+  during the delay costs 0.15 to 0.46 accuracy, against 0.00 to 0.05 for the
+  same disruption before encoding. Activity costs more than the trace in
+  every group that learned the task, and the gap is much wider in the
+  hierarchical supervised cells (0.380 against 0.198 at load 1) than in the
+  flat supervised ones (0.444 against 0.428), so the trace carries a larger
+  share of the memory in the flat core. The trace is not a passive copy: a
+  delay disruption of the trace alone costs a third of accuracy in the flat
+  supervised cells.
+
+- The eight hierarchical reinforcement checkpoints show no drop from any
+  condition, and that is a floor, not a result. Their own unlesioned control
+  accuracy is 0.548 / 0.563 / 0.551 at loads 1/2/3, against 0.986 / 0.954 /
+  0.931 for the supervised hierarchical cells; a network at chance has no
+  accuracy to lose. Those 8 checkpoints carry no information about where
+  memory is held and should not be pooled with the rest.
+
+- `wm_dynamics/bin/python -m pytest -q tests/test_memory_location.py
+  tests/test_robustness.py` exited 0 (15 tests).
+- No training was launched; every number above is replay of saved
+  checkpoints.

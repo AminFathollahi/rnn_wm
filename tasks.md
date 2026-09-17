@@ -363,7 +363,7 @@ every launched run uses committed code on its own path.
       encoding); the eight hierarchical reinforcement checkpoints are at
       chance and their zero drop is a floor.
 - [x] C5 Does maintenance alignment predict robustness to longer delays and
-      novel set sizes, among accuracy-matched networks -- `PENDING`. NULL.
+      novel set sizes, among accuracy-matched networks -- `675fc12`. NULL.
       Accuracy-matched sample is 150 runs (15 architectures, 109 supervised,
       41 reinforcement) within +/-0.02 of median accuracy 0.9507, drawn from
       the 192 completed runs that have a maintenance alignment estimate.

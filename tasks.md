@@ -238,6 +238,26 @@ line; what remained of it is A9(c).
       dynamics, and bandit exposes no ground-truth target. Commands are in
       `../training_commands.txt`; nothing was launched.
 
+- [x] A10 A9's continuation arm only ever continues a finished working-memory
+      checkpoint, so it cannot answer what the six-task diet does to a
+      network trained on it from a random initialization. `train_one`
+      already supports this (`diet: "multitask"` replaces the Sternberg-only
+      front end with the diet's own, shared cue width, trained from step 0),
+      but no launcher ever set the flag. Added
+      `scripts/run_multitask_from_init.py`: same 4 cells and 8 seeds as A9
+      (`M00000`, `M10000`, `M00100`, `M11111`), isolated per-run execution
+      reusing `run_grid.py`'s `build_run_id`/`load_completed`/
+      `resolve_train_fn`/manifest conventions, run id
+      `M{SMPTD}_multitask_{SUP|RL}_s{seed}`. Enumeration verified: 32 runs,
+      32 unique run_ids, 0 collisions against the current manifest (the
+      script checks and prints this itself, and refuses to proceed if a
+      genuine collision is ever found). Resumable the same way every other
+      arm is: a completed run_id is skipped, and `train_one` resumes a
+      partial run from its own checkpoint; verified with a stubbed trainer
+      that running it with nothing pending prints "nothing left" and exits 0
+      without training, and that a partial manifest trains only the run_ids
+      still missing. No training launched.
+
 ## Launch record
 
 All 168 outstanding runs were launched 2026-09-13 00:53 (+03:30) on user

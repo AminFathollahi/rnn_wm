@@ -8035,3 +8035,54 @@ Acceptance:
 
     python -m pytest -q
     exit 0 (full suite, includes the new test)
+
+### 2026-09-17 -- a from-scratch multi-task training arm, prepared not launched
+
+The continuation study (A9) only ever continues a finished working-memory
+checkpoint under the six-task diet; nothing in the study answers what that
+diet does to a network trained on it from a random initialization.
+`brainalign_wm/training/train.py::train_one` already implements this
+(`run["diet"] == "multitask"` builds the diet's own front end and interleaves
+all 6 tasks from step 0), but no launcher had ever set the flag -- `run_grid.py`
+never assigns a `diet` key to any cell it enumerates.
+
+Added `scripts/run_multitask_from_init.py`: an isolated per-run launcher for
+this one arm, matching the convention `run_identity_catch.py` and
+`run_perf_matched_baselines.py` already use rather than adding a new concept
+to `run_grid.py` itself. Reuses `run_grid.py`'s `build_run_id`,
+`load_completed`, `resolve_train_fn`, `build_resolved_config`, `config_hash`,
+`git_commit` and `write_report` -- no new enumeration, resume, or manifest
+logic. Same 4 cells and 8 seeds as the continuation arm (`M00000`, `M10000`,
+`M00100`, `M11111`), run id `M{SMPTD}_multitask_{SUP|RL}_s{seed}`, manifest
+`model_id` unsuffixed by signal.
+
+Verification (no training):
+
+    PYTHONPATH=$PWD python scripts/run_multitask_from_init.py --supervision SUP
+    [run_multitask_from_init] enumerated 32 runs, 32 unique run_ids, 0 colliding
+      with a non-multitask manifest row
+
+32 = 4 cells x 8 seeds, all unique, zero collisions against the manifest as
+it stands today (266+ existing rows, including the in-progress continuation
+runs). The script also refuses outright (raises rather than trains) if a
+future manifest ever does collide.
+
+Idempotence and self-reporting, required of any entry point that launches or
+resumes work, verified with a stubbed trainer (no real training, no GPU):
+re-running `--execute` with every run already `status: completed` prints
+`nothing left: all N runs already completed.` and returns 0 without calling
+the trainer; running it with a partial manifest trains only the run_ids still
+missing and appends exactly those rows.
+
+Acceptance:
+
+    python -m pytest -q tests/test_run_multitask_from_init.py
+    7 passed, exit 0
+
+    python -m pytest -q
+    exit 0 (full suite)
+
+The exact launch command, and the wall-clock estimate drawn from this
+project's own manifest, are reported to the user rather than written into
+`../training_commands.txt` (that file is being edited directly by the user
+this round). No training was launched.

@@ -10,32 +10,33 @@ final checkpoint.
 Contract:
     train_one(run: dict, cfg: dict) -> dict
       run = {"run_id", "model_id", "S", "M", "seed", "P"} for the 8 Core
-            cells (BPTT throughout, §17 decision 6), or {..., "L": 1}
-            instead of "P" for the four Extended local-learning cells
-            (M00L/M01L/M10L/M11L, node-perturbation/e-prop, §6.3)
+            cells (BPTT throughout), or {..., "L": 1} instead of "P" for
+            the four Extended local-learning cells
+            (M00L/M01L/M10L/M11L, node-perturbation/e-prop)
       cfg  = the tier-merged dict `run_grid.py` builds (containing "steps",
              among other tier parameters, and optionally "batch_size" to
-             override `configs/config.yaml`'s `train.batch_size` -- see
-             Phase 2/executor.md, needed for arm-P cells at the global
-             batch_size=128 default); the full project configuration
+             override `configs/config.yaml`'s `train.batch_size`, needed
+             for arm-P cells at the global batch_size=128 default); the
+             full project configuration
              (model/mechanisms/task/train sections) is loaded here directly
              from configs/config.yaml, since `run_grid.py` only threads the
              tier subset through.
       returns {"status": "completed"|"failed",
-               # Phase 12 (§3.4): the headline is the max_steps (equal-duration)
-               # evaluation, unconditionally -- this is where every cell is
-               # compared and every geometry analysis reads. Round 1's "prefer
-               # the at-criterion snapshot if confirmed" hybrid policy is gone.
-               "gates": {"load1>=0.83": bool},  # keys = configs/config.yaml gates.criterion, §3.1
+               # The headline is the max_steps (equal-duration) evaluation,
+               # unconditionally -- this is where every cell is compared and
+               # every geometry analysis reads. An earlier policy that
+               # preferred the at-criterion snapshot when confirmed is gone.
+               "gates": {"load1>=0.83": bool},  # keys = configs/config.yaml gates.criterion
                "accuracy": {"load1": float, "load1_ci_lo": float, "load1_ci_hi": float, ...},  # final_evaluation, n=500
                "gates_at_max_steps": ..., "accuracy_at_max_steps": ...,  # aliases of the two above, unchanged shape
                "rung": int,
-               # §3.1: Gate A (inclusion) verdict and its floor-only-gate
-               # mitigation covariate (9.10) -- NOT a stop condition.
+               # The behavioural inclusion verdict, plus the human-percentile
+               # covariate that mitigates that criterion being a floor only --
+               # NOT a stop condition.
                "matched": bool,
                "human_percentile_load1": float | None, "human_percentile_load2": float | None,
                "human_percentile_load3": float | None,
-               # §3.3: one independent record per milestone key (gates.criterion
+               # One independent record per milestone key (gates.criterion
                # merged with gates.extra_milestones), e.g. "steps_to_load1_0.83",
                # "steps_to_load3_0.8" -- each None until its own streak of
                # `gates.consecutive_evals` consecutive periodic evals holds, never
@@ -44,7 +45,7 @@ Contract:
                "steps_to_<key>_<threshold>": int | None, "trials_to_<key>_<threshold>": int | None,
                "wall_s_to_<key>_<threshold>": float | None, "joules_to_<key>_<threshold>": float | None,
                # The checkpoint/eval snapshot at the FIRST milestone (of any
-               # key) reached -- what 12.4 compares `ckpt.pt` (max_steps) against.
+               # key) reached -- what the equal-duration `ckpt.pt` is compared against.
                "accuracy_at_first_milestone": dict | None, "first_milestone_step": int | None,
                "ms_per_step": float | None}
 
@@ -63,7 +64,7 @@ procedure:
         `apply_update` is the *fraction of ticks whose greedy action
         matched the ideal target action* -- a denser, smoother proxy than
         bare correct/incorrect.
-      * **load2 (Phase 12.5 lever 3, optional, width 0 unless
+      * **load2 (optional, width 0 unless
         `task.curriculum.load2_steps` is set) + ramp + target** (remaining
         steps): BPTT cells switch to
         REINFORCE with a value baseline, backpropagated through time, on
@@ -73,7 +74,7 @@ procedure:
         affects the reward). From this point on, the two arms differ only
         in credit assignment (global BPTT policy-gradient vs. local node
         perturbation) on an identical reward.
-  - **Supervision arms (Phase 7, comments.txt §5).** `train.supervision`
+  - **Supervision arms.** `train.supervision`
     ({legacy|SUP|RL}, default `legacy`) selects `_run_trial`'s signal via
     `_select_signal`: `legacy` preserves the two-phase warmup/target
     behavior above exactly; `SUP` trains dense per-tick CE for the whole
@@ -118,8 +119,7 @@ procedure:
     trace). If rung 3 also fails to clear the gate, this is recorded
     honestly as rung=3, gates=False, rather than silently substituting
     backpropagation.
-  - **Gate boundary.** Behavioral gates use `>=` (not `>`), applied
-    consistently here and in `advisor.md`.
+  - **Gate boundary.** Behavioral gates use `>=` (not `>`) throughout.
 """
 from __future__ import annotations
 
@@ -165,7 +165,6 @@ class _MetricsLogger:
     FIELDNAMES = [
         "step", "phase", "train_loss", "train_acc_load1", "train_acc_load2", "train_acc_load3",
         "grad_norm", "wall_s",
-        # Phase 2 (comments.txt §5 item 2.4):
         "ms_per_step",       # median wall-clock ms/step over a trailing window, excluding the first 100 steps
         "flops_per_step",    # analytic (param shapes x ticks/trial x batch), not measured -- deterministic
         "peak_mem_mb",       # torch.cuda.max_memory_allocated() since process start, not reset per interval
@@ -175,8 +174,8 @@ class _MetricsLogger:
     def __init__(self, run_id: str, resume: bool = False):
         self.path = RESULTS / "metrics" / f"{run_id}.csv"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # A resumed run (comments.txt §16 item 16.1) must not truncate the
-        # accuracy trace Gate B is derived from: append when the caller
+        # A resumed run must not truncate its own accuracy trace, which the
+        # end-of-training quantities are derived from: append when the caller
         # tells us this is a genuine resume (a checkpoint was restored) and
         # the file already has rows. Gated on `resume`, not merely on the
         # file's existence -- a fresh run (no checkpoint) must still start a
@@ -256,8 +255,8 @@ def _restore_checkpoint_rng(state: dict) -> None:
 
 
 class _GatedFlatCore(torch.nn.Module):
-    """The S=0 (flat, GRU-substrate) core, for every M/P combination
-    (Phase 1, B1/1.5): uses `MaskedGRUCell`/`PlasticGRUCell` uniformly,
+    """The S=0 (flat, GRU-substrate) core, for every M/P combination: uses
+    `MaskedGRUCell`/`PlasticGRUCell` uniformly,
     including the true M=0,P=0 baseline. `mask=None` (the default, and every
     battery cell) is dense recurrence; a mask gives this one population the
     hierarchical worker's connectivity statistics without any of its other
@@ -267,7 +266,7 @@ class _GatedFlatCore(torch.nn.Module):
     the draw's scale leaves the two differing in initial recurrent gain. Previously M=0,P=0 used a separate `FlatGRUCore`
     wrapping plain `nn.GRUCell`, which inits its biases uniform where
     `MaskedGRUCell` inits them to zero -- a free confound between M00000
-    and M01000 (B1). `extra_update_bias` defaults to None, so the M=0 case
+    and M01000. `extra_update_bias` defaults to None, so the M=0 case
     is just this class called with no bias, not a different class."""
 
     def __init__(self, input_dim: int, hidden_dim: int, plastic: bool = False, hebb_kwargs: Optional[dict] = None,
@@ -317,7 +316,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
     }
     front_end = FrontEnd(m["feature_dim"], m["task_vec_dim"], m["bottleneck"], m["input_noise_sigma"]).to(device)
     substrate = m.get("substrate", "gru")
-    # D19: the recurrent init's spectral radius sets the BPTT gradient
+    # The recurrent init's spectral radius sets the BPTT gradient
     # budget for every vanilla arm; None leaves the default uniform draw
     # untouched. Applied to both vanilla paths below (flat and hierarchical
     # worker+manager) -- fixing only one would trade one confound for another.
@@ -389,7 +388,7 @@ def _build_model(full_cfg: dict, S: int, M: int, P: int, device, pbwm_gate: bool
         if substrate == "vanilla":
             if M or P:
                 raise NotImplementedError(
-                    "VanillaHRLCore (S=1 vanilla) only supports M=0,P=0 -- Stage 1's factorial (§4) never "
+                    "VanillaHRLCore (S=1 vanilla) only supports M=0,P=0 -- the vanilla-substrate factorial never "
                     "combines vanilla with M/P; those need HRLCore's reflective-gate/Hebbian hooks, not "
                     "built for this substrate."
                 )
@@ -428,9 +427,9 @@ def _step_core(
     core, S: int, M: int, P: int, z_t, state, t: int, gate_bias, recurrent_noise_sigma: float = 0.0, R_t=None,
     core_dropout_p: float = 0.0, training: bool = True,
 ):
-    """`recurrent_noise_sigma` (bio-plausible ablation battery, §4.4
-    "+noise"): Gaussian noise added directly to the persisting recurrent
-    state (not just the input bottleneck's existing `sigma_in`) -- 0.0
+    """`recurrent_noise_sigma` (the bio-plausible ablation battery's
+    "+noise" arm): Gaussian noise added directly to the persisting
+    recurrent state (not just the input bottleneck's existing `sigma_in`) -- 0.0
     (off) for every Core cell; only the "+noise" ablation arm sets it.
     `R_t` (raw reflection signal, ablation-battery arm M111_pbwm only): the
     PBWM manager applies its own per-gate beta, so it needs R_t itself, not
@@ -482,11 +481,11 @@ def _gate_width(S: int, m: dict) -> int:
 
 
 def _select_signal(supervision: str, phase: str) -> str:
-    """Phase 7 (comments.txt §5): SUP always trains on dense per-tick CE;
+    """SUP always trains on dense per-tick CE;
     RL always trains on REINFORCE -- both run their fixed signal for the
     WHOLE run, "throughout instead of for the first 20%" (SUP) / "run
     throughout" (RL), decoupled from curriculum phase. "legacy" (the
-    default) preserves the exact pre-Phase-7 behavior every already-tested
+    default) preserves the earlier hybrid behavior every already-tested
     Sternberg/multitask cell depends on: CE during curriculum warmup only,
     REINFORCE after."""
     if supervision == "SUP":
@@ -499,7 +498,7 @@ def _select_signal(supervision: str, phase: str) -> str:
 def _analytic_flops_per_tick(front_end, core, heads) -> int:
     """2*rows*cols (standard 2-FLOPs-per-MAC convention) summed over every
     2D weight matrix in front_end/core/heads -- one tick's forward-pass
-    FLOP count. Phase 2 item 2.4: deterministic and reproducible from
+    FLOP count -- deterministic and reproducible from
     parameter shapes, unlike a measured wall-clock number."""
     total = 0
     for module in (front_end, core, heads):
@@ -562,7 +561,7 @@ def _image_features_batch(image_bank, image_ids: list, feature_dim: int, device)
 
 def _image_features_all_ticks(image_bank, trial_steps_batch: list, feature_dim: int, device) -> torch.Tensor:
     """[T, B, feature_dim], one host->device transfer for the whole trial
-    batch instead of one per tick (Phase 2 item 2.2, comments.txt B3)."""
+    batch instead of one per tick."""
     T = len(trial_steps_batch[0])
     B = len(trial_steps_batch)
     feats = np.zeros((T, B, feature_dim), dtype=np.float32)
@@ -658,10 +657,10 @@ def _run_trial(
     `TaskGenerator.sample_batch` -- every trial has identical tick/epoch
     structure). Returns (loss_or_None, correct: list[bool] len B,
     reward: list[float] len B, identity_catch: dict|None). `energy_cost_weight`
-    (bio-plausible ablation battery, §4.4 "+energy cost"): an L2/mean-firing-rate
+    (the bio-plausible ablation battery's "+energy cost" arm): an L2/mean-firing-rate
     penalty on the readout state `h_star`, added to the training loss -- 0.0 (off)
     for every Core cell; only the "+energy cost" ablation arm sets it.
-    `topo_loss_weight`/`flat_grid` (arm T, §1.2): a spatial-smoothness penalty
+    `topo_loss_weight`/`flat_grid` (arm T): a spatial-smoothness penalty
     on the RECURRENT population's own activity (never `h_star`) -- the S=1
     worker reshaped onto its intrinsic `core.grid` (14x14), or the S=0 flat
     core's hidden state reshaped onto the imposed `flat_grid` (16x8, the
@@ -669,12 +668,12 @@ def _run_trial(
     locality MASK; T owns this smoothness LOSS -- kept orthogonal so their
     ablation effects don't bleed into each other. 0.0 (off) for every Core
     cell; only the "+T"/"-T" ablation-battery cells set it.
-    `categories` (§9.4a): the task's category list,
+    `categories`: the task's category list,
     used to map an identity-catch trial's target category to a class index
     for `heads.identity_aux` -- required whenever `heads.identity_aux is
     not None` (i.e. `task.identity_catch_fraction > 0`), unused otherwise.
     `identity_catch` is `{"correct": int, "total": int}` accumulated over
-    catch trials in this batch (identity-report accuracy, §9.4a), or None
+    catch trials in this batch (identity-report accuracy), or None
     when `heads.identity_aux is None`.
     `task_name_for_context` (multi-task-diet cells only): when set,
     `front_end` is assumed to be the diet's own `front_end_mt` and `ts.c_t`
@@ -705,11 +704,11 @@ def _run_trial(
     value_only_terms: list[tuple[torch.Tensor, torch.Tensor]] = []  # (value_pred [B], non_catch mask [B]) at feedback tick(s)
     entropy_terms: list[torch.Tensor] = []
     energy_terms: list[torch.Tensor] = []
-    topo_terms: list[torch.Tensor] = []  # arm T (§1.2): spatial-smoothness penalty terms
-    identity_aux_terms: list[torch.Tensor] = []  # §9.4a auxiliary identity-report CE loss, catch trials only
+    topo_terms: list[torch.Tensor] = []  # arm T: spatial-smoothness penalty terms
+    identity_aux_terms: list[torch.Tensor] = []  # auxiliary identity-report CE loss, catch trials only
     identity_catch = {"correct": 0, "total": 0} if heads.identity_aux is not None else None
 
-    # Phase 2 (B3): `true_in_set` is constant per trial (only EXPOSED at
+    # `true_in_set` is constant per trial (only EXPOSED at
     # probe/feedback epochs) -- read it once from the first probe tick
     # instead of rebuilding it every probe tick. `last_probe_action` stays a
     # GPU tensor for the whole loop (no per-b `.item()` sync); it, and every
@@ -752,9 +751,9 @@ def _run_trial(
     non_catch = torch.tensor([not f for f in catch_flags], dtype=torch.float32, device=device)
     non_catch_n = float(len(catch_flags) - sum(catch_flags))
 
-    # Gradient checkpointing over the plastic recurrent core (comments.txt's
-    # gradient-checkpointing fix): `PlasticGRUCell`'s per-tick Hebbian trace
-    # (gru_cell.py) makes the retained activation graph grow linearly with
+    # Gradient checkpointing over the plastic recurrent core:
+    # `PlasticGRUCell`'s per-tick Hebbian trace (gru_cell.py) makes the
+    # retained activation graph grow linearly with
     # trial length, large enough at the curriculum's longest load to exceed
     # the whole GPU for the S=1/S=0 plastic cells. `checkpoint_plastic`
     # (default on for P=1, see `train_one`) routes those cells' ticks
@@ -805,7 +804,7 @@ def _run_trial(
                     torch.diff(grid_act, dim=1).pow(2).mean() + torch.diff(grid_act, dim=2).pow(2).mean()
                 )
 
-            # Identity-report catch trials (§9.4a) have no real in/out judgment
+            # Identity-report catch trials have no real in/out judgment
             # (`in_set=None`) -- excluded from the policy/value loss below via
             # `non_catch` (hoisted above the loop: per-trial, not per-tick), so
             # they contribute only through the auxiliary identity-report loss
@@ -825,7 +824,7 @@ def _run_trial(
             if mode == "eval":
                 action = torch.argmax(policy, dim=-1)
             else:
-                action = torch.multinomial(policy.detach(), 1).squeeze(-1)  # [B]; sampling policy is load-bearing under REINFORCE (B5)
+                action = torch.multinomial(policy.detach(), 1).squeeze(-1)  # [B]; sampling policy is load-bearing under REINFORCE
 
             if mode == "bptt" and signal == "reinforce" and epoch == "probe" and non_catch_n > 0:
                 logp_a = torch.log(policy.gather(1, action.unsqueeze(-1)).squeeze(-1).clamp_min(1e-8))  # keeps graph
@@ -993,13 +992,13 @@ def _run_trial(
                 elif signal == "reinforce":
                     value_only_terms.append((value, non_catch))
 
-    # NOTE (§9.4a): for an identity-catch trial, `true_in_set` at `probe_i`
+    # For an identity-catch trial, `true_in_set` at `probe_i`
     # is None (no real in/out judgment was made), so its `correct`/`reward`
     # entry below is not a meaningful match/non-match outcome -- harmless in
     # Core (no catch trials ever occur there); catch-trial performance is
     # reported separately via `identity_catch` above.
-    # Phase 2 (B3): a single sync (`.tolist()`) after the loop, not B*T
-    # `.item()` calls inside it.
+    # A single sync (`.tolist()`) after the loop, not B*T `.item()` calls
+    # inside it.
     has_probed = last_probe_action_t != -1
     correct_t = ((last_probe_action_t == 1) == true_in_set_t) & has_probed
     correct = correct_t.tolist()
@@ -1133,7 +1132,7 @@ def run_multitask_neurogym_trial(
                 # and never learns the actual decision (same imbalance
                 # `_run_trial`'s own `tick_weight` guards against for
                 # Sternberg's fixation-heavy schedule; verified empirically
-                # here too -- see executor.md).
+                # here too).
                 per_sample_weight = torch.where(gt_t != 0, 1.0, 0.1) * active
                 ce_terms.append((ce_per_sample * per_sample_weight).sum() / per_sample_weight.sum().clamp_min(1e-8))
             else:
@@ -1179,7 +1178,7 @@ def run_multitask_neurogym_trial(
 
 
 class MetaRLAdapter(nn.Module):
-    """Phase 7 (comments.txt §5, METARL): the task cue is WITHHELD -- no
+    """For the meta-RL protocol the task cue is WITHHELD -- no
     `c_t` at all -- so this adapter takes the stimulus feature PLUS
     (previous action one-hot, previous reward scalar) straight to
     bottleneck width, parallel to `FrontEnd`/`multitask.NeuroGymAdapter`
@@ -1200,13 +1199,13 @@ class MetaRLAdapter(nn.Module):
 def sample_metarl_block(
     nback_gen, cfg: dict, seed: int, step_idx: int, batch_size: int, block_size: int, split: str = "train",
 ) -> tuple[list, list[int], list[str]]:
-    """Phase 7: `(n, feature)` is drawn INDEPENDENTLY per block instance
-    (unlike Sternberg's/multitask's shared-per-batch draw) -- item 7.1's
+    """`(n, feature)` is drawn INDEPENDENTLY per block instance
+    (unlike Sternberg's/multitask's shared-per-batch draw) -- the
     decoding analysis needs `(n, feature)` to vary ACROSS the blocks in one
     batch, or there would be nothing to decode. Each instance then gets
     `block_size` n-back sequences generated with that SAME fixed
-    `(n, feature)` (comments.txt: "BLOCKS of K=20 with a fixed but
-    unsignalled (n, feature)"), concatenated into one long per-instance
+    `(n, feature)` (blocks of K=20 with a fixed but unsignalled
+    `(n, feature)`), concatenated into one long per-instance
     step list -- `nback.NBackGenerator`'s `sequence_length` doesn't depend
     on `n`, so every instance's concatenated list is the same total length
     (`block_size * sequence_length`), same no-padding-needed property
@@ -1247,18 +1246,17 @@ def run_metarl_block(
     sequence_length: int, feature_dim: int, n_actions: int, device,
     mode: str = "bptt", value_weight: float = 0.5, entropy_coef: float = 0.01,
 ) -> dict:
-    """Phase 7 (comments.txt §5): one METARL BLOCK. Unlike every other
+    """One meta-RL block. Unlike every other
     rollout in this file, recurrent state persists across the WHOLE block
     (`_init_state` called ONCE here, not once per n-back sequence) -- the
     network's only way to infer the block's fixed-but-unsignalled `(n,
     feature)` is through its own recurrent state carrying information
-    across sequence boundaries, since the task cue is withheld (item
-    7's whole point).
+    across sequence boundaries, since the task cue is withheld (the
+    protocol's whole point).
 
-    Training signal: REINFORCE + value baseline ONLY -- comments.txt says
-    "Policy gradient across a distribution of blocks" for METARL, unlike
-    SUP's CE. Feeding a CE target here would let the network learn from a
-    supervised label the trainer computes but METARL is specifically
+    Training signal: REINFORCE + value baseline ONLY -- policy gradient
+    across a distribution of blocks, unlike SUP's CE. Feeding a CE target
+    here would let the network learn from a supervised label the trainer computes but METARL is specifically
     designed to withhold; policy gradient on the env's own reward is
     [WANG16]'s actual recipe. `i < n` positions (`ts.is_match is None`,
     no valid n-back comparison yet) are simply never rewarded (reward 0
@@ -1267,11 +1265,11 @@ def run_metarl_block(
 
     Also records a hidden-state snapshot at the LAST tick of each of the
     K=`len(trial_steps_batch[0])/sequence_length` sequences within the
-    block (item 7.1/7.2's decoding analysis needs exactly K per-trial-
-    position snapshots, not one per raw tick -- most ticks within a
-    sequence have no well-defined "response" to probe). For S=1 cells,
-    `h_worker`/`h_manager` are ALSO snapshotted separately (item 7.2 needs
-    to decode from each independently, not just the concatenated
+    block (the decoding analysis needs exactly K per-trial-position
+    snapshots, not one per raw tick -- most ticks within a sequence have no
+    well-defined "response" to probe). For S=1 cells,
+    `h_worker`/`h_manager` are ALSO snapshotted separately (to decode from
+    each independently, not just the concatenated
     `h_star` `_step_core` normally returns).
 
     Returns {"loss": Tensor|None, "h_star": [B,K,D] np.ndarray,
@@ -1395,7 +1393,7 @@ def _perturbed_gru_step(cell, x_t, h_prev, xi_pre, extra_update_bias=None):
 
 
 def _eprop_gru_step(cell, x_t, h_prev, extra_update_bias=None):
-    """Rung 3 (e-prop, Bellec et al. 2020, §6.3): an UNPERTURBED GRU step
+    """Rung 3 (e-prop, Bellec et al. 2020): an UNPERTURBED GRU step
     (no exploratory noise -- e-prop's eligibility trace comes from each
     unit's own local pseudo-derivative, not a randomly-probed direction)
     that also returns that pseudo-derivative, shape [batch, 3*hidden] --
@@ -1433,10 +1431,10 @@ def _run_trial_local(
     per-sample eligibility traces accumulated every tick, three-factor
     update applied at trial-batch end. Rungs 1-2: node perturbation injected
     into each traced module's output activity, traced against that noise.
-    Rung 3 (e-prop, §6.3): no perturbation -- traced against each unit's own
+    Rung 3 (e-prop): no perturbation -- traced against each unit's own
     local pseudo-derivative instead (`_eprop_gru_step`), reusing the exact
     same trace/update machinery. `dense_reward=True` (warmup phase only,
-    see module docstring/A1a): the reward is the fraction of probe-epoch
+    see module docstring): the reward is the fraction of probe-epoch
     ticks whose greedy action matched the ideal target action, rather than
     bare trial-end correct/incorrect."""
     is_eprop = any(lrn.rung == 3 for lrn in learners.values())
@@ -1450,7 +1448,7 @@ def _run_trial_local(
         prev_action_logp = torch.log(prev_policy0.clamp_min(1e-8)).unsqueeze(-1)
         prev_is_feedback = torch.zeros(B, 1, device=device)
         prev_reward = torch.zeros(B, 1, device=device)
-        # Phase 2 (B3): same vectorization as `_run_trial` -- `true_in_set`
+        # Same vectorization as `_run_trial` -- `true_in_set`
         # read once from the first probe tick; `last_probe_action` and the
         # probe-match counters stay GPU tensors through the whole loop, only
         # converted to Python once, after it.
@@ -1517,7 +1515,7 @@ def _run_trial_local(
                     h_w_t, _ = _perturbed_gru_step(core.worker, worker_in, h_w_prev, xi_w)
 
                 s_t = core.pool_worker(h_w_t)
-                # Phase 4 (A4 fix): same unified tick gate as HRLCore.forward
+                # Same unified tick gate as HRLCore.forward
                 # -- the manager clock is identical for M=0/M=1, only the
                 # on-tick bias differs. Previously this branch ran the
                 # manager every step whenever `reflective_gate is not None`
@@ -1614,8 +1612,8 @@ def _run_trial_local(
                     lrn.apply_update(reward_now)
                 applied_update = True
 
-        # Phase 2 (B3): a single sync (`.tolist()`) after the loop, not B*T
-        # `.item()` calls inside it.
+        # A single sync (`.tolist()`) after the loop, not B*T `.item()`
+        # calls inside it.
         has_probed = last_probe_action_t != -1
         correct_t = ((last_probe_action_t == 1) == true_in_set_t) & has_probed
         correct = correct_t.tolist()
@@ -1665,9 +1663,9 @@ def evaluate_accuracy(
     front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device,
     n_trials: int, eval_seed: int, task_name_for_context: Optional[str] = None,
 ) -> dict:
-    """Match/non-match accuracy per load, with a Wilson 95% CI (Phase 3,
-    comments.txt §3 MEASUREMENT), plus `acc["identity_catch"]` (§9.4a
-    identity-report accuracy over catch trials, present only when
+    """Match/non-match accuracy per load, with a Wilson 95% CI, plus
+    `acc["identity_catch"]` (identity-report accuracy over catch trials,
+    present only when
     `heads.identity_aux is not None`). Catch trials carry no real in/out
     judgment (`_run_trial`'s `correct` entry for them is a meaningless
     always-"incorrect" placeholder), so they are excluded from the
@@ -1675,7 +1673,7 @@ def evaluate_accuracy(
 
     `eval_seed` must come from a stream disjoint from training (a fresh
     value every call -- e.g. an incrementing per-run counter) so trials are
-    not the same fixed set on every evaluation forever (the A3 bug this
+    not the same fixed set on every evaluation forever (the bug this
     replaces: `hash((load, k, 999))` drew the identical 120 trials on every
     call, in every run, letting training accuracy be gamed by memorizing the
     eval set). One `np.random.RandomState(eval_seed)` derives every trial's
@@ -1731,7 +1729,7 @@ def final_evaluation(
     front_end, core, heads, S: int, P: int, reflective_gate, task_gen, image_bank, cfg, device, seed: int,
     task_name_for_context: Optional[str] = None,
 ) -> dict:
-    """The once-per-run, report-worthy final number (Phase 3 item 3.2):
+    """The once-per-run, report-worthy final number:
     n=`train.final_eval_trials_per_load` (500) per load, at a fixed
     `eval_seed` derived from the run's own seed with a large offset that no
     periodic-eval counter (incrementing from 0 during training) will ever
@@ -1746,10 +1744,10 @@ def final_evaluation(
 
 
 def _human_percentiles(accuracy: dict) -> dict:
-    """Phase 12 (§3.1, 9.10): Gate A is a floor and cannot catch a
+    """The behavioural inclusion criterion is a floor and cannot catch a
     superhuman run, so every run instead RECORDS its human percentile per
     load as a covariate -- the fraction of human sessions its final
-    (max_steps) accuracy beats. Same asymmetry as Gate A itself: the
+    (max_steps) accuracy beats. Same dataset asymmetry as that criterion: the
     DEDUPLICATED pooled session set for load 1 (the only load all three
     Sternberg datasets share), 000469 alone for loads 2/3 (the only
     dataset that ran them). `None` per load if `results/human_behavior.csv`
@@ -1780,11 +1778,11 @@ def _update_milestone_counters(
     milestone_steps_to: dict, milestone_trials_to: dict, milestone_wall_s_to: dict,
     milestone_joules_to: dict,
 ) -> list[str]:
-    """Pure per-evaluation update of the milestone/criterion counters
-    (Phase 12 §3.3), factored out (comments.txt §16A.2) so the live
-    training loop and `_seed_milestone_state_from_history` (a resumed
-    run's pre-resume replay) share one update rule instead of two copies
-    that can drift. Mutates the state dicts in place; returns the
+    """Pure per-evaluation update of the milestone/criterion counters,
+    factored out so the live training loop and
+    `_seed_milestone_state_from_history` (a resumed run's pre-resume
+    replay) share one update rule instead of two copies that can drift.
+    Mutates the state dicts in place; returns the
     milestone keys newly confirmed at this evaluation (checkpoint
     snapshot, printing, and `final_evaluation` are the caller's
     responsibility -- replay must NOT perform them, since it has no live
@@ -1815,8 +1813,8 @@ def _seed_milestone_state_from_history(
     csv_path: Path, start_step: int, criterion: dict, milestone_thresholds: dict,
     consecutive_evals_required: int, batch_size: int,
 ) -> dict:
-    """Resume support (comments.txt §16A.2): replay the pre-resume rows of
-    a run's own metrics CSV (preserved by the §16.1 append fix) through
+    """Resume support: replay the pre-resume rows of a run's own metrics
+    CSV (preserved by `_MetricsLogger`'s append-on-resume) through
     `_update_milestone_counters` so a resumed run's milestone state
     reflects the FULL 0..start_step history, not a restart from zero at
     the resume point. Without this, `steps_to_<key>_<threshold>` and
@@ -1825,7 +1823,7 @@ def _seed_milestone_state_from_history(
     resume gets re-detected live and its `ckpt_at_criterion.pt` snapshot
     silently overwritten with post-resume weights -- exactly what happened
     to `FLATGRU_RL_s0`'s 80,000-step resume before this fix (the original
-    step-14,000 snapshot is unrecoverable; see executor.md)."""
+    step-14,000 snapshot is unrecoverable)."""
     milestone_consecutive = {k: 0 for k in milestone_thresholds}
     milestone_reached = {k: False for k in milestone_thresholds}
     criterion_consecutive = {k: 0 for k in criterion}
@@ -1873,14 +1871,14 @@ def train_one(run: dict, cfg: dict) -> dict:
     from brainalign_wm.tasks.generator import TaskGenerator
 
     full_cfg = _load_full_config()
-    # Core cells carry "P" (synaptic plasticity, BPTT throughout, §17
-    # decision 6); the four Extended local-learning cells (M**L) carry
+    # Core cells carry "P" (synaptic plasticity, BPTT throughout); the
+    # four Extended local-learning cells (M**L) carry
     # "L"=1 instead and no "P" key -- the two knobs are mutually exclusive.
     S, M, seed = run["S"], run["M"], run["seed"]
     L = run.get("L", 0)
     P = run.get("P", 0)
-    pbwm_gate = bool(run.get("pbwm_gate", False))  # ablation-battery arm M111_pbwm only (§4.4)
-    bioinit = bool(run.get("bioinit", False))  # item 8.9b: M00001_bioinit only, S=0 GRU substrate
+    pbwm_gate = bool(run.get("pbwm_gate", False))  # ablation-battery arm M111_pbwm only
+    bioinit = bool(run.get("bioinit", False))  # M00001_bioinit only, S=0 GRU substrate
     total_steps = int(cfg.get("steps", full_cfg["tiers"]["smoke"]["steps"]))
     max_steps_if_criterion_unmet = int(cfg.get("max_steps_if_criterion_unmet", total_steps))
     if max_steps_if_criterion_unmet < total_steps:
@@ -1893,7 +1891,7 @@ def train_one(run: dict, cfg: dict) -> dict:
     seed_everything(seed)
     device = get_device()
 
-    # Bio-plausible ablation battery (§4.4) and identity-catch (§9.4a) arms
+    # Bio-plausible ablation battery and identity-catch arms
     # are per-run, not global config edits -- folding `run` overrides into
     # `full_cfg` here (before deriving m/mech_cfg/t_cfg or building
     # task_gen/heads/evaluate_accuracy, all of which read from full_cfg)
@@ -1903,7 +1901,7 @@ def train_one(run: dict, cfg: dict) -> dict:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "recurrent_noise_sigma": float(run["recurrent_noise_sigma"])}}
     if "identity_catch_fraction" in run:
         full_cfg = {**full_cfg, "task": {**full_cfg["task"], "identity_catch_fraction": float(run["identity_catch_fraction"])}}
-    # Performance-matched baseline family (flat_gru_2x/l1/dropout, §4.1):
+    # Performance-matched baseline family (flat_gru_2x/l1/dropout):
     # `flat_units` changes the S=0 core's actual parameter shape, so (like
     # the other overrides above) it must be folded in before `_build_model`
     # reads it. `l1_weight`/`core_dropout_p` don't change parameter shapes
@@ -1920,12 +1918,12 @@ def train_one(run: dict, cfg: dict) -> dict:
     for key in ("flat_grid", "flat_density", "flat_connectivity", "flat_mask_seed", "flat_recurrent_init_units"):
         if key in run:
             full_cfg = {**full_cfg, "model": {**full_cfg["model"], key: run[key]}}
-    # Stage 1 (§4): vanilla tanh RNN substrate, vs. every other stage's
-    # default GRU -- must also be folded in before `_build_model` reads
+    # The vanilla tanh RNN substrate, as opposed to the default
+    # GRU -- must also be folded in before `_build_model` reads
     # `m.get("substrate", "gru")`.
     if "substrate" in run:
         full_cfg = {**full_cfg, "model": {**full_cfg["model"], "substrate": str(run["substrate"])}}
-    # D19/D20: the vanilla-substrate diagnostic varies this per run; must be
+    # The vanilla-substrate diagnostic varies this per run; must be
     # folded in before `_build_model` reads `m.get("recurrent_init_spectral_radius")`.
     if "recurrent_init_spectral_radius" in run:
         full_cfg = {
@@ -1940,14 +1938,14 @@ def train_one(run: dict, cfg: dict) -> dict:
         }
 
     m, mech_cfg, t_cfg = full_cfg["model"], full_cfg["mechanisms"], full_cfg["train"]
-    # Phase 7 (comments.txt §5): SUP/RL run their fixed signal for the whole
-    # run, decoupled from curriculum phase; "legacy" (default) preserves the
-    # exact pre-Phase-7 behavior every already-tested cell depends on.
-    # METARL is not a `_run_trial` mode at all -- see `run_metarl_block`.
-    # Stage 1 (§4/§11.3) varies supervision per cell, so `run` (like the
+    # SUP/RL run their fixed signal for the whole run, decoupled from
+    # curriculum phase; "legacy" (default) preserves the earlier hybrid
+    # behavior every already-tested cell depends on. METARL is not a
+    # `_run_trial` mode at all -- see `run_metarl_block`.
+    # The vanilla-substrate grid varies supervision per cell, so `run` (like the
     # architecture-shape overrides above) wins over the config default.
     supervision = run.get("supervision", t_cfg.get("supervision", "legacy"))
-    # Stage 1's WM-only-vs-multi-task diet factor (§4, §5 Phase 5): "wm_only"
+    # The WM-only-vs-multi-task diet factor: "wm_only"
     # (default -- every already-tested cell) is the untouched Sternberg-only
     # path below; "multitask" interleaves the 5 NeuroGym tasks in with
     # Sternberg (see `diet`-gated blocks further down).
@@ -1976,24 +1974,23 @@ def train_one(run: dict, cfg: dict) -> dict:
     flat_grid = tuple(run.get("flat_grid", m.get("flat_grid", DEFAULT_FLAT_GRID)))
     recurrent_noise_sigma = float(m.get("recurrent_noise_sigma", 0.0))
     core_dropout_p = float(run.get("core_dropout_p", m.get("core_dropout_p", 0.0)))
-    # Gradient checkpointing over the plastic recurrent core (comments.txt's
-    # fix for the S=1/S=0 P=1 cells whose per-tick Hebbian trace made the
-    # retained activation graph exceed the GPU at the curriculum's longest
-    # load): defaults on for every P=1 cell -- `_run_trial` only actually
+    # Gradient checkpointing over the plastic recurrent core, whose per-tick
+    # Hebbian trace makes the retained activation graph exceed this GPU at
+    # the curriculum's longest load: defaults on for every P=1 cell -- `_run_trial` only actually
     # uses it when P==1 and mode=="bptt" (see `use_segment_checkpoint`
     # there), so this is a no-op for the 9 non-plastic cells whether the
     # flag is on or off. `mechanisms.plastic_gradient_checkpointing: false`
-    # is the escape hatch to fall back to the plain (pre-fix) loop.
+    # is the escape hatch to fall back to the plain loop.
     checkpoint_plastic = bool(P) and bool(mech_cfg.get("plastic_gradient_checkpointing", True))
-    # M7 fix: the per-run override key now matches the config key
-    # (`l1_weight_penalty`) instead of the old ad hoc `l1_weight` shortname.
+    # The per-run override key matches the config key
+    # (`l1_weight_penalty`), not the older ad hoc `l1_weight` shortname.
     l1_weight = float(run.get("l1_weight_penalty", t_cfg.get("l1_weight_penalty", 0.0)))
-    # Phase 2 (comments.txt §5): `cfg["batch_size"]` overrides the global
-    # config default, same per-call mechanism `cfg["steps"]` already uses.
-    # Needed because global batch_size=128 (the value that clears this
-    # phase's >=3x throughput acceptance for the non-plastic cells) OOMs
-    # arm P (`PlasticGRUCell`'s per-trial Hebbian trace, retained across the
-    # full ~60-tick BPTT unroll) on this 12GB GPU -- see executor.md. Smoke
+    # `cfg["batch_size"]` overrides the global config default, same
+    # per-call mechanism `cfg["steps"]` already uses. Needed because global
+    # batch_size=128 (the value that clears the >=3x throughput acceptance
+    # for the non-plastic cells) OOMs arm P (`PlasticGRUCell`'s per-trial
+    # Hebbian trace, retained across the full ~60-tick BPTT unroll) on this
+    # 12GB GPU. Smoke
     # tests and any future P=1 run in the real grid pass a smaller value here
     # instead of shrinking the default for every cell.
     batch_size = int(cfg.get("batch_size", t_cfg.get("batch_size", 1)))
@@ -2073,12 +2070,12 @@ def train_one(run: dict, cfg: dict) -> dict:
     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed) if L == 1 else None
 
     # Audit addition: periodic metrics logging
-    # F3: absolute, from config -- NOT a fraction of total_steps. See the
+    # Absolute, from config -- NOT a fraction of total_steps. See the
     # `train.eval_every` comment in configs/config.yaml for why.
     eval_every = int(t_cfg.get("eval_every", max(500, total_steps // 30)))
     metrics_logger = _MetricsLogger(run_id, resume=ckpt_path.exists())
 
-    # Phase 2 item 2.4: GPU energy via pynvml, if available. Init once (not
+    # GPU energy via pynvml, if available. Init once (not
     # per log call) and print the unavailable-fallback message once, not on
     # every logging tick.
     _nvml_handle = None
@@ -2106,15 +2103,16 @@ def train_one(run: dict, cfg: dict) -> dict:
     eval_trials_per_load = int(t_cfg["eval_trials_per_load"])
     criterion = full_cfg["gates"]["criterion"]
     consecutive_evals_required = int(full_cfg["gates"]["consecutive_evals"])
-    # Phase 12 (§3.3): the milestone set is `gates.criterion` (Gate A, §3.1)
-    # merged with `gates.extra_milestones` -- Gate A's own threshold is
+    # The milestone set is `gates.criterion` (the behavioural inclusion
+    # criterion) merged with `gates.extra_milestones` -- the criterion's own
+    # threshold is
     # tracked as a milestone automatically, so its number lives in exactly
     # one place in config.yaml. Iterating THESE keys (not `task_loads`) is
     # the root-cause fix for a partial-coverage gate: any future criterion
     # naming a subset of loads no longer needs a train.py change.
     milestone_thresholds = {**criterion, **(full_cfg["gates"].get("extra_milestones") or {})}
 
-    # Phase 3 (A3): every `evaluate_accuracy` call in this run (rung checks,
+    # Every `evaluate_accuracy` call in this run (rung checks,
     # periodic logging) gets a fresh eval_seed from an incrementing counter
     # scoped to `seed` -- disjoint from `final_evaluation`'s fixed
     # `900_000_000 + seed` and, for any of this study's actual seeds (0-4),
@@ -2123,8 +2121,9 @@ def train_one(run: dict, cfg: dict) -> dict:
     eval_call_counter = 0
     # Each milestone gets its own streak counter, latches on its first
     # confirming evaluation, and is never overwritten afterward. A run always
-    # reaches the common analysis budget. If Gate A is still unconfirmed there,
-    # training continues only to confirmation or the configured extension cap.
+    # reaches the common analysis budget. If the inclusion criterion is still
+    # unconfirmed there, training continues only to confirmation or the
+    # configured extension cap.
     # `milestone_reached`/`milestone_consecutive` latch at the first
     # confirming streak and then stop updating -- they back the efficiency
     # DV `steps_to_<key>_<threshold>`, which must record when a criterion was
@@ -2202,9 +2201,9 @@ def train_one(run: dict, cfg: dict) -> dict:
 
         if L == 0:
             optimizer.zero_grad()
-            # Stage 1 diet cells (§4, §5): one task drawn uniformly per step
+            # Multi-task diet cells: one task drawn uniformly per step
             # (same `pick_task` convention `run_multitask_diet.py`'s
-            # acceptance run already used, item 5.2), deterministic in
+            # acceptance run already used), deterministic in
             # (seed, step) so a resumed run redraws the identical schedule.
             # Every other cell always takes the "sternberg" branch (`task`
             # is never anything else when `diet != "multitask"`), so this is
@@ -2274,7 +2273,7 @@ def train_one(run: dict, cfg: dict) -> dict:
                     learners = _make_local_learners(core, heads, S, mech_cfg, rung, seed + 200)
                 checked_rung_2 = True
 
-        # Phase 2 item 2.4: trailing-window step timing, excluding the
+        # Trailing-window step timing, excluding the
         # first 100 steps (warmup/compilation noise).
         if step >= 100:
             step_durations.append(time.time() - step_wall_t0)
@@ -2315,15 +2314,15 @@ def train_one(run: dict, cfg: dict) -> dict:
             # drawn with its own fresh `eval_seed`, disjoint from
             # `final_evaluation`'s fixed seed below). The persistence
             # requirement is what keeps this from repeating the deleted
-            # `acc >= 0.999` bug (3.3): a single lucky eval can't trigger it,
+            # `acc >= 0.999` bug: a single lucky eval can't trigger it,
             # and the eval(s) that DO trigger it are never the same trials
-            # as the officially reported (max_steps, §3.4) accuracy.
+            # as the officially reported (max_steps) accuracy.
             #
             # Before the common budget these are descriptive/inclusion
-            # quantities and never stop training. Beyond the budget, Gate A
-            # confirmation ends the extension. Extra milestones never stop a
-            # run. The first Gate A confirmation gets its own checkpoint and
-            # full evaluation snapshot.
+            # quantities and never stop training. Beyond the budget,
+            # confirming the inclusion criterion ends the extension. Extra
+            # milestones never stop a run. The first confirmation gets its
+            # own checkpoint and full evaluation snapshot.
             # Shared with `_seed_milestone_state_from_history`'s
             # replay of a resumed run's pre-resume rows, so the live update
             # rule and the replay rule cannot drift apart.
@@ -2339,19 +2338,19 @@ def train_one(run: dict, cfg: dict) -> dict:
                 print(f"[train] milestone {_mkey}>={milestone_thresholds[_mkey]} confirmed at step "
                       f"{milestone_steps_to[_mkey]} ({consecutive_evals_required} consecutive evals)",
                       flush=True)
-                # Checkpoint/eval snapshot fires on Gate A (`criterion`,
-                # load1) only -- NOT on an `extra_milestones` key (e.g.
-                # load3). Extra milestones are pure efficiency DVs with
-                # a threshold sourced from a single dataset (§12.6
-                # comment: "000469, only dataset with load 3"); letting
-                # one trigger ckpt_at_criterion.pt would make its
-                # meaning vary run-to-run across the Stage-1 grid,
-                # breaking the cross-run/cross-dataset comparison this
-                # snapshot exists for.
+                # Checkpoint/eval snapshot fires on the inclusion criterion
+                # (`criterion`, load1) only -- NOT on an `extra_milestones`
+                # key (e.g. load3). Extra milestones are pure efficiency DVs
+                # with a threshold sourced from a single dataset (000469, the
+                # only one that ran load 3); letting one trigger
+                # ckpt_at_criterion.pt would make its meaning vary
+                # run-to-run across the grid, breaking the
+                # cross-run/cross-dataset comparison this snapshot exists
+                # for.
                 if _mkey in criterion and first_milestone_step is None:
                     first_milestone_step = milestone_steps_to[_mkey]
                     print(
-                        f"[train] first Gate A milestone ({_mkey}); snapshotting "
+                        f"[train] first inclusion-criterion milestone ({_mkey}); snapshotting "
                         "ckpt_at_criterion.pt.",
                         flush=True,
                     )
@@ -2402,9 +2401,10 @@ def train_one(run: dict, cfg: dict) -> dict:
     # this is where every cell and every geometry analysis are compared.
     # `accuracy_at_max_steps`/`gates_at_max_steps` remain aliases so existing
     # analysis readers keep their stable field names.
-    # Gate A specifically (not the extra efficiency milestones) is the
-    # behavioural-matching/inclusion verdict. For an extended run this says
-    # whether confirmation occurred by the cap; headline accuracy remains the
+    # The criterion specifically (not the extra efficiency milestones) is
+    # the behavioural-matching/inclusion verdict. For an extended run this
+    # says whether confirmation occurred by the cap; headline accuracy
+    # remains the
     # equal-duration budget evaluation above.
     matched = criterion_met_by_stop
     human_percentile = _human_percentiles(accuracy)
@@ -2412,7 +2412,7 @@ def train_one(run: dict, cfg: dict) -> dict:
         "status": "completed",
         "gates": gates, "accuracy": accuracy,
         "gates_at_max_steps": gates, "accuracy_at_max_steps": accuracy,
-        # The at-first-Gate-A snapshot is absent when no criterion was confirmed.
+        # The at-first-criterion snapshot is absent when none was confirmed.
         "accuracy_at_first_milestone": accuracy_at_first_milestone,
         "first_milestone_step": first_milestone_step,
         "analysis_budget_steps": total_steps,

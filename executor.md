@@ -7874,3 +7874,33 @@ Acceptance:
 
     python -m pytest -q tests/test_run_coverage.py
     3 passed, exit 0
+
+### 2026-09-17 — `train.py` reads standalone
+
+Rewrote every comment, docstring and message in
+`brainalign_wm/training/train.py` that pointed at a review stage, spec
+section, decision id or internal document. No code, name or control flow
+changed; the diff is comments, one exception message and one progress line.
+
+Seventy-seven pointers removed, plus a handful of bare internal item ids the
+grep does not catch. What each rewritten sentence now says in its own terms:
+the behavioural inclusion criterion is named for what it is (held-out load-1
+accuracy at or above its threshold for a run of consecutive evaluations)
+rather than by letter; the equal-duration evaluation is called the analysis
+budget; the plastic core's gradient checkpointing is explained by the
+per-tick Hebbian trace whose retained graph exceeds this GPU at the
+curriculum's longest load; the supervision arms are described by what each
+signal trains on rather than by the stage that introduced them; and the
+identity-catch, energy-cost, noise and topography arms are named by the
+battery arm they belong to.
+
+Acceptance:
+
+    grep -nE 'comments\.txt|advisor\.md|executor\.md|§|\bD[0-9]{2}\b|\bF1\b|Phase [0-9]|Appendix A|Gate [AB]' brainalign_wm/training/train.py
+    (no matches)
+
+    python -c "import ast; ast.parse(open('brainalign_wm/training/train.py').read())"
+    (parses)
+
+    python -m pytest -q tests/test_training.py
+    39 passed, exit 0

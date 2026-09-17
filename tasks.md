@@ -7,7 +7,12 @@ acceptance output is in `executor.md`.
 
 ## Standing rules for every executor
 
-- No training launches. Prepare and verify exact commands, then stop.
+- No network training launches. "Training" means fitting recurrent network
+  weights. Prepare and verify those commands, put them in
+  `../training_commands.txt`, and stop. Everything downstream of a saved
+  checkpoint -- replay, measurement, alignment, intervention sweeps,
+  aggregation -- is analysis: implement it AND run it, and report the real
+  numbers. An implementation without its result table is not finished.
 - Repair measurements and reuse saved checkpoints first. A new training run
   must answer a specified question that existing checkpoints cannot answer.
   A parser, aggregation, neural-window, or documentation repair does not by
@@ -462,3 +467,61 @@ every launched run uses committed code on its own path.
       saved marginal variance fractions as descriptive decomposition results,
       and do not label their axes as a validated full-dPCA fit. No model
       retraining is required for this documentation correction.
+
+## E. Repository hygiene
+
+The code must read standalone: a reader holding only the repository must
+understand every name, comment and docstring without a second document. 562
+pointers to internal review stages, spec sections, decision ids and this
+project's private shorthand survive across 66 tracked Python files, plus
+`configs/config.yaml`, the `Makefile` and the status Markdown. Each one is
+removed by keeping its technical content and dropping the pointer -- the
+sentence explains what the code does and why, never who asked for it.
+
+The chronology and advisory documents are excluded: they are the internal
+record and cite themselves by design.
+
+- [ ] E1 `run_grid.py` (34 remaining). A pass already stripped the
+      parenthetical pointers; what is left needs prose rewrites. Uncommitted
+      in the working tree -- read it before editing. Verify with
+      `tests/test_run_grid_concurrency.py`.
+- [ ] E2 `brainalign_wm/training/train.py` (77). The largest single block.
+      Verify with `tests/test_training.py`.
+- [ ] E3 `brainalign_wm/analysis/run_all.py` (18) and
+      `brainalign_wm/training/generate_activity_logs.py` (14). Both carry
+      other agents' uncommitted work -- coordinate before touching.
+- [ ] E4 Tests: `tests/test_run_grid_concurrency.py` (14),
+      `tests/test_training.py` (12), `tests/test_scaffold.py` (9),
+      `tests/test_tasks.py` (6), `tests/test_models.py` (5) and the smaller
+      remainder. Test names and docstrings state the behaviour under test.
+- [ ] E5 `scripts/` (about 90 across 14 files, densest
+      `scripts/run_phase11_pilot.py` at 13). `run_phase11_pilot.py` is also a
+      filename keyed to a phase number; rename it for what it runs and update
+      every reference, including the repository map.
+- [ ] E6 `brainalign_wm/models/` and `brainalign_wm/tasks/` (about 35).
+- [ ] E7 `configs/config.yaml` (56), `Makefile` (2) and
+      `PROJECT_IMPLEMENTATION_STATUS.md` (1). Config comments describe what a
+      key controls and the evidence for its value, not the review that set it.
+      Key names themselves stay unchanged -- a rename breaks every saved
+      resolved config.
+- [ ] E8 Final sweep: re-grep the whole tree, confirm zero remaining, run
+      `pytest -q` and `make audit-campaign`.
+
+## Priority and order
+
+Work is serialized: one agent at a time, each finishing and committing before
+the next starts, so a session interruption loses at most one item.
+
+1. `../training_commands.txt` -- done 2026-09-17. The 64-run continuation
+   study is the only outstanding network training and its commands are
+   verified and resumable.
+2. C4, C5 -- a finished sweep needs only its selectivity check and result
+   table, and a null needs reporting honestly.
+3. C1, C2, C7 -- the per-population dependent variable, coverage under both
+   signals, and distributions behind the pooled means.
+4. B1, B2 -- the equal-performance run ids and the persistence estimator.
+   Both have corrected code sitting uncommitted.
+5. B3, B4 -- two result tables whose implementations already exist.
+6. B5 -- full-delay maintenance RSA, the largest measurement item.
+7. B6, B7 -- estimand and timestamp quality control.
+8. E1-E8 -- hygiene, last, because every item above edits the same files.

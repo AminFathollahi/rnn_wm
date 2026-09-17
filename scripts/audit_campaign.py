@@ -9,17 +9,16 @@ in this repository at least once, so a new defect class becomes a permanent
 regression check here rather than a paragraph a future agent has to remember
 to re-read.
 
-Covered: provenance/identity (D32), the fall-through class (F1/D20/D24),
-tier poisoning (the `M11011_SUP_s0` smoke row, D42), resume counters (D25),
-orphaned artifacts, checkpoint-to-log provenance (D33), storage arithmetic
-(D36), and a completed run's CSV trace actually reaching the resolved
-`gates.max_steps` (D35).
+Covered: run provenance and identity, run dicts that silently inherit a
+config default, a smoke-tier row retiring a real cell, milestone counters
+restarting at a resume boundary, orphaned artifacts, checkpoint-to-log
+provenance, storage arithmetic, and whether a completed run's CSV trace
+actually reaches the resolved `gates.max_steps`.
 
-NOT covered, and deliberately left to a human/advisor: gate integrity (is
-this the right gate?), estimator validity (D37), confound enumeration
-(D17/D28), seed degeneracy, human-side validity, and the claim ladder.  A
-clean run here means the artifacts are self-consistent, not that the science
-is sound.
+NOT covered, and deliberately left to a human: gate integrity (is this the
+right gate?), estimator validity, confound enumeration, seed degeneracy,
+human-side validity, and the claim ladder.  A clean run here means the
+artifacts are self-consistent, not that the science is sound.
 
     $ python scripts/audit_campaign.py
     $ python scripts/audit_campaign.py --tier full --seeds 8
@@ -28,10 +27,10 @@ Exit code is 1 if any new VIOLATION is found, 0 otherwise.  WARNINGs never
 change the exit code -- they are things to look at, not things that are
 wrong.
 
-`--baseline results/audit_baseline.json` (comments.txt §21.5, D-number per
-entry) lists violations that are known, accepted, and permanent -- e.g. the
-D42 smoke-tier row kept on purpose (D15: archive, never delete) and D25's
-three historical resume-counter corrections.  Fixing any of those means
+`--baseline results/audit_baseline.json` lists violations that are known,
+accepted, and permanent -- the smoke-tier row kept on purpose because
+outputs are archived rather than deleted, and three historical
+resume-counter corrections.  Fixing any of those means
 deleting or rewriting history, so without a baseline this script exits 1
 forever and the one NEW violation that actually matters arrives
 indistinguishable from the five that are supposed to be there (this is how
@@ -128,9 +127,10 @@ def check_config_hash_agreement(rows: list[dict], tier: str) -> None:
 
 
 def check_required_fields(rows: list[dict]) -> None:
-    """D20: every run dict must state substrate, supervision and the
+    """Every run dict must state substrate, supervision and the
     recurrent init explicitly.  A null field is not evidence of absence
-    (D22), but on a NEW row it is evidence the fall-through defect is back."""
+    on an old row, but on a new one it means a run dict is again inheriting
+    a config default instead of stating its own."""
     for r in rows:
         rid = r.get("run_id", "")
         if not CAMPAIGN_RE.match(rid):
@@ -145,11 +145,11 @@ def check_required_fields(rows: list[dict]) -> None:
         # 132 of this script's 132 warnings noise, which is how an audit tool
         # gets ignored.
         if r.get("substrate") == "vanilla" and r.get("recurrent_init_spectral_radius") is None:
-            warn("required-fields", f"{rid} is vanilla with recurrent_init_spectral_radius=null (D19)")
+            warn("required-fields", f"{rid} is vanilla with recurrent_init_spectral_radius=null")
 
 
 def check_id_disjointness(seeds: int) -> None:
-    """D32: run ids must be disjoint across every factor the campaign
+    """Run ids must be disjoint across every factor the campaign
     measures, or the second pass resumes the first pass's weights."""
     sys.path.insert(0, str(ROOT))
     try:
@@ -201,7 +201,7 @@ def check_duplicate_completions(rows: list[dict]) -> None:
 
 
 def check_resume_counters(rows: list[dict]) -> None:
-    """D25: milestone counters restarting at a resume boundary inflated Gate
+    """Milestone counters restarting at a resume boundary inflated Gate
     B's floor by 2x.  Trust the CSV, not the row -- this recomputes the row's
     claim from the trace it was supposed to come from."""
     for r in rows:
@@ -229,7 +229,7 @@ def check_resume_counters(rows: list[dict]) -> None:
 
 
 def check_activity_log_provenance(rows: list[dict]) -> None:
-    """D33: every activity-derived DV reads the log, and the log is built
+    """Every activity-derived DV reads the log, and the log is built
     from one named checkpoint.  A log with no completed run behind it is an
     analysis input with no provenance."""
     if not ACTIVITY_DIR.exists():
@@ -245,10 +245,10 @@ def check_activity_log_provenance(rows: list[dict]) -> None:
 
 
 def _campaign_runs(rg) -> list[dict]:
-    """The four real launch commands (`executor.md` §18.8), replicated
+    """The four real launch commands, replicated
     exactly via `enumerate_runs` rather than re-derived as a seed x cell
     arithmetic, so a storage/count projection can never disagree with what
-    actually launches again (§21.5b): 120 SUP (15 cells x 8 seeds) + 56 RL
+    actually launches again: 120 SUP (15 cells x 8 seeds) + 56 RL
     flat (7 S=0 cells x 8 seeds) + 32 RL local-learning (4 cells x 8 seeds)
     + 16 RL S=1 failure arm (8 cells x 2 seeds) = 224, not 240."""
     return (
@@ -269,7 +269,7 @@ def _campaign_runs(rg) -> list[dict]:
 
 
 def check_storage() -> None:
-    """D36's arithmetic, on the real 224-run composition rather than a
+    """Storage arithmetic, on the real 224-run composition rather than a
     seeds-generic 15-cells-x2-supervision count.  An S=1 log stores
     h_worker(196) + h_manager(24) against a flat run's 128, so ~1.7x; every
     M=1 run additionally writes a SECOND log for H2's reflection-shuffle
@@ -277,7 +277,7 @@ def check_storage() -> None:
     assumed 120 SUP + 120 RL = 240 runs (the campaign is 224: RL only runs 7
     S=0 cells at full seed count, plus the local-learning and S=1-failure
     arms at their own seed counts) -- conservative in the safe direction,
-    but a safety number that's wrong is still wrong (§21.5b)."""
+    but a safety number that's wrong is still wrong."""
     if not ACTIVITY_DIR.exists():
         return
     logs = [p for p in ACTIVITY_DIR.glob("*.parquet")]
@@ -297,7 +297,7 @@ def check_storage() -> None:
         n_s1 += 1 if r.get("S") else 0
         factor_sum += size_factor  # this run's own primary log
         if r.get("M"):
-            factor_sum += size_factor  # its reflection-shuffle partner log (D36)
+            factor_sum += size_factor  # its reflection-shuffle partner log
     projected = per_log_gb * factor_sum
     free_gb = shutil.disk_usage(ACTIVITY_DIR).free / 1e9
     line = (f"largest log {biggest.name} = {per_log_gb:.2f} GB; {len(runs)} campaign runs "
@@ -312,16 +312,16 @@ def check_storage() -> None:
     if presymlink.exists():
         size_gb = sum(p.stat().st_size for p in presymlink.rglob("*") if p.is_file()) / 1e9
         warn("storage", f"{presymlink} is {size_gb:.1f} GB, pending manual deletion since 2026-08-03 "
-             "-- NOT deleted (D36/§20.11: the user's call, not this script's)")
+             "-- NOT deleted: the user's call, not this script's")
 
 
 def check_workers_consistency(rows: list[dict], tier: str) -> None:
-    """D51: `wall_s_to_*`/`joules_to_*` are not comparable across rows with
+    """`wall_s_to_*`/`joules_to_*` are not comparable across rows with
     different `workers` (run_grid.py:705-709).  A completed campaign is
     expected to span exactly one `workers` value; more than one means a
     cross-cell wall-clock comparison would silently mix scheduling regimes.
     Scoped to `tier` like `check_tier_poisoning` -- a smoke-tier probe run at
-    a different `--workers` (e.g. the D42 row) says nothing about the
+    a different `--workers` says nothing about the
     campaign's own wall-clock comparability."""
     at_tier = [r for r in rows if r.get("status") == "completed" and r.get("tier") == tier and CAMPAIGN_RE.match(r.get("run_id", ""))]
     values = {r.get("workers") for r in at_tier}
@@ -427,7 +427,7 @@ def main(argv=None) -> int:
         ("activity log provenance", lambda: check_activity_log_provenance(rows)),
         ("storage arithmetic", lambda: check_storage()),
         ("analysis-budget and extension completion", lambda: check_max_steps_completion(rows)),
-        ("workers consistency (D51)", lambda: check_workers_consistency(rows, args.tier)),
+        ("workers consistency", lambda: check_workers_consistency(rows, args.tier)),
     ]:
         print(f"- {name}")
         fn()

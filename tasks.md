@@ -492,8 +492,9 @@ record and cite themselves by design.
 - [x] E1 `run_grid.py` -- `6c61772`. All 60 pointers removed; the file
       greps clean, `--help` exits 0, and `tests/test_run_grid_concurrency.py`
       with `tests/test_scaffold.py` pass 38/38.
-- [ ] E2 `brainalign_wm/training/train.py` (77). The largest single block.
-      Verify with `tests/test_training.py`.
+- [x] E2 `brainalign_wm/training/train.py` -- `31d563c`. All 77 pointers
+      removed; the file greps clean, parses, and `tests/test_training.py`
+      passes 39/39.
 - [ ] E3 `brainalign_wm/analysis/run_all.py` (18) and
       `brainalign_wm/training/generate_activity_logs.py` (14). Both carry
       other agents' uncommitted work -- coordinate before touching.

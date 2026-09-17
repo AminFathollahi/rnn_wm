@@ -362,16 +362,19 @@ every launched run uses committed code on its own path.
       (0.15-0.46 accuracy cost during the delay against 0.00-0.05 before
       encoding); the eight hierarchical reinforcement checkpoints are at
       chance and their zero drop is a floor.
-- [~] C5 Does maintenance alignment predict robustness to longer delays,
-      distractors and novel stimulus combinations, among accuracy-matched
-      networks, on conditions unused for selection. `results/robustness.csv`
-      exists but has only 11 runs, and its predictor column
-      `maintenance_normalized_alignment` is exactly 0.0 in 9 of the 11 --
-      the normalize-then-clip step maps every negative alignment to zero, so
-      the regression has almost no predictor variance. Repeat against
-      `maintenance_signed_raw_alignment`, which does vary in the same file,
-      state the accuracy-matched sample size, and report the null honestly if
-      it stays null at this n rather than quietly reporting the clipped fit.
+- [x] C5 Does maintenance alignment predict robustness to longer delays and
+      novel set sizes, among accuracy-matched networks -- `PENDING`. NULL.
+      Accuracy-matched sample is 150 runs (15 architectures, 109 supervised,
+      41 reinforcement) within +/-0.02 of median accuracy 0.9507, drawn from
+      the 192 completed runs that have a maintenance alignment estimate.
+      Rerun against the signed alignment, which ranges -0.1024 to +0.0333;
+      the normalized column is exactly 0.000 in 109 of 150 rows and is
+      reported alongside rather than as the fit. Largest |Pearson r| is 0.127
+      against a minimum detectable 0.227 at this n; every interval crosses
+      zero. The pooled +0.127 is a pooling artifact -- +0.201 under
+      reinforcement, -0.049 under supervision -- so the summary is now
+      reported pooled and split. Sample cannot grow by evaluating more
+      checkpoints; it is bounded by alignment coverage, 192 of 386.
 - [x] C6 Survey `/media/amin/ADATA HD710 PRO/Research/Representation/Working
       Memory/data` for an independent confirmation set. Present are 000004,
       000469, 000574, 000673, 001187, ds004752, ds005034, ds005489, ds005557,

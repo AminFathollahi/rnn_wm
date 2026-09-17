@@ -7779,3 +7779,65 @@ Acceptance:
     38 passed, exit 0
 
     python run_grid.py --help    exit 0
+
+### 2026-09-17 -- maintenance alignment does not predict robustness to unselected conditions
+
+- The question is whether a network whose delay-period geometry is closer to
+  the recorded human one is more robust on conditions that played no part in
+  selecting it: a delay three times as long (15 -> 45 maintenance steps), and
+  a set size never trained (load 4). Both are evaluated by replaying saved
+  checkpoints, 100 held-out trials each.
+
+- Sample. 386 completed runs carry accuracy at all three trained loads; 192
+  of those have a maintenance alignment estimate, and that coverage, not the
+  evaluation, is what bounds the sample. Of the 192, **150 fall within +/-0.02
+  of the median trained accuracy 0.9507** and form the accuracy-matched set:
+  15 architectures, 109 supervised and 41 reinforcement, trained accuracy
+  0.931 to 0.971. All 150 are evaluated; `results/robustness.csv` has 150
+  rows. Widening the band to +/-0.05 would add 23 runs and 0 architectures.
+
+- The predictor is the signed maintenance alignment, not the normalized one.
+  The normalized column clips negative alignment to zero and is **exactly
+  0.000 in 109 of the 150 rows**, so a regression on it is a regression on a
+  variable that is constant for 73% of the sample. The signed estimate ranges
+  -0.1024 to +0.0333 with a standard deviation of 0.0315. Both are reported;
+  the signed one is the one that carries information.
+
+- The result is null on every outcome. Signed predictor, 2,000-resample
+  percentile intervals:
+
+  | group | n | outcome | Pearson r | 95% CI | p | Spearman rho | p |
+  |---|---|---|---|---|---|---|---|
+  | all | 150 | accuracy at the long delay | +0.127 | -0.051, +0.280 | 0.120 | +0.037 | 0.657 |
+  | all | 150 | accuracy lost to the long delay | -0.118 | -0.273, +0.058 | 0.149 | -0.025 | 0.759 |
+  | all | 150 | accuracy at the untrained load | +0.053 | -0.146, +0.229 | 0.523 | -0.013 | 0.870 |
+  | supervised | 109 | accuracy at the long delay | -0.049 | -0.273, +0.157 | 0.616 | -0.059 | 0.539 |
+  | supervised | 109 | accuracy lost to the long delay | +0.058 | -0.152, +0.277 | 0.547 | +0.083 | 0.389 |
+  | supervised | 109 | accuracy at the untrained load | -0.044 | -0.231, +0.140 | 0.649 | -0.021 | 0.827 |
+  | reinforcement | 41 | accuracy at the long delay | +0.201 | -0.029, +0.426 | 0.209 | +0.134 | 0.404 |
+  | reinforcement | 41 | accuracy lost to the long delay | -0.213 | -0.439, +0.017 | 0.182 | -0.218 | 0.171 |
+  | reinforcement | 41 | accuracy at the untrained load | -0.009 | -0.384, +0.327 | 0.955 | -0.090 | 0.577 |
+
+- Every interval crosses zero and every Spearman coefficient is under 0.22 in
+  absolute value. The smallest correlation this sample could detect at the
+  conventional 5% level with 80% power is 0.227 at n=150 and 0.426 at n=41;
+  the largest observed is 0.127. **This is a null, and it is reported as one.**
+  It does not establish that the relationship is absent -- a true correlation
+  anywhere below about 0.23 would be invisible here -- and it does not license
+  a stronger claim in the other direction either.
+
+- The pooled +0.127 is a pooling artifact and is not evidence for the
+  hypothesis. It has opposite signs in the two training signals, +0.201 under
+  reinforcement and -0.049 under supervision, so the pooled value is carried
+  by the two signals sitting at different places on both axes rather than by
+  any within-group relationship. This is why the summary is now reported
+  pooled and split, not pooled alone.
+
+- Sample size cannot be raised by evaluating more checkpoints: all 150
+  accuracy-matched runs are already evaluated, and the binding constraint is
+  the 192-run maintenance alignment coverage against 386 completed runs.
+  Extending that coverage is an alignment measurement, not a robustness one.
+
+- `wm_dynamics/bin/python -m pytest -q tests/test_robustness.py` exited 0
+  (7 tests).
+- No training was launched; both conditions are replay of saved checkpoints.

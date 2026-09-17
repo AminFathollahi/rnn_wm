@@ -1,4 +1,4 @@
-"""Item 10.2 (comments.txt §5, fixes A5): a sanity gate the local-learning
+"""A sanity gate the local-learning
 (L=1) rule must clear BEFORE any M**L cell is trained. Every M**L run
 previously sat at accuracy 0.5/0.35/0.475 -- 0.35 is BELOW chance (0.50) --
 and the protocol blamed node-perturbation variance scaling. That excuse
@@ -28,8 +28,8 @@ by this test now passing at those values. This test uses those same
 corrected production defaults (not test-only numbers) so it exercises
 what `train.py` actually configures.
 
-Do NOT tune this test further to pass (comments.txt is explicit: either
-outcome -- pass or fail -- is a valid result to report); the values below
+Do NOT tune this test further to pass (either outcome -- pass or fail --
+is a valid result to report); the values below
 are the corrected production config, not a test-specific fudge."""
 import torch
 import torch.nn as nn
@@ -89,6 +89,6 @@ def test_node_perturbation_learns_1tick_one_hot_task_above_0_95():
         f"mean accuracy {mean_acc:.3f} over seeds {accs} on a trivial "
         f"1-tick one-hot task within 5000 trials -- local-learning results "
         f"elsewhere in this repo are an implementation artefact until this "
-        f"passes (comments.txt item 10.2). Do not tune this test to pass; "
+        f"passes. Do not tune this test to pass; "
         f"fix the learner."
     )

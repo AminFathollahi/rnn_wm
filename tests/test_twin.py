@@ -1,10 +1,10 @@
-"""Phase 8b (comments.txt §5, items 8.4-8.6): synthetic-data tests with a
-KNOWN planted answer for every `analysis/twin.py` function (plus the DMD/
-LQR additions to `analysis/geometry.py`) -- item 8's acceptance criterion:
-"a geometry function that cannot recover a planted ground truth is
-worthless." Also the FIRST correctness test anywhere in this repo for the
-pre-existing `analysis/cross_temporal.py::cross_temporal_decoding`/
-`stability_index` (item 8.6 reuses them; they had zero test coverage)."""
+"""Synthetic-data tests with a KNOWN planted answer for every
+`analysis/twin.py` function (plus the DMD/LQR additions to
+`analysis/geometry.py`), on the principle that a geometry function which
+cannot recover a planted ground truth is worthless. Also the FIRST
+correctness test anywhere in this repo for the pre-existing
+`analysis/cross_temporal.py::cross_temporal_decoding`/`stability_index`
+(reused here; they had zero test coverage)."""
 import numpy as np
 import pytest
 
@@ -71,18 +71,17 @@ def test_dmd_ensemble_fit_recovers_dominant_eigenvector_and_nulls_correctly():
         "(observed ~0.79 vs r2_cv~0.997). It still reliably discriminates (a "
         "consistent, highly reproducible ~0.2 gap, std ~5e-4) -- the null's full "
         "power is against NON-stationary/task-locked real data (its actual "
-        "intended use, item 8.10/Phase 11), not an idealized autonomous LTI toy."
+        "intended use), not an idealized autonomous LTI toy."
     )
 
 
-# ---------------- 8.4c: causal perturbation vs. decodability ----------------
+# ---------------- causal perturbation vs. decodability ----------------
 
 def test_perturbation_along_dominant_direction_hurts_decodability_most():
     """Content is encoded along a KNOWN direction (v_star); a KNOWN
     orthogonal direction (v_context) carries no content information.
     Perturbing along v_star should hurt a content decoder far more than
-    perturbing along v_context or a random direction -- item 8.4c's
-    prediction, structurally."""
+    perturbing along v_context or a random direction."""
     rng = np.random.RandomState(7)
     n_trials, k = 300, 4
     amp, noise_sigma = 2.0, 0.3
@@ -165,8 +164,8 @@ def test_on_demand_lqr_controller_never_fires_when_threshold_unreachable():
 def test_correct_vs_incorrect_geometry_recovers_planted_error_signature():
     """Plant MORE drift and MORE content-axis rotation on 'incorrect'
     trials than 'correct' ones; assert the split-comparison function
-    recovers both directions (item 8.5: "does the manifold differ on
-    error trials -- more drift ... larger rotation")."""
+    recovers both directions: the manifold differs on error trials, with
+    more drift and a larger rotation."""
     rng = np.random.RandomState(11)
     n_trials, T, k = 300, 11, 4
     correct = rng.rand(n_trials) < 0.5

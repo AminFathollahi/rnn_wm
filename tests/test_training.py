@@ -32,9 +32,9 @@ def test_cell_smoke(cell):
     ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
-    # Phase 2 (comments.txt §5): global batch_size=128 OOMs arm P
-    # (PlasticGRUCell's per-trial Hebbian trace retained across the full
-    # BPTT unroll) on this 12GB GPU -- see executor.md. A smoke test's
+    # The global batch_size=128 OOMs arm P (PlasticGRUCell's per-trial
+    # Hebbian trace retained across the full BPTT unroll) on this 12GB
+    # GPU. A smoke test's
     # 6-step run doesn't need production batch fidelity, so it overrides
     # down via `cfg["batch_size"]` rather than shrinking the global default.
     cfg = {"steps": 6, "scaffold_sleep_s": 0}
@@ -47,7 +47,7 @@ def test_cell_smoke(cell):
             shutil.rmtree(ckpt_dir)
 
     assert result["status"] == "completed"
-    # Phase 3 (A3): gate keys/thresholds come from config.yaml's gates.criterion,
+    # Gate keys/thresholds come from config.yaml's gates.criterion,
     # not hardcoded, so this test doesn't silently drift from config again.
     criterion = CFG["gates"]["criterion"]
     assert set(result["gates"].keys()) == {f"{k}>={v}" for k, v in criterion.items()}
@@ -123,11 +123,11 @@ def test_run_dict_overrides_bio_plausible_and_identity_catch(extra):
 
 
 def test_cfg_batch_size_override_takes_effect():
-    """Phase 2 (comments.txt §5 item 2.3/executor.md): `cfg["batch_size"]`
-    must override `configs/config.yaml`'s global `train.batch_size` -- added
-    so arm-P cells (which OOM at the global default on this GPU) can run at
-    a smaller batch without touching every other cell's throughput.
-    `flops_per_step` (item 2.4) is exactly linear in batch_size, so its
+    """`cfg["batch_size"]` must override `configs/config.yaml`'s global
+    `train.batch_size` -- added so arm-P cells (which OOM at the global
+    default on this GPU) can run at a smaller batch without touching every
+    other cell's throughput.
+    `flops_per_step` is exactly linear in batch_size, so its
     logged value is an observable witness that the override actually
     reached the training loop, not just that train_one didn't crash."""
     import csv
@@ -190,8 +190,8 @@ def test_run_dict_overrides_perf_matched_baselines(extra):
     assert result["status"] == "completed"
 
 
-def test_gate_a_load1_only_does_not_keyerror_against_all_task_loads():
-    """Phase 12 (§3.1/12.1b): `gates.criterion` names only `load1`, but
+def test_criterion_naming_one_load_does_not_keyerror_against_all_task_loads():
+    """`gates.criterion` names only `load1`, but
     `task.loads` is [1,2,3] -- the periodic-eval milestone loop and the
     final `gates` dict must iterate `criterion`'s OWN keys, not
     `task_loads`, or every run in the study raises KeyError on load2/load3.
@@ -205,7 +205,7 @@ def test_gate_a_load1_only_does_not_keyerror_against_all_task_loads():
     assert set(CFG["gates"]["criterion"].keys()) == {"load1"}  # the scenario this test exists to cover
     assert CFG["task"]["loads"] == [1, 2, 3]
 
-    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_gate_a_subset"}
+    run = {"model_id": "M00000", "S": 0, "M": 0, "P": 0, "seed": 0, "run_id": "SMOKETEST_criterion_subset"}
     ckpt_dir = ROOT / "results" / "checkpoints" / run["run_id"]
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
@@ -220,11 +220,11 @@ def test_gate_a_load1_only_does_not_keyerror_against_all_task_loads():
 
 
 def test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training_continues():
-    """Phase 12 (§3.3): a milestone's `steps_to_<key>_<threshold>` must be
-    recorded at exactly the CONFIRMING evaluation's step
+    """A milestone's `steps_to_<key>_<threshold>` must be recorded at
+    exactly the CONFIRMING evaluation's step
     (k * eval_every, k = gates.consecutive_evals), and reaching it must NOT
-    stop training -- §3 is explicit that only `gates.max_steps` (here,
-    `cfg["steps"]`, since `gates.max_steps` is still null pre-12.6) ends the
+    stop training -- only the configured training duration (here
+    `cfg["steps"]`, since `gates.max_steps` is null in this config) ends the
     loop. Forces accuracy to 1.0 on every periodic eval via a stub (real
     accuracy this early in training is nowhere near 0.83/0.80, so a
     milestone would otherwise never fire in a smoke-sized run) and shrinks
@@ -278,7 +278,7 @@ def test_milestone_confirmed_mid_run_recorded_at_k_times_eval_every_and_training
 
 
 def test_resume_preserves_true_milestone_step_and_does_not_reoverwrite_snapshot():
-    """comments.txt §16A.2 regression: a milestone already confirmed before
+    """A milestone already confirmed before
     an interruption must keep its TRUE step after a resume (not the first
     post-resume confirmation), and its `ckpt_at_criterion.pt` snapshot must
     not be silently overwritten with post-resume weights the next time the
@@ -435,7 +435,7 @@ def test_analysis_budget_and_unmet_criterion_cap_stop_at_their_own_limits():
 
 
 def test_update_milestone_counters_latches_and_never_refires():
-    """comments.txt §16A.2: the shared per-eval update rule used by both the
+    """The shared per-eval update rule used by both the
     live loop and history replay. A milestone latches after
     `consecutive_evals_required` consecutive hits and never re-fires."""
     import brainalign_wm.training.train as train_mod
@@ -470,7 +470,7 @@ def test_update_milestone_counters_latches_and_never_refires():
 
 
 def test_seed_milestone_state_from_history_reconstructs_true_step(tmp_path):
-    """comments.txt §16A.2: replaying a resumed run's pre-resume CSV rows
+    """Replaying a resumed run's pre-resume CSV rows
     must recover the true confirmation step, not the first post-resume one."""
     import csv as csv_mod
 
@@ -555,9 +555,9 @@ def test_matched_requires_criterion_to_hold_at_final_checkpoint_not_just_ever():
 
 
 def test_metrics_logger_resume_appends_without_truncating(tmp_path, monkeypatch):
-    """comments.txt §16 item 16.1: resuming a run must not destroy its
-    earlier accuracy trace, which is exactly what Gate B (§3.2/12.6) is
-    derived from. A second logger for the same run_id must append, keep
+    """Resuming a run must not destroy its earlier accuracy trace, which is
+    exactly what the end-of-training numbers are derived from. A second
+    logger for the same run_id must append, keep
     the original rows, and write the header exactly once."""
     import brainalign_wm.training.train as train_mod
 

@@ -1,4 +1,4 @@
-"""Item 10.1 Tier 1 (comments.txt §5): `multitask.py`'s Yang-19 wiring
+"""`multitask.py`'s Yang-19 wiring
 (20-task suite, identity head<->env action mapping) and
 `scripts/run_yang19_baseline.py`'s task-onehot/rollout helpers. Skips
 entirely if `neurogym` is not installed, same convention as
@@ -55,7 +55,7 @@ def test_yang19_batch_env_step_shapes_and_gt_always_present(task):
 def test_yang19_batch_env_holds_done_instances():
     """Same per-trial done-latch convention as `NeuroGymBatchEnv` (correct
     here: `run_yang19_trial` masks by `active`, one trial per rollout, not
-    a cross-trial-persistence design like Phase 9b's `ContinuousBatchEnv`)."""
+    a cross-trial-persistence design like `ContinuousBatchEnv`)."""
     batch_env = Yang19BatchEnv("go", batch_size=BATCH, seed=0)
     for _ in range(300):
         if batch_env.done.all():

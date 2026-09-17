@@ -1,4 +1,4 @@
-"""Item 9.2 (comments.txt Phase 9): planted-answer tests for
+"""Planted-answer tests for
 `scripts/run_distillation_students.py`'s own non-trivial pure-function
 logic -- the soft-CE distillation loss and the condition-averaged RDM
 construction -- mirroring `tests/test_tiny_rnn_bandit.py`'s house style

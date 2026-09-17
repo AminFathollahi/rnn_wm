@@ -1,4 +1,4 @@
-"""N-back task-generator tests (Phase 6, comments.txt §5): sequence length
+"""N-back task-generator tests: sequence length
 and per-position field consistency, match rate matches configuration in
 aggregate, and trial generation is deterministic. Mirrors tests/test_tasks.py."""
 from pathlib import Path

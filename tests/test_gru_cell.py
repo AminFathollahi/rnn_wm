@@ -1,4 +1,4 @@
-"""Item 8.9b (comments.txt §5): correctness tests for the bio-statistics
+"""Correctness tests for the bio-statistics
 recurrent-weight initializer, `gru_cell.bioinit_weight_hh`."""
 import torch
 

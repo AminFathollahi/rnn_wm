@@ -7940,3 +7940,39 @@ running, and current GPU use. The launch file is now a short list of
 copy-paste blocks rather than a protocol document: each block resumes, and
 `run_continuations.py` reports "done: all N runs complete" instead of exiting
 silently when there is nothing left.
+
+### 2026-09-17 — the test suite reads standalone
+
+Swept every tracked test file for comments, docstrings and names that
+pointed at a review stage, spec section, decision id or internal document.
+Each docstring now states the behaviour under test and the defect it guards
+against in its own terms. No assertion, fixture or import changed.
+
+Eighty-four pointers removed across 26 files, plus the bare internal item
+ids the grep does not catch (`Item 8.9a`, `item 8.4c`, `N1`/`N2` and the
+like). Two names were renamed for what they assert rather than which review
+item asked for them:
+
+    test_gate_a_load1_only_does_not_keyerror_against_all_task_loads
+      -> test_criterion_naming_one_load_does_not_keyerror_against_all_task_loads
+    test_campaign_run_length_comes_from_gate_b_not_the_tier
+      -> test_full_tier_run_length_comes_from_the_configured_duration
+
+with the local `gate_b` variable in the second becoming `budget_steps` and
+its smoke-test run_id becoming `SMOKETEST_criterion_subset`.
+
+`tests/test_run_all.py` is the one file left with two pointers: it carries
+another agent's uncommitted work, so it is deferred to whoever commits
+`brainalign_wm/analysis/run_all.py`.
+
+Acceptance:
+
+    grep -nE 'comments\.txt|advisor\.md|executor\.md|§|\bD[0-9]{2}\b|\bF1\b|Phase [0-9]|Appendix A|Gate [AB]' tests/*.py
+    tests/test_run_all.py:97, tests/test_run_all.py:107 (deferred, see above)
+
+    python -m pytest -q tests/test_training.py tests/test_run_grid_concurrency.py \
+        tests/test_scaffold.py tests/test_tasks.py tests/test_models.py
+    115 passed, exit 0
+
+    python -m pytest -q
+    exit 0 (full suite)

@@ -1,4 +1,4 @@
-"""Item 9.1 (comments.txt §5): checks for `scripts/analyze_capacity_curve.py`'s
+"""Checks for `scripts/analyze_capacity_curve.py`'s
 own non-trivial logic -- the knee heuristic (pure function, planted-answer
 test) and the eval-rollout capture (real-model smoke test, skipped if the
 stimuli pool isn't built, same convention as `tests/test_training.py`)."""

@@ -29,7 +29,7 @@ def test_weight_entropy_kde_point_mass_is_near_zero():
 
 
 def test_weight_entropy_kde_uniform_exceeds_concentrated():
-    """Item 8.9a: KDE entropy has a different scale than the histogram
+    """KDE entropy has a different scale than the histogram
     method's `log2(n_bins)` ceiling, so this uses a relative comparison
     instead -- a flat (uniform) density must have higher KDE entropy than
     a peaked (Gaussian) one over the SAME grid resolution. NOTE: the gap
@@ -37,7 +37,7 @@ def test_weight_entropy_kde_uniform_exceeds_concentrated():
     Scott's-rule KDE bandwidth and the [min,max] grid both scale with the
     sample's own spread -- so this method is largely SCALE-invariant
     (tightening/widening a Gaussian by 10x barely moves its entropy, see
-    git history/executor.md) and mostly sensitive to distribution SHAPE."""
+    git history) and mostly sensitive to distribution SHAPE."""
     rng = np.random.RandomState(0)
     uniform_vals = rng.uniform(-1, 1, size=2000)
     concentrated_vals = rng.randn(2000) * 0.01
@@ -90,7 +90,7 @@ def test_modularity_q_empty_graph_returns_none():
 
 
 def test_modularity_q_cnm_detects_block_structure():
-    """Item 8.9c: same two-clique planted structure as the Louvain test
+    """Same two-clique planted structure as the Louvain test
     above, with `method="cnm"` (Clauset-Newman-Moore greedy modularity,
     [SHAKIBA26]'s own estimator) -- CNM should also find a high-Q partition
     on such a clean case, even though it isn't guaranteed to match Louvain

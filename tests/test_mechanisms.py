@@ -96,7 +96,7 @@ def test_node_perturbation_update_sign_matches_reward():
 
 
 def test_rung_ladder_rejects_rung4():
-    """comments.txt item 4: rung 3 (e-prop) is now implemented; only rung 4
+    """Rung 3 (e-prop) is implemented; only rung 4
     (all three rungs exhausted) is rejected."""
     cell = MaskedGRUCell(input_dim=8, hidden_dim=16)
     with pytest.raises(RungExhausted):
@@ -190,7 +190,7 @@ def test_eprop_step_matches_unperturbed_gru_forward():
 
 
 def test_eprop_pseudo_derivative_feeds_the_same_trace_machinery():
-    """comments.txt item 4: e-prop reuses `trace_step`/`apply_update`
+    """E-prop reuses `trace_step`/`apply_update`
     unchanged -- only what's passed as the "perturbation" differs."""
     cell = MaskedGRUCell(input_dim=4, hidden_dim=8)
     learner = make_learner_for_cell(cell, sigma_p=0.05, gamma_e=0.9, lr_local=1e-3, rung=3, seed=0)

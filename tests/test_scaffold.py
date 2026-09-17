@@ -64,17 +64,17 @@ def test_enumerate_includes_local_learning_cells_when_requested():
 
 
 def test_enumerate_runs_carries_explicit_supervision():
-    """comments.txt §16 item 16.4 / advisor.md D24: every enumerated battery
-    run dict must carry `supervision` explicitly so it reaches `train_one`
-    and `build_resolved_config` from the run, not from config.yaml's
-    `legacy` default (the same fall-through defect class as F1/D21)."""
+    """Every enumerated battery run dict must carry `supervision` explicitly
+    so it reaches `train_one` and `build_resolved_config` from the run, not
+    from config.yaml's `legacy` default -- the same fall-through defect class
+    as an omitted architecture key."""
     runs = rg.enumerate_runs([0, 1], supervision="RL")
     assert all(r["supervision"] == "RL" for r in runs)
     assert len(runs) == 2 * len(rg.CELLS)
 
 
 def test_run_ids_are_disjoint_across_supervision_levels():
-    """advisor.md D32 / comments.txt §18.2-A: the run_id is what names the
+    """The run_id is what names the
     checkpoint directory, the metrics CSV and the manifest key, so a SUP run
     and an RL run of the same cell+seed sharing one id means the second pass
     either gets skipped as already-completed or RESUMES the first pass's
@@ -90,7 +90,7 @@ def test_run_ids_are_disjoint_across_supervision_levels():
 
 
 def test_cells_filter_restricts_the_grid():
-    """comments.txt §18.5: the RL arm is S=0-only and the failure arm is
+    """The RL arm is S=0-only and the failure arm is
     S=1-only, so the grid needs a subset filter rather than a second
     orchestrator. A typo'd model_id must raise, not enumerate nothing --
     an empty grid at hour 0 of a 58-hour campaign looks like success."""
@@ -184,8 +184,8 @@ def test_main_locality_matched_flat_flag_records_the_override_in_resolved_config
 
 def test_main_requires_supervision_flag(capsys):
     """The launcher must fail rather than silently defaulting to `legacy`
-    when `--supervision` is omitted -- this is the actual defect §16.4
-    closes, not just enumerate_runs's plumbing."""
+    when `--supervision` is omitted -- the launcher is where the defect
+    actually bites, not just enumerate_runs's plumbing."""
     import pytest
 
     with pytest.raises(SystemExit) as exc_info:
@@ -240,7 +240,7 @@ def test_write_report(tmp_path):
     assert "Training Grid Report" in text and "M000_s0" in text and "completed=1" in text
 
 
-def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatch, capsys):
+def test_full_tier_run_length_comes_from_the_configured_duration(tmp_path, monkeypatch, capsys):
     """The full launcher must pass both campaign limits to the trainer."""
     monkeypatch.setattr(rg, "RESULTS", tmp_path)
     monkeypatch.setattr(rg, "MANIFEST", tmp_path / "manifest.jsonl")
@@ -253,16 +253,17 @@ def test_campaign_run_length_comes_from_gate_b_not_the_tier(tmp_path, monkeypatc
     import yaml as _yaml
 
     gates = _yaml.safe_load((ROOT / "configs" / "config.yaml").read_text())["gates"]
-    gate_b = gates["max_steps"]
-    assert gate_b, "gates.max_steps is unset; Gate B must be written before a campaign launch"
-    assert captured["steps"] == gate_b
+    budget_steps = gates["max_steps"]
+    assert budget_steps, "gates.max_steps is unset; the training duration must be set before a results-tier launch"
+    assert captured["steps"] == budget_steps
     assert captured["max_steps_if_criterion_unmet"] == gates["max_steps_if_criterion_unmet"]
     assert "analysis budget" in capsys.readouterr().out
 
-    # smoke/dev exist to run short; Gate B is a results-tier commitment.
+    # smoke/dev exist to run short; the fixed duration is a results-tier
+    # commitment.
     captured.clear()
     rg.main(["--scaffold", "--seeds", "1", "--budget", "1s", "--tier", "smoke", "--supervision", "SUP"])
-    assert captured["steps"] != gate_b and captured["steps"] < 1000
+    assert captured["steps"] != budget_steps and captured["steps"] < 1000
     assert "max_steps_if_criterion_unmet" not in captured
 
 
@@ -282,11 +283,11 @@ def test_main_substrate_flag_records_real_substrate_in_resolved_config(tmp_path,
 
 
 def test_every_cell_states_substrate_and_recurrent_init():
-    """CLAUDE.md non-negotiable / §18.8 item 8: every run dict must state
-    substrate, supervision and the recurrent init explicitly. An omitted key
-    inheriting a config default has invalidated two conclusions in this
-    project (F1; D20, where a `substrate: null` manifest row hid a positive
-    S=1 GRU result), and the manifest records the run dict."""
+    """Every run dict must state substrate, supervision and the recurrent
+    init explicitly. An omitted key inheriting a config default has
+    invalidated two conclusions in this project -- in one, a
+    `substrate: null` manifest row hid a positive S=1 GRU result -- and the
+    manifest records the run dict."""
     runs = rg.enumerate_runs([0], supervision="SUP", include_local_learning=True)
     assert len(runs) == len(rg.CELLS) + len(rg.LOCAL_LEARNING_CELLS)
     for r in runs:

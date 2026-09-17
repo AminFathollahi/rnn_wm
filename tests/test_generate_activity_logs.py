@@ -1,7 +1,7 @@
 """Pure run_id-parsing tests for generate_activity_logs.py -- no stimuli
 pool, GPU, or neural data required. Model IDs are the 5-arm ablation
-battery's "M" + 5 binary digits (S,M,P,T,D fixed order; comments.txt
-2026-07-08 v6.0 pivot), or the separate, unchanged local-learning family
+battery's "M" + 5 binary digits (S,M,P,T,D fixed order), or the separate,
+unchanged local-learning family
 (M**L)."""
 import pytest
 
@@ -31,8 +31,8 @@ def test_parse_run_id_plain_core_cell():
 
 
 def test_parse_run_id_ablation_and_identity_catch_suffixes():
-    """§4.4/§9.4a run_id convention (re-anchored to M11111/M00000 in the
-    v6.0 pivot): the suffix rides along in `model_id` (keeps parquet
+    """The ablation and identity-catch run_id convention: the suffix rides
+    along in `model_id` (keeps parquet
     filenames unambiguous) while S/M/P/T/D still come from the leading 5
     characters."""
     for run_id, expected_model_id in [
@@ -70,7 +70,7 @@ def test_run_id_extras_detects_perf_matched_baselines():
 
 
 def test_parse_run_id_handles_supervision_namespaced_ids():
-    """advisor.md D32: campaign run_ids carry the supervision level
+    """Grid run_ids carry the supervision level
     (`M00000_SUP_s0`). The 5-bit prefix still drives the replay
     architecture, and `model_id` keeps the full string so the parquet
     filename stays unambiguous -- same convention as the `_pbwm` suffix."""
@@ -107,6 +107,27 @@ def test_run_id_extras_rebuilds_the_locality_matched_flat_core():
     assert rg.LOCAL_CONNECTIVITY_FLAT == _run_id_extras(f"M00000_{rg.LOCAL_CONNECTIVITY_FLAT_TAG}")[3]
 
 
+def test_parse_run_id_handles_continuation_diet_tags():
+    """A run trained by continuing a checkpoint on the six-task diet or on
+    working memory alone carries a `_contmulti`/`_contwm` tag between the
+    cell and the signal (`M00000_contmulti_SUP_s0`). The 5-bit prefix still
+    drives the replay architecture and the tag rides along in `model_id`,
+    same convention as every other suffix already covered above."""
+    assert _parse_run_id("M00000_contmulti_SUP_s0") == ("M00000_contmulti_SUP", 0, 0, 0, 0, 0, 0)
+    assert _parse_run_id("M00000_contwm_SUP_s0") == ("M00000_contwm_SUP", 0, 0, 0, 0, 0, 0)
+    assert _parse_run_id("M10000_contmulti_SUP_s3") == ("M10000_contmulti_SUP", 1, 0, 0, 0, 0, 3)
+    assert _parse_run_id("M00100_contwm_SUP_s2") == ("M00100_contwm_SUP", 0, 0, 1, 0, 0, 2)
+    assert _parse_run_id("M11111_contmulti_SUP_s7") == ("M11111_contmulti_SUP", 1, 1, 1, 1, 1, 7)
+
+
+def test_run_id_extras_leaves_continuation_diet_tags_as_the_plain_cell():
+    """Neither tag names a model-shape override, so replay builds the same
+    architecture the source checkpoint was continued from."""
+    assert _run_id_extras("M00000_contmulti") == (False, 0.0, 1, {})
+    assert _run_id_extras("M00000_contwm") == (False, 0.0, 1, {})
+    assert _run_id_extras("M11111_contmulti") == (False, 0.0, 1, {})
+
+
 def test_substrate_for_reads_the_recorded_substrate_from_the_manifest(tmp_path, monkeypatch):
     import json
 
@@ -123,8 +144,9 @@ def test_substrate_for_reads_the_recorded_substrate_from_the_manifest(tmp_path, 
 
 
 def test_activity_log_path_namespaces_non_default_checkpoints():
-    """advisor.md D33: the Gate A log must not overwrite the Gate B log.
-    `ckpt.pt` keeps the original filename so nothing that already reads
+    """The at-criterion checkpoint's log must not overwrite the
+    end-of-training one. `ckpt.pt` keeps the original filename so nothing
+    that already reads
     these logs changes."""
     from pathlib import Path
 

@@ -1,12 +1,12 @@
-"""Regression tests for the 2026-07-06 PI review pass (comments.txt N1/N2):
+"""Regression tests for two maintenance-alignment estimator defects:
 
-- N1: a load-only synthetic RDM (item identity carries NO true signal,
+- a load-only synthetic RDM (item identity carries NO true signal,
   only load structures the data) must NOT drive maintenance alignment once
   the crossnobis RDM is load-stratified (`rdm.stratified_crossnobis_rdm`) --
   unlike the pre-fix, non-stratified, single pooled-RDM approach, which is
   dominated by cross-load condition pairs and reports a large spurious
   correlation whenever model and neural data merely share load structure.
-- N2: a null (label-shuffled / symmetric-noise) maintenance DV must NOT
+- a null (label-shuffled / symmetric-noise) maintenance DV must NOT
   report a positive floor once per-session raw alignment is aggregated as
   a signed mean BEFORE normalizing, instead of averaging each session's
   already-[0,1]-clipped `normalized_alignment`.
@@ -26,7 +26,7 @@ def _load_only_conditions(loads, items_per_load, reps):
     identity is assigned arbitrarily (uninformative for the RDM's true
     generative process below) -- `conds_full` is the OLD `(item, load)`
     schema; `strata`/`conds_only` split that into load-stratum + bare item
-    label for the N1-fixed stratified path."""
+    label for the stratified path."""
     conds_full, strata, conds_only = [], [], []
     for load in loads:
         for item in range(items_per_load):
@@ -38,7 +38,7 @@ def _load_only_conditions(loads, items_per_load, reps):
 
 
 def test_load_only_signal_inflates_nonstratified_but_not_stratified_alignment():
-    """N1: build two INDEPENDENT synthetic datasets ("model" and "neural")
+    """Build two INDEPENDENT synthetic datasets ("model" and "neural")
     whose only true structure is a large, shared LOAD offset -- item
     identity is pure independent noise on both sides, so there is NO real
     identity-driven signal for either side to detect. The pre-fix
@@ -87,7 +87,7 @@ def test_load_only_signal_inflates_nonstratified_but_not_stratified_alignment():
 
 
 def test_stratified_rdm_has_nan_cross_stratum_blocks():
-    """N1: `stratified_crossnobis_rdm` must never compute a cross-stratum
+    """`stratified_crossnobis_rdm` must never compute a cross-stratum
     (cross-load) condition pair -- those entries stay NaN, structurally,
     not merely small."""
     loads = [1, 2]
@@ -114,7 +114,7 @@ def test_stratified_rdm_has_nan_cross_stratum_blocks():
 
 
 def test_signed_aggregation_does_not_rectify_symmetric_noise_into_a_positive_floor():
-    """N2: per-session raw alignment that is pure, SIGNED (mean ~0) noise
+    """Per-session raw alignment that is pure, SIGNED (mean ~0) noise
     must aggregate to ~0 normalized alignment under the fixed pipeline --
     not the strictly positive floor the old (clip-per-session-then-average)
     aggregation produced. Session raw values are symmetric around zero by

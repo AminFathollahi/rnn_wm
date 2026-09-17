@@ -1,4 +1,4 @@
-"""Phase 7 (comments.txt §5, SUP/RL/METARL): `_select_signal`'s SUP/RL/
+"""`_select_signal`'s SUP/RL/
 legacy behavior, `MetaRLAdapter`'s shape, `sample_metarl_block`'s block
 content/determinism, and `run_metarl_block`'s mechanics -- finite loss and
 gradients (S=0 and S=1), correct snapshot shapes, and (the mechanism the
@@ -107,7 +107,7 @@ def test_block_content_deterministic_given_seed():
 
 @pytestmark_needs_stimuli
 def test_n_and_feature_vary_across_blocks_in_one_batch():
-    """Item 7.1's decoding analysis needs `(n, feature)` to vary ACROSS
+    """The decoding analysis needs `(n, feature)` to vary ACROSS
     block instances in one batch (unlike Sternberg's shared-load batch) --
     a large-enough batch must draw more than one distinct value of each."""
     bank = _make_bank()

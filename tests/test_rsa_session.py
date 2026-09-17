@@ -177,8 +177,8 @@ def test_noise_ceiling_declines_when_sessions_share_no_conditions():
 
 
 def test_trial_level_split_half_ceiling_sane_bounds():
-    """comments.txt item 1: B2's ceiling must be estimated on the same
-    per-trial Euclidean representation its raw score uses, not the
+    """The trial-level ceiling must be estimated on the same per-trial
+    Euclidean representation its raw score uses, not the
     condition-level crossnobis ceiling."""
     rng = np.random.RandomState(0)
     labels = [c for c in range(6) for _ in range(4)]

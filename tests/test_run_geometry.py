@@ -1,4 +1,4 @@
-"""Phase 12.4 (comments.txt §12.4): `--checkpoint NAME` must let
+"""`--checkpoint NAME` must let
 `scripts/run_geometry.py` analyse `ckpt_at_criterion.pt` as well as the
 default `ckpt.pt`, writing each to its OWN output file so one doesn't
 silently overwrite the other."""

@@ -47,7 +47,7 @@ def test_context_vector_one_hot_consistency():
 
 
 def test_context_vector_load_zero_outside_encode():
-    """v5.0 fix (comments.txt item 2): load one-hot must not leak into
+    """The load one-hot must not leak into
     maintain/probe -- the network carries load in its own recurrent state
     instead of reading a live exogenous broadcast."""
     c_maintain = context_vector(epoch="maintain", encoded_count=2)
@@ -57,7 +57,7 @@ def test_context_vector_load_zero_outside_encode():
 
 
 def test_context_vector_aux_family_flag():
-    """§9.4a identity-report catch trials (comments.txt item 6)."""
+    """An identity-report catch trial tags its context with the aux-family flag."""
     c = context_vector(epoch="encode", encoded_count=1, aux_family=True)
     assert c[1] == 1.0
     c_off = context_vector(epoch="encode", encoded_count=1, aux_family=False)
@@ -75,7 +75,7 @@ def test_probe_context_vector_does_not_leak_the_answer():
     cue added at the probe cannot reintroduce the same class of bug.
 
     Shares its dataset generation and per-dimension rule with
-    `scripts/leak_check.py` (Phase 0) so the leak logic lives in one place.
+    `scripts/leak_check.py` so the leak logic lives in one place.
     """
     from scripts.leak_check import all_single_dim_accuracies, generate_probe_dataset
 
@@ -89,7 +89,7 @@ def test_probe_context_vector_does_not_leak_the_answer():
 
 
 # ---------------- curriculum (no ImageTokenBank needed) ----------------
-# Phase 3 (comments.txt §5 item 3.5): boundaries are absolute step counts,
+# Curriculum phase boundaries are absolute step counts,
 # not fractions of total_steps -- `total_steps` no longer enters the phase
 # decision (kept only as a pass-through field on the returned dict).
 
@@ -111,7 +111,7 @@ def test_curriculum_warmup_load1_no_lures():
 
 
 def test_curriculum_load2_stage():
-    # Phase 12.5 lever 3: an optional stage between warmup and ramp that
+    # An optional stage between warmup and ramp that
     # exposes loads 1-2 (not 3) at full delay, still with no lures.
     sched = CurriculumSchedule.from_config(FULL_CFG)
     assert sched.load2_steps > 0, "config no longer sets load2_steps -- update this test"
@@ -198,7 +198,7 @@ def test_lure_fraction_matches_config_in_aggregate():
 
 @pytestmark_needs_stimuli
 def test_identity_catch_trial_replaces_probe():
-    """§9.4a (comments.txt item 6): a catch trial shows no probe image, has
+    """A catch trial shows no probe image, has
     no in/out judgment, tags every tick aux_family=True, and records the
     FIRST held item's category as the report target."""
     bank = _make_bank()

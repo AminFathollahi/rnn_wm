@@ -1,4 +1,4 @@
-"""comments.txt §20.3: `scripts/audit_campaign.py`'s tier-poisoning check must
+"""`scripts/audit_campaign.py`'s tier-poisoning check must
 fire on a real instance of the defect it exists to catch -- a smoke-tier
 `completed` row for a core cell sitting next to a genuine full-tier one --
 and only on the smoke-tier row, not the full-tier one."""
@@ -45,12 +45,12 @@ def test_tier_poisoning_fires_once_for_the_smoke_row(tmp_path):
 
 
 def test_baseline_only_suppresses_listed_violations(tmp_path):
-    """§21.5: a whitelist that whitelists everything is worse than no
+    """A whitelist that whitelists everything is worse than no
     whitelist -- a violation NOT in the baseline must still count, and
     removing an entry from the baseline must turn its violation back on."""
     baseline_path = tmp_path / "audit_baseline.json"
     baseline_path.write_text(json.dumps({
-        "known_violations": [{"message": "[tier-poisoning] known one", "reason": "D42"}],
+        "known_violations": [{"message": "[tier-poisoning] known one", "reason": "the known smoke-tier row"}],
     }))
     all_violations = ["[tier-poisoning] known one", "[max-steps] a brand new defect"]
 

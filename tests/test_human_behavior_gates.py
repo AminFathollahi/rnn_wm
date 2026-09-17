@@ -1,4 +1,4 @@
-"""Phase 12 (§3.1/9.8): `dedupe_sessions` must collapse a session that
+"""`dedupe_sessions` must collapse a session that
 appears in more than one dataset release (001187 re-releasing 000673
 recordings) so a pooled quantile counts it once, not once per release.
 Without this, the naive 111-row pool gives load-1 q10=0.8222 instead of
@@ -40,7 +40,7 @@ def test_human_percentiles_survives_dataset_code_csv_roundtrip(tmp_path, monkeyp
     `_human_percentiles` match zero rows every time the CSV was read back
     from disk (train.py never hit this in the same-process script run,
     only on reload -- the bug that made human_percentile_load{2,3} always
-    null in Phase 12.1's own acceptance run)."""
+    null whenever the percentiles were computed from a reloaded CSV)."""
     import pandas as pd
 
     from brainalign_wm.training import train as train_mod

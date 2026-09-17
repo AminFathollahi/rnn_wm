@@ -53,10 +53,10 @@ def _build_hrl(reflective: bool, **kwargs):
 
 
 def test_param_budget_matched_within_tolerance():
-    """Phase 1 (A2 fix, comments.txt §5): compares EFFECTIVE (mask-aware)
-    synapse counts, not raw `.parameters()` numel -- the S=1 worker's
-    locality mask leaves ~10% of its dense `weight_hh` alive, so a raw
-    comparison is meaningless (that mismatch, undetected, was A2) and this
+    """Compares EFFECTIVE (mask-aware) synapse counts, not raw
+    `.parameters()` numel -- the S=1 worker's locality mask leaves ~10% of
+    its dense `weight_hh` alive, so a raw comparison is meaningless and
+    this
     test would fail on the current config if it used raw counts."""
     flat = _build_flat()
     hrl = _build_hrl(reflective=False)
@@ -112,7 +112,7 @@ def test_hrl_manager_hard_clock_when_not_reflective():
 
 
 def test_hrl_manager_m0_m1_identical_trajectory_with_zero_bias():
-    """Phase 4 item 4.3 (A4 fix): with `manager_every_tick=False` (the
+    """With `manager_every_tick=False` (the
     default) and the M=1 bias forced to exactly zero every tick, M=0 and
     M=1 must be mechanistically identical -- same clock, same manager
     weights, zero-valued difference term. If M still diverged here, the
@@ -144,7 +144,7 @@ def test_hrl_reflective_requires_gate_bias():
         core(z_t, state, t=0, gate_bias=None)
 
 
-# ---------------- Knob P: Hebbian fast weights (§6.2) ----------------
+# ---------------- Knob P: Hebbian fast weights ----------------
 
 from brainalign_wm.models.gru_cell import PlasticGRUCell
 
@@ -178,7 +178,7 @@ def test_hrl_core_plastic_worker_only():
     )
     assert isinstance(core_plastic.worker, PlasticGRUCell)
     from brainalign_wm.models.gru_cell import MaskedGRUCell
-    assert type(core_plastic.manager) is MaskedGRUCell, "plasticity (§6.2) is worker-only, manager stays plain"
+    assert type(core_plastic.manager) is MaskedGRUCell, "plasticity is worker-only, manager stays plain"
 
     state = core_plastic.init_state(BATCH)
     assert "hebb_worker" in state
@@ -187,7 +187,7 @@ def test_hrl_core_plastic_worker_only():
     assert state["hebb_worker"].shape == (BATCH, 3 * CFG["worker_units"], CFG["worker_units"])
 
 
-# ---------------- ablation-battery arm M111_pbwm (§4.4/§6.1) ----------------
+# ---------------- ablation-battery arm M111_pbwm ----------------
 
 from brainalign_wm.models.gru_cell import PBWMManagerCell
 

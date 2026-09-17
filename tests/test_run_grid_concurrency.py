@@ -1,4 +1,4 @@
-"""Phase 12.3 (comments.txt §12.3): `run_grid.run_grid_loop`'s
+"""`run_grid.run_grid_loop`'s
 `ProcessPoolExecutor`-based execution must be a pure scheduling change --
 N workers produce the same set of manifest rows as `--workers 1`, and a
 worker raising an exception must not take down the others (isolated,
@@ -80,7 +80,7 @@ def test_worker_exception_yields_error_row_without_killing_others(tmp_path, monk
 
 
 def test_gpu_budget_mib_serializes_s1_runs_but_not_s0(tmp_path, monkeypatch):
-    """D38: two S=1 (hierarchical) cells alone measured ~11.16 GiB concurrently,
+    """Two S=1 (hierarchical) cells alone measured ~11.16 GiB concurrently,
     almost the whole 12227 MiB card. `--gpu-budget-mib` must keep S=1 runs from
     overlapping in wall-clock time even when `workers` would otherwise allow it,
     while S=0 runs (small footprint) still pack in freely."""
@@ -176,9 +176,9 @@ def test_trial_ticks_matches_the_configured_epoch_durations():
 
 
 def test_estimate_is_monotone_in_max_load_for_plastic_cells():
-    """D41: peak memory is linear in trial length, so the estimate MUST rise
-    with the curriculum's hardest load. D39's per-cell constants could not,
-    which is why they were admitted at load 1 and OOM'd at load 3."""
+    """Peak memory is linear in trial length, so the estimate MUST rise
+    with the curriculum's hardest load. A per-cell constant cannot, which is
+    why one was admitted at load 1 and OOM'd at load 3."""
     plastic = {"model_id": "M11111", "S": 1, "P": 1, "seed": 0, "run_id": "M11111_s0"}
     by_load = [rg._run_mib(plastic, _mem_cfg(max_load=n)) for n in (1, 2, 3)]
     assert by_load == sorted(by_load) and by_load[0] < by_load[-1], by_load
@@ -187,7 +187,7 @@ def test_estimate_is_monotone_in_max_load_for_plastic_cells():
 def test_plastic_s1_at_load3_uncheckpointed_exceeds_the_whole_card():
     """The configuration that actually failed. `M11111` OOM'd at --workers 1,
     alone on an 11.5 GiB card, so the scheduler must refuse it outright rather
-    than admit it as D39's 6200 MiB constant did."""
+    than admit it as a flat 6200 MiB per-cell constant once did."""
     plastic_s1 = {"model_id": "M11111", "S": 1, "P": 1, "seed": 0, "run_id": "M11111_s0"}
     est = rg._run_mib(plastic_s1, _mem_cfg(max_load=3, checkpointing=False))
     assert est > 12227, f"estimated {est} MiB, which a 12227 MiB card would wrongly accept"
@@ -196,10 +196,10 @@ def test_plastic_s1_at_load3_uncheckpointed_exceeds_the_whole_card():
 
 
 def test_non_plastic_runs_are_cheap_regardless_of_substrate():
-    """Corrects D39's premise. A non-plastic cell never builds the [B, 3H, H]
-    tensor at all, so an S=1 non-plastic run is cheap -- measured ~320 MiB --
-    and several may overlap. D39 budgeted it 6200 MiB and needlessly serialized
-    them."""
+    """A non-plastic cell never builds the [B, 3H, H] tensor at all, so an
+    S=1 non-plastic run is cheap -- measured ~320 MiB -- and several may
+    overlap. A flat per-cell estimate budgeted it 6200 MiB and needlessly
+    serialized them."""
     cfg = _mem_cfg()
     for run in ({"S": 1, "P": 0, "run_id": "M11011_s0"}, {"S": 0, "P": 0, "run_id": "M00000_s0"}):
         assert rg._run_mib(run, cfg) == rg._BASE_MIB
@@ -228,7 +228,7 @@ def test_estimate_falls_back_to_constants_without_a_resolved_config():
 def test_load_completed_ignores_a_row_from_another_tier(tmp_path):
     """A smoke-tier diagnostic must not retire a full-tier campaign cell.
 
-    Regression for the real `M11011_SUP_s0` row: D38's `--tier smoke` OOM
+    Regression for the real `M11011_SUP_s0` row: a `--tier smoke` OOM
     probe left `status: completed` at 100 steps and chance accuracy, and
     `load_completed` keyed on `run_id` alone would have skipped that core
     cell in every later full-tier pass."""
@@ -245,7 +245,7 @@ def test_load_completed_ignores_a_row_from_another_tier(tmp_path):
 
 
 def test_stop_signal_writes_interrupted_rows_for_in_flight_runs(tmp_path, monkeypatch):
-    """D44 (comments.txt §20.4): a killed pass left four runs 8,000-76,000
+    """A killed pass left four runs 8,000-76,000
     steps in with checkpoints on disk and NO manifest row at all, invisible
     to `load_completed` and every manifest-based audit. A caught stop signal
     must record every in-flight run as `status: interrupted` at the moment
@@ -282,7 +282,7 @@ def test_stop_signal_writes_interrupted_rows_for_in_flight_runs(tmp_path, monkey
 
 
 def test_admission_respects_a_reading_of_the_card_not_only_the_model(tmp_path, monkeypatch):
-    """comments.txt §23.1: the scheduler admitted against `_run_mib`'s *model*
+    """The scheduler admitted against `_run_mib`'s *model*
     of what the in-flight runs should cost. On 2026-08-08 three runs whose
     modelled cost fit the budget were submitted while five idle pool workers
     held ~9 GiB of an 11.5 GiB card, and all three died of CUDA OOM -- the
@@ -331,7 +331,7 @@ def test_admission_respects_a_reading_of_the_card_not_only_the_model(tmp_path, m
 
 
 def test_real_runs_get_a_fresh_worker_process_each(tmp_path, monkeypatch):
-    """comments.txt §23.1 / user decision 2026-08-09: `empty_cache()` returns the
+    """`empty_cache()` returns the
     caching allocator's blocks but not the CUDA context, which a pooled worker
     holds for the life of the pool -- 370-466 MiB per idle worker during the
     2026-08-08 pass. Only process death frees it, so real (non-scaffold) runs
@@ -361,9 +361,9 @@ def test_real_runs_get_a_fresh_worker_process_each(tmp_path, monkeypatch):
 
 
 def test_manifest_rows_record_which_gpu_the_run_used(tmp_path, monkeypatch):
-    """comments.txt §23.3: `workers` and `gpu_budget_mib` are only interpretable
-    against a device. D41's four unfittable cells are a fact about an 11.5 GiB
-    laptop card, not about the config."""
+    """`workers` and `gpu_budget_mib` are only interpretable against a
+    device. The four cells that fit at no concurrency here are a fact about
+    an 11.5 GiB laptop card, not about the config."""
     monkeypatch.setattr(rg, "RESULTS", tmp_path)
     monkeypatch.setattr(rg, "gpu_device_rec",
                         lambda: {"gpu_name": "Test GPU", "gpu_total_mib": 12227})
@@ -378,7 +378,7 @@ def test_manifest_rows_record_which_gpu_the_run_used(tmp_path, monkeypatch):
 
 
 def test_help_does_not_crash(capsys):
-    """comments.txt §23.2: a bare `%` in an argparse help string makes argparse's
+    """A bare `%` in an argparse help string makes argparse's
     own formatter raise, so `--help` died with `TypeError: %o format: an integer
     is required, not dict` -- the one command a user runs when they are unsure."""
     import pytest

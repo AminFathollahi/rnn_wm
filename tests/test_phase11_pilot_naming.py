@@ -1,4 +1,4 @@
-"""Diagnostic run_id naming (comments.txt §13.4/§14.1): the init-radius
+"""Diagnostic run_id naming: the init-radius
 segment is vanilla-specific and must not appear for other substrates, since
 `--recurrent-init-spectral-radius` is inert on the GRU path."""
 import sys

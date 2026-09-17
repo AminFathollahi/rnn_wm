@@ -1,4 +1,4 @@
-"""comments.txt §20.6: the only pure-logic piece of the D37 sign diagnostic
+"""The only pure-logic piece of the maintenance-alignment sign diagnostic
 worth a standalone test is the tick<->bin matched-position arithmetic --
 everything else in the script is thin glue over already-tested RSA/rdm
 machinery and requires real Tier-A data to exercise meaningfully."""

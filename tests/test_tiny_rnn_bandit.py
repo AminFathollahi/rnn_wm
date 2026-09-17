@@ -1,4 +1,4 @@
-"""Item 9.3 (comments.txt Phase 9): checks for `scripts/run_tiny_rnn_bandit.py`'s
+"""Checks for `scripts/run_tiny_rnn_bandit.py`'s
 own non-trivial logic -- the discounted-return computation and the
 per-trial bookkeeping (both pure functions, planted-answer tests), plus a
 real-env check that NeuroGym trial boundaries do not terminate the

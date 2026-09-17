@@ -1,7 +1,6 @@
-"""Phase 8a (comments.txt §5, items 8.1-8.3): synthetic-data tests with a
-KNOWN planted answer for every `analysis/geometry.py` function -- a
-geometry function that cannot recover a planted ground truth is worthless
-(the phase's own acceptance criterion)."""
+"""Synthetic-data tests with a KNOWN planted answer for every
+`analysis/geometry.py` function, on the principle that a geometry function
+which cannot recover a planted ground truth is worthless."""
 import numpy as np
 import pytest
 
@@ -179,8 +178,8 @@ def test_trial_averaging_biases_dynamics_estimate():
     local dynamics). Averaging trials together BEFORE measuring speed acts
     like a low-pass filter over the jitter distribution: it damps the
     averaged trajectory's amplitude and hence its apparent speed -- the
-    "spurious contraction" comments.txt warns about, and the reason every
-    dynamics fit in this module must use single-trial ensembles (C3)."""
+    "spurious contraction" this guards against, and the reason every
+    dynamics fit in this module must use single-trial ensembles."""
     rng = np.random.RandomState(6)
     n_trials = 400
     T = 40

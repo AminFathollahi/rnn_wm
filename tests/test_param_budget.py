@@ -1,5 +1,4 @@
-"""PHASE 1 (comments.txt §5, items 1.1-1.3): effective (mask-aware) synapse
-counting on every cell type, the vanilla RNN cell, and the budget solver in
+"""Effective (mask-aware) synapse counting on every cell type, the vanilla RNN cell, and the budget solver in
 scripts/match_param_budget.py."""
 from pathlib import Path
 
@@ -31,7 +30,7 @@ def test_masked_gru_cell_effective_count_excludes_masked_entries():
 
 
 def test_plastic_gru_cell_alpha_does_not_inflate_effective_count():
-    """alpha modulates an EXISTING synapse (§gru_cell.py docstring), so a
+    """alpha modulates an EXISTING synapse (see `gru_cell.py`), so a
     plastic cell must report the same effective count as a plain masked
     cell with the same shape/mask -- alpha only shows up in the raw
     parameter count (`.parameters()`), not the structural synapse count."""

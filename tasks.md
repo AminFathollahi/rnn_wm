@@ -486,10 +486,9 @@ sentence explains what the code does and why, never who asked for it.
 The chronology and advisory documents are excluded: they are the internal
 record and cite themselves by design.
 
-- [ ] E1 `run_grid.py` (34 remaining). A pass already stripped the
-      parenthetical pointers; what is left needs prose rewrites. Uncommitted
-      in the working tree -- read it before editing. Verify with
-      `tests/test_run_grid_concurrency.py`.
+- [x] E1 `run_grid.py` -- `6c61772`. All 60 pointers removed; the file
+      greps clean, `--help` exits 0, and `tests/test_run_grid_concurrency.py`
+      with `tests/test_scaffold.py` pass 38/38.
 - [ ] E2 `brainalign_wm/training/train.py` (77). The largest single block.
       Verify with `tests/test_training.py`.
 - [ ] E3 `brainalign_wm/analysis/run_all.py` (18) and

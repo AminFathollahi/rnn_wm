@@ -531,4 +531,43 @@ the next starts, so a session interruption loses at most one item.
 5. B3, B4 -- two result tables whose implementations already exist.
 6. B5 -- full-delay maintenance RSA, the largest measurement item.
 7. B6, B7 -- estimand and timestamp quality control.
-8. E1-E8 -- hygiene, last, because every item above edits the same files.
+8. F1-F4 -- alignment coverage for the control and extension arms, and the
+   downstream reruns it forces. Sequenced here because it needs the
+   per-population column from C1 in place first.
+9. E1-E8 -- hygiene, last, because every item above edits the same files.
+
+## F. Alignment coverage for the control and extension arms
+
+The alignment stage ran on the preregistered battery only. That arm is
+complete -- all 15 cells at every trained seed have a maintenance alignment
+estimate. The arms trained afterwards do not, because each was trained after
+the stage last ran and none has had its replay activity log written.
+
+This matters beyond sample size. Each of these arms was trained to remove a
+named confound from an architecture claim whose primary measure is alignment.
+Measuring only their accuracy leaves the confound controlled for behaviour and
+uncontrolled for the quantity the claim is actually about. The locality-matched
+flat control is the clearest case: it exists to separate hierarchy from
+recurrent sparsity, and until its alignment is computed that separation is
+unevidenced.
+
+- [ ] F1 Enumerate exactly which completed full-tier runs lack an alignment
+      estimate, by arm. The approximate split is 16 locality-matched flat, 16
+      width/connectivity flat controls, 32 rate substrates, 24 memory-demand
+      and 48 local-learning runs. Every one has its checkpoint on disk; only 4
+      of 231 have a replay activity log.
+- [ ] F2 Write the replay activity logs for the arms in F1 and run the
+      existing alignment stage over them. Reuse the replay and alignment paths
+      unchanged -- this is coverage, not a new estimator. Storage is roughly
+      70-95 GB plus a shuffled partner log per modulated run, against 1.9 TB
+      free. Report measured wall clock for the first few runs before
+      committing to the rest.
+- [ ] F3 Rerun the downstream analyses that read alignment, and state for each
+      whether the added arms change its conclusion: the per-population
+      contrasts, the distribution tables, and the robustness regression, whose
+      published null rests on 150 accuracy-matched runs drawn from the 192.
+- [ ] F4 Record the runs that stay out and why, rather than dropping them:
+      pilot and vanilla runs that never learned the task, runs trained under
+      the earlier hybrid signal that is not one of the two preregistered
+      levels, and the long-budget duplicates that would enter a cell twice at
+      two different durations.

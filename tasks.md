@@ -498,7 +498,7 @@ record and cite themselves by design.
 - [ ] E3 `brainalign_wm/analysis/run_all.py` (18) and
       `brainalign_wm/training/generate_activity_logs.py` (14). Both carry
       other agents' uncommitted work -- coordinate before touching.
-- [x] E4 Tests -- `486239e`. All 84 pointers removed across 26 files, two
+- [x] E4 Tests -- `486239e`. All 80 flagged lines removed across 26 files, two
       test names renamed for what they assert, and the full suite passes.
       `tests/test_run_all.py` (2) is deferred to E3: it carries another
       agent's uncommitted work on the module it tests.

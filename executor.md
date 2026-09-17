@@ -7948,7 +7948,7 @@ pointed at a review stage, spec section, decision id or internal document.
 Each docstring now states the behaviour under test and the defect it guards
 against in its own terms. No assertion, fixture or import changed.
 
-Eighty-four pointers removed across 26 files, plus the bare internal item
+Eighty flagged lines removed across 26 files, plus the bare internal item
 ids the grep does not catch (`Item 8.9a`, `item 8.4c`, `N1`/`N2` and the
 like). Two names were renamed for what they assert rather than which review
 item asked for them:

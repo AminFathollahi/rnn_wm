@@ -25,9 +25,30 @@ print(f"1. continuation training   {len(runs) - left}/{len(runs)} done"
       + ("" if left else "   [done]"))
 PY
 
+PYTHONPATH=$PWD "$PY" - <<'PY'
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, ".")
+from scripts.run_multitask_from_init import enumerate_runs
+
+completed = set()
+for line in Path("results/manifest.jsonl").read_text().splitlines():
+    if line.strip():
+        record = json.loads(line)
+        if record.get("status") == "completed":
+            completed.add(record["run_id"])
+
+runs = {r["run_id"] for r in enumerate_runs(range(8))}
+left = len(runs - completed)
+print(f"2. multi-task training     {len(runs) - left}/{len(runs)} done"
+      + ("" if left else "   [done]"))
+PY
+
 listed=$(PYTHONPATH=$PWD "$PY" scripts/list_active_analysis_runs.py | wc -l)
 shards=$(ls results/analysis_checkpoints/*/.complete 2>/dev/null | wc -l)
-printf '2. replay and analysis     %s/%s done' "$shards" "$listed"
+printf '3. replay and analysis     %s/%s done' "$shards" "$listed"
 [ "$shards" -ge "$listed" ] && printf '   [done]'
 printf '\n\n'
 

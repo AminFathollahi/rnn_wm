@@ -7904,3 +7904,39 @@ Acceptance:
 
     python -m pytest -q tests/test_training.py
     39 passed, exit 0
+
+### 2026-09-17 — the continuation pre-flight rejected every reflective cell
+
+The fully-mechanised stream died on launch, before its first update:
+
+    ValueError: reflective=True requires gate_bias (beta*R_t) every step
+
+`verify_source` steps the loaded core once to confirm the working-memory cue
+survives the shared task schema, and passed `gate_bias=None`. A reflective core
+requires a bias every step, so the check raised for any run with the reflective
+gate enabled. Scope is exactly those cells: the three unmodulated streams were
+unaffected and had been training normally.
+
+The first tick has no preceding feedback, and both branches of the comparison
+are stepped through the same bias, so the check now supplies zeros of the
+gate's own width. The comparison it performs is unchanged.
+
+16 of the 64 continuation runs were blocked by this. No run trained under the
+defect -- it raises before the first update -- so nothing is retrospectively
+affected and no output was discarded.
+
+Acceptance, against the real checkpoint on the GPU:
+
+    python -m pytest -q tests/test_continuation_verification.py
+    1 passed, exit 0
+
+    stream relaunched: "16 of 16 runs remaining", training, first run of the
+    study completed shortly after.
+
+### 2026-09-17 — one status command for the remaining GPU work
+
+`remaining.sh` prints how much of each stage is left, whether anything is
+running, and current GPU use. The launch file is now a short list of
+copy-paste blocks rather than a protocol document: each block resumes, and
+`run_continuations.py` reports "done: all N runs complete" instead of exiting
+silently when there is nothing left.

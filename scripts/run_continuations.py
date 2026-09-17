@@ -160,8 +160,14 @@ def verify_source(run: dict, cfg: dict, device) -> dict:
         state_b = front_end(features, cue_b)
         initial_a = _init_state(core, run["S"], run["P"], 2, device)
         initial_b = _init_state(core, run["S"], run["P"], 2, device)
-        readout_a, _, _ = _step_core(core, run["S"], run["M"], run["P"], state_a, initial_a, 0, None)
-        readout_b, _, _ = _step_core(core, run["S"], run["M"], run["P"], state_b, initial_b, 0, None)
+        # A reflective core requires a gate bias every step. The first tick has
+        # no preceding feedback, and both branches are compared through the
+        # same bias, so zero is the value the comparison needs.
+        gate_bias = None
+        if run["M"]:
+            gate_bias = torch.zeros(2, _gate_width(run["S"], cfg["model"]), device=device)
+        readout_a, _, _ = _step_core(core, run["S"], run["M"], run["P"], state_a, initial_a, 0, gate_bias)
+        readout_b, _, _ = _step_core(core, run["S"], run["M"], run["P"], state_b, initial_b, 0, gate_bias)
         action_a = heads(readout_a)[2]
         action_b = heads(readout_b)[2]
     front_end.input_noise_sigma = original_noise
@@ -329,14 +335,18 @@ def main(argv=None) -> int:
             rec = json.loads(line)
             if rec.get("status") == "completed":
                 completed.add(rec["run_id"])
-    for run in runs:
-        if run["run_id"] in completed:
-            continue
+    pending = [run for run in runs if run["run_id"] not in completed]
+    if not pending:
+        print(f"done: all {len(runs)} runs complete")
+        return 0
+    print(f"{len(pending)} of {len(runs)} runs remaining", flush=True)
+    for run in pending:
         record = train_continuation(run, cfg, batch_size)
         with MANIFEST.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             handle.write(json.dumps(record) + "\n")
         print(f"completed {run['run_id']}", flush=True)
+    print(f"done: all {len(runs)} runs complete")
     return 0
 
 

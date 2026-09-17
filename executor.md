@@ -7976,3 +7976,27 @@ Acceptance:
 
     python -m pytest -q
     exit 0 (full suite)
+
+### 2026-09-17 — multi-task continuation seeds overflowed the task generators
+
+Every multi-task continuation died before its first update:
+
+    ValueError: Seed must be between 0 and 2**32 - 1
+
+The continuation seed is scaled by a large multiplier and offset by the step
+count to give each task environment its own stream. At a continuation seed of
+10,000 that product is 1.0e10, past the 32-bit range the task generators seed
+from. The working-memory arm never reaches this path, which is why only the
+multi-task runs failed and the first working-memory run had already completed.
+
+The reduction is applied where every caller already routes, in the shared
+environment reset, rather than at each call site.
+
+All 32 multi-task runs were blocked -- the whole diet contrast. None trained
+under the defect, so nothing is retrospectively affected.
+
+Acceptance:
+
+    python -m pytest -q tests/test_multitask.py tests/test_multitask_seeding.py \
+        tests/test_continuation_verification.py
+    exit 0

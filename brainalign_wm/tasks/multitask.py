@@ -1,22 +1,20 @@
-"""Multi-task diet (Phase 5, comments.txt items 5.1-5.5): the "trained on
-general cognitive tasks vs working memory only" arm. Wraps 5 NeuroGym envs
-plus the existing Sternberg generator behind one task-selection interface.
+"""The six-task training diet: the image Sternberg generator plus five
+NeuroGym environments, behind one task-selection interface.
 
 Unlike Sternberg (whose trials are fully pre-scripted -- the epoch/image
 sequence is fixed in advance and the model's action only affects the
-recorded outcome, never what's shown next), a NeuroGym trial is genuinely
-INTERACTIVE: the agent's action can end the trial early (e.g. GoNogo ends
-the instant a non-fixate action fires during the decision period) or leave
-it running to a timeout ("miss"). So there is no `sample_batch() -> list[
-list[Step]]` to pre-generate the way `TaskGenerator` does for Sternberg --
+recorded outcome, never what is shown next), a NeuroGym trial is
+INTERACTIVE: the agent's action can end the trial early (GoNogo ends the
+instant a non-fixate action fires during the decision period) or leave it
+running to a timeout. So there is no `sample_batch() -> list[list[Step]]`
+to pre-generate the way `TaskGenerator` does for Sternberg --
 `NeuroGymBatchEnv` instead steps the model's own action against the
-underlying env(s) tick by tick, which is why the training loop
-(`training/train.py::run_multitask_neurogym_trial`) rolls out and computes
-the loss in the same loop, rather than consuming a pre-built batch.
+underlying environments tick by tick, which is why
+`training/train.py::run_multitask_neurogym_trial` rolls out and computes
+the loss in the same loop rather than consuming a pre-built batch.
 
-Gated entirely behind `task.multitask_diet` (default False, unset in every
-existing config) -- nothing in Phases 0-4's Sternberg-only pipeline
-imports this module or is affected by its presence.
+Gated behind `task.multitask_diet` (default False): nothing in the
+Sternberg-only pipeline imports this module or is affected by its presence.
 """
 from __future__ import annotations
 
@@ -45,9 +43,9 @@ NEUROGYM_ENV_KWARGS: dict[str, dict] = {
 }
 
 # The shared policy head is {0: no-action/fixate, 1: yes/A, 2: no/B}
-# (item 5.5, action_dim=3, see configs/config.yaml). Each task's native
-# Discrete(N) action space maps onto it; derived by reading each task's
-# actual source in site-packages/neurogym/envs/native/*.py, not guessed:
+# (`model.action_dim` = 3). Each task's native Discrete(N) action space
+# maps onto it; derived by reading each task's actual source in
+# site-packages/neurogym/envs/native/*.py, not guessed:
 #   dawtwostep            {0: fixate, 1: action1, 2: action2}      -- already 1:1
 #   delaymatchsample      {0: fixation, 1: match, 2: non-match}    -- already 1:1
 #   contextdecisionmaking {0: fixation, 1: choice1, 2: choice2}    -- already 1:1 (dim_ring=2)
@@ -64,7 +62,10 @@ HEAD_TO_ENV = {
     "contextdecisionmaking": _IDENTITY3,
 }
 # Translates info["gt"] (env action space) into head-action space, for the
-# 3 tasks that provide a gt at all.
+# 3 tasks that provide a gt at all. NeuroGym sets info["gt"] from the
+# within-trial time index BEFORE advancing it, so the target returned by
+# `step(a)` belongs to the observation `a` was chosen from -- verified by
+# scripts/verify_neurogym_semantics.py.
 ENV_GT_TO_HEAD = {
     "delaymatchsample": _IDENTITY3,
     "gonogo": {0: 0, 1: 1},
@@ -119,14 +120,13 @@ def task_cue_metadata(schema: str = TASK_CUE_SCHEMA) -> dict:
 
 
 class NeuroGymAdapter(nn.Module):
-    """Per-task small learned linear embedding straight to bottleneck width
-    (item 5.3) -- NOT routed through `models.front_end.FrontEnd` (that stays
-    the Sternberg-only frozen-ResNet path; "the frozen-ResNet path is used
-    only by Sternberg"). Mirrors `FrontEnd.forward`'s `(v_t, c_t) -> z_t`
-    call shape so the training loop's dispatch on task family is exactly
-    one branch (which adapter/front_end to call), not scattered per-task
-    logic downstream -- the recurrent core and heads are unmodified and
-    shared across every task (item 5.3)."""
+    """Per-task learned linear embedding of (observation, task cue) straight
+    to bottleneck width -- NOT routed through `models.front_end.FrontEnd`,
+    which stays the Sternberg-only frozen-encoder path. Mirrors
+    `FrontEnd.forward`'s `(v_t, c_t) -> z_t` call shape so the training
+    loop's dispatch on task family is exactly one branch (which adapter to
+    call) and nothing downstream is per-task: the recurrent core and the
+    heads are shared, unmodified, across every task."""
 
     def __init__(self, obs_dim: int, c_dim: int, bottleneck_dim: int):
         super().__init__()
@@ -142,6 +142,37 @@ def make_env(task_name: str):
     return ngym.make(NEUROGYM_ENV_IDS[task_name], **NEUROGYM_ENV_KWARGS.get(task_name, {}))
 
 
+def reset_env(env, seed: int, fixate_action: int = 0, max_advance: int = 200):
+    """Reset a NeuroGym environment reproducibly and at a trial boundary.
+
+    Two corrections to a bare `env.reset(seed=...)`:
+
+    Seeding. `reset` seeds only the Gymnasium-side generator; NeuroGym
+    draws trial timing, stimulus noise and stochastic reward from its own
+    `RandomState`, which is constructed unseeded and left untouched by
+    `reset`. Without the explicit `seed()` below, two runs at the same seed
+    see different trials (measured: stimulus noise in DelayMatchSample,
+    reward draws in Bandit), so nothing built on these environments is
+    reproducible or resumable. Seeding must precede `reset`, which already
+    generates the first trial.
+
+    Trial boundary. `reset` itself takes one step with a sampled action, so
+    it returns the trial's SECOND observation and the caller starts one
+    tick in. For DawTwoStep that is fatal rather than cosmetic: its trial
+    is two ticks, so the sampled action makes the first-stage choice and
+    banks its reward, leaving the caller a second stage whose best
+    available outcome is zero. Stepping the fixation action to the next
+    trial boundary hands back the first observation of a fresh trial."""
+    seed %= 2 ** 32  # the task generators seed a 32-bit RNG
+    env.unwrapped.seed(seed)
+    obs, info = env.reset(seed=seed)
+    for _ in range(max_advance):
+        if env.unwrapped.t_ind == 0:
+            return obs, info
+        obs, _reward, _terminated, _truncated, info = env.step(fixate_action)
+    raise RuntimeError(f"{env} did not reach a trial boundary within {max_advance} ticks")
+
+
 def obs_dim_for(task_name: str) -> int:
     return int(make_env(task_name).observation_space.shape[0])
 
@@ -149,9 +180,10 @@ def obs_dim_for(task_name: str) -> int:
 class NeuroGymBatchEnv:
     """B independent instances of one NeuroGym task, stepped together.
     NeuroGym has no native vectorized-env support in the version pinned
-    here, so this is a plain Python loop over B env objects per tick --
-    the cost is inherent to single-instance-stepping, not something
-    Phase 2's throughput fix (Sternberg-only) could have addressed.
+    here, so this is a plain Python loop over B env objects per tick.
+
+    Instance `b` is seeded `seed + b`, so consecutive callers must advance
+    `seed` by at least `batch_size` to draw disjoint trials.
 
     A trial's natural length varies per instance and depends on the
     model's OWN actions (see module docstring), so this does not
@@ -170,7 +202,7 @@ class NeuroGymBatchEnv:
         self.done = np.zeros(batch_size, dtype=bool)
         self.obs = np.zeros((batch_size, obs_dim_for(task_name)), dtype=np.float32)
         for b, env in enumerate(self.envs):
-            obs, _info = env.reset(seed=seed + b)
+            obs, _info = reset_env(env, seed + b)
             self.obs[b] = obs
 
     def step(self, head_actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]:
@@ -198,9 +230,9 @@ class NeuroGymBatchEnv:
         return self.obs.copy(), reward, gt_head, newly_done
 
 
-# Item 10.1 (comments.txt §5, Tier 1): Yang's 20-task suite via
-# `neurogym.envs.collections.yang19`. Unlike the 6-task diet above, every
-# yang19 env shares the SAME native action space (verified empirically:
+# Yang's 20-task suite via `neurogym.envs.collections.yang19`. Unlike the
+# 6-task diet above, every yang19 env shares the SAME native action space
+# (verified empirically:
 # `Discrete(17)`, obs_dim 33 -- one fixation action plus a 16-direction
 # response ring, and every task provides a `gt` in that same space, so
 # there is no HEAD_TO_ENV/ENV_GT_TO_HEAD table to hand-derive per task the
@@ -240,7 +272,7 @@ class Yang19BatchEnv:
         self.done = np.zeros(batch_size, dtype=bool)
         self.obs = np.zeros((batch_size, YANG19_OBS_DIM), dtype=np.float32)
         for b, env in enumerate(self.envs):
-            obs, _info = env.reset(seed=seed + b)
+            obs, _info = reset_env(env, seed + b)
             self.obs[b] = obs
 
     def step(self, head_actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

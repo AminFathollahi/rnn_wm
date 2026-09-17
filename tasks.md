@@ -498,10 +498,10 @@ record and cite themselves by design.
 - [ ] E3 `brainalign_wm/analysis/run_all.py` (18) and
       `brainalign_wm/training/generate_activity_logs.py` (14). Both carry
       other agents' uncommitted work -- coordinate before touching.
-- [ ] E4 Tests: `tests/test_run_grid_concurrency.py` (14),
-      `tests/test_training.py` (12), `tests/test_scaffold.py` (9),
-      `tests/test_tasks.py` (6), `tests/test_models.py` (5) and the smaller
-      remainder. Test names and docstrings state the behaviour under test.
+- [x] E4 Tests -- `486239e`. All 84 pointers removed across 26 files, two
+      test names renamed for what they assert, and the full suite passes.
+      `tests/test_run_all.py` (2) is deferred to E3: it carries another
+      agent's uncommitted work on the module it tests.
 - [ ] E5 `scripts/` (about 90 across 14 files, densest
       `scripts/run_phase11_pilot.py` at 13). `run_phase11_pilot.py` is also a
       filename keyed to a phase number; rename it for what it runs and update

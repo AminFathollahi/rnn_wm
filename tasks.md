@@ -350,7 +350,7 @@ every launched run uses committed code on its own path.
       run in a follow-up commit (`scripts/rsa_encoder_partial.py`). The two
       alignment-selected runs give the identical ordering; the
       accuracy-selected run does not.
-- [x] C4 Memory-location intervention in the plastic cells -- `c8e557d`.
+- [x] C4 Memory-location intervention in the plastic cells -- `78ce09f`.
       1,080 accuracy rows over 72 checkpoints x 5 conditions x 3 loads, plus
       1,296 carrier-deviation rows. Selectivity holds for the synaptic
       disruption (off/on 0.039 during the delay) and for the activity

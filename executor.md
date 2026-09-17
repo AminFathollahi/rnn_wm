@@ -7749,3 +7749,33 @@ Nothing broken and left unfixed by this follow-up.
   tests/test_robustness.py` exited 0 (15 tests).
 - No training was launched; every number above is replay of saved
   checkpoints.
+
+### 2026-09-17 — `run_grid.py` reads standalone
+
+Rewrote every comment, docstring and `--help` string in `run_grid.py` that
+pointed at a review stage, spec section, decision id or internal document.
+The technical content is unchanged; each sentence now states what the code
+does and why, so the file is readable with no second document open.
+
+Sixty pointers removed. What each replaced sentence now says in its own
+terms: the `--workers` default came from a throughput benchmark on one small
+cell replicated eight ways and does not generalise to this battery's mix; the
+memory gate, not `--workers`, is what keeps concurrent runs off each other's
+memory; `--supervision` is required because `CELLS` carry no `supervision`
+key and an omitted flag used to inherit an earlier hybrid signal; the tier
+filter in `load_completed` is load-bearing because a short memory probe once
+retired a core cell and published its chance accuracies; `model_overrides`
+exists because an unrecorded per-run model key once let a pilot train one
+architecture while its resolved config described another. The behavioural
+inclusion criterion and the fixed training duration are now named for what
+they are rather than by letter.
+
+Acceptance:
+
+    grep -nE 'comments\.txt|advisor\.md|executor\.md|§|\bD[0-9]{2}\b|\bF1\b|Phase [0-9]|Appendix A|Gate [AB]' run_grid.py
+    (no matches)
+
+    python -m pytest -q tests/test_run_grid_concurrency.py tests/test_scaffold.py
+    38 passed, exit 0
+
+    python run_grid.py --help    exit 0

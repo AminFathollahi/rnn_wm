@@ -18,25 +18,23 @@ Design properties:
     recording every in-flight run as `status: interrupted` (with its last
     step from the metrics CSV) at the moment the signal arrives, so a
     killed pass leaves a record even if it never reaches the graceful
-    shutdown path (D44);
+    shutdown path;
   * writes `results/manifest.jsonl` and a summary report,
     `results/RUN_REPORT.md`;
-  * `--workers N` (§12.3): runs N `train_one` calls concurrently via
+  * `--workers N`: runs N `train_one` calls concurrently via
     `ProcessPoolExecutor` (`run_grid_loop`, shared with
-    `scripts/run_stage1_grid.py`). N=8 (Appendix A / executor.md's Phase
-    12.3 entry: largest N keeping per-process ms/step under 1.5x the N=1
-    value) is a THROUGHPUT benchmark on one small cell replicated eight
-    ways and does NOT generalise to this battery's real mix -- it is what
-    D38 disproved when `--workers 8` OOM'd 25 minutes into Pass 1. `--workers`
-    is a submission ceiling, not a memory guarantee: `--gpu-budget-mib` (D39,
-    D41, D49 -- see `_run_mib` below) is what actually keeps concurrent runs
-    off each other's memory, and N=8 remains the current launch
-    recommendation only because D49's direct probe (comments.txt §21.1,
-    `scripts/probe_peak_memory.py`) confirmed the memory gate is
-    conservative on every real cell at N=8, not because the throughput
-    benchmark alone would justify it; every manifest row records the
-    `workers` value in force so wall-clock/energy DVs are never compared
-    across rows with different N.
+    `scripts/run_stage1_grid.py`). N=8 came from a throughput benchmark --
+    the largest N keeping per-process ms/step under 1.5x the N=1 value --
+    measured on one small cell replicated eight ways, which does NOT
+    generalise to this battery's real mix: at N=8 it ran out of GPU memory
+    25 minutes into the first full pass. `--workers` is a submission
+    ceiling, not a memory guarantee; `--gpu-budget-mib` (see `_run_mib`
+    below) is what actually keeps concurrent runs off each other's memory.
+    N=8 remains the launch recommendation only because a direct
+    per-cell memory probe (`scripts/probe_peak_memory.py`) confirmed the
+    memory gate is conservative on every real cell at that setting. Every
+    manifest row records the `workers` value in force, so wall-clock and
+    energy measures are never compared across rows with different N.
 
 A `--scaffold` mode substitutes a synthetic stub for `train_one`, allowing
 the orchestration logic to be exercised without the model/training
@@ -46,8 +44,8 @@ Usage:
   python run_grid.py --seeds 5 --budget 48h --workers 8 --supervision RL # execute the training grid, 8-way concurrent
   python run_grid.py --scaffold --seeds 3 --budget 30m --supervision RL  # orchestration-only demonstration
 
-`--supervision {SUP,RL}` is required, with no default (comments.txt §16
-item 16.4): `CELLS` carry no `supervision` key, so an omitted flag would
+`--supervision {SUP,RL}` is required, with no default: `CELLS` carry no
+`supervision` key, so an omitted flag would
 silently fall through to config.yaml's `train.supervision: legacy`, which
 is not one of the study's two preregistered levels.
 """
@@ -85,13 +83,12 @@ def resolved_config_path(campaign: str = "grid") -> Path:
     `run_perf_matched_baselines.py`, `run_identity_catch.py`) each write
     their OWN resolved config under a campaign-qualified filename, so one
     script's launch doesn't clobber another's reproducibility artifact when
-    they're run interleaved (as they are in Phase C, §6.2)."""
+    they're run interleaved."""
     return RESULTS / f"resolved_config_{campaign}.yaml"
 
 
-# The 5-arm bio-plausibility ABLATION BATTERY (v6.0, arm order S,M,P,T,D
-# fixed; comments.txt 2026-07-08; 3 interaction-probe cells added
-# 2026-07-08 per user request), mirroring configs/config.yaml's `cells:`
+# The 5-arm bio-plausibility ablation battery, arm order S,M,P,T,D fixed,
+# mirroring configs/config.yaml's `cells:`
 # list: baseline, full reference, the 5 knock-one-out-from-full cells, the
 # 5 add-one-to-baseline cells, and 3 targeted two-arm interaction probes
 # closing specific substrate-entanglement gaps (T behaves differently on
@@ -121,9 +118,9 @@ _ABLATION_BITS = [
 # `train_one` reads both from the run dict when present (`train.py:1567,1571`),
 # and the manifest records the run dict -- so an omitted key is a `null`
 # manifest field that says nothing about what actually trained. That exact
-# fall-through has invalidated two conclusions here (F1, and D20, where
-# `M10000_pilot_s0`'s `substrate: null` hid a positive S=1 GRU result for
-# weeks). The values equal today's config defaults; the point is that they are
+# fall-through has invalidated two conclusions here: in one, a run recorded
+# `substrate: null` and a positive hierarchical GRU result stayed hidden for
+# weeks. The values equal today's config defaults; the point is that they are
 # recorded per run and survive a later edit to the config.
 _SUBSTRATE = {"substrate": "gru", "recurrent_init_spectral_radius": None}
 
@@ -132,7 +129,7 @@ CELLS = [
     for (s, m, p, t, d) in _ABLATION_BITS
 ]
 
-# Extended local-learning study (§6.3): same S/M architecture, trained by
+# Extended local-learning study: same S/M architecture, trained by
 # node-perturbation/e-prop instead of BPTT (`train_one` reads "L", no "P"
 # key). Distinct model_ids (M**L) so they never collide with the Core
 # P-cells above -- not enumerated by default (see `--local-learning`).
@@ -189,23 +186,23 @@ SUBSTRATE_ARMS = {
 LOCAL_CONNECTIVITY_FLAT_TAG = LOCALITY_BUDGET_TAG
 LOCAL_CONNECTIVITY_FLAT = LOCALITY_BUDGET
 
-# D38: N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
+# N=8 concurrency OOM'd on this 11.5 GiB-usable GPU. Gate submissions on
 # estimated in-flight GPU memory so heavy runs serialize while light ones pack in.
 #
-# D41: that estimate must be DERIVED, not tabulated. `PlasticGRUCell` keeps three
+# that estimate must be DERIVED, not tabulated. `PlasticGRUCell` keeps three
 # [B, 3H, H] tensors per tick alive for backward, so a plastic cell's activation
 # graph is LINEAR IN TRIAL LENGTH -- which the curriculum lengthens underneath the
 # scheduler mid-run. A per-cell constant therefore cannot be right at both ends of
-# a run, and D39's pair were wrong in both directions at once: a non-plastic S=1
-# run measures ~320 MiB here (it was budgeted 6200), while a plastic S=1 run needs
-# 12.53 GiB at load 3 -- more than this entire card, which is why serializing to
-# --workers 1 did not save it. Every input below is read from the resolved config
-# so a config edit cannot silently desynchronise the scheduler from the model
-# again; that desynchronisation is the whole content of D39 and D40.
+# a run, and the earlier per-cell pair was wrong in both directions at once: a
+# non-plastic S=1 run measures ~320 MiB here (it was budgeted 6200), while a
+# plastic S=1 run needs 12.53 GiB at load 3 -- more than this entire card, which
+# is why serializing to --workers 1 did not save it. Every input below is read
+# from the resolved config so a config edit cannot silently desynchronise the
+# scheduler from the model.
 _BASE_MIB = 500  # params + optimiser + CUDA context + frozen front-end. Measured:
                  # four concurrent non-plastic runs occupied 1275 MiB in total.
-                 # D50/D49 probe (comments.txt §21.1/§21.2, scripts/probe_peak_memory.py,
-                 # 2026-08-07): a single forward+backward+optimizer.step() at load 3 (the
+                 # `scripts/probe_peak_memory.py`, 2026-08-07: a single
+                 # forward+backward+optimizer.step() at load 3 (the
                  # curriculum's longest trial) measured M11011 (S=1, the non-plastic branch's
                  # largest case) at 173.9 MiB and M00000 (the cheapest cell) at 95.1 MiB --
                  # both well under this constant, so it is conservative at the load that
@@ -218,8 +215,8 @@ def gpu_used_total_mib() -> tuple[int, int] | None:
     """(used, total) MiB actually resident on GPU 0, or None if unreadable.
 
     Read, not modelled. Everything above this line is a model of what a run
-    *should* cost; four separate memory failures (D38, D39/D40, D41, and the
-    2026-08-08 pass's three OOMs) all came of admitting against a model while
+    *should* cost; four separate memory failures all came of admitting a run
+    against a model of its cost while
     the card held something else. `nvidia-smi` rather than
     `torch.cuda.mem_get_info` on purpose: the orchestrator never trains, and
     initialising a CUDA context in it just to measure would itself consume a
@@ -238,12 +235,12 @@ def gpu_used_total_mib() -> tuple[int, int] | None:
 
 
 def gpu_device_rec() -> dict:
-    """Which card a run actually happened on, for the manifest (§23.3).
+    """Which card a run actually happened on, for the manifest.
 
     `workers` and `gpu_budget_mib` are only interpretable against the device:
     the same budget means something different on an 11.5 GiB laptop card than
-    on a 40 GiB one, and D41's four unfittable cells are a fact about this GPU,
-    not about the config.
+    on a 40 GiB one, and the four cells that do not fit here at any concurrency
+    are a fact about this GPU, not about the config.
     """
     try:
         out = subprocess.run(
@@ -291,7 +288,7 @@ _STOP = False
 # can write a record for whatever is in flight AT THE MOMENT the signal
 # arrives -- not after the loop next reaches Python code, which the 2026-08-05
 # P=0 pass showed cannot be relied on: it was killed with four runs 8,000-
-# 76,000 steps in and left zero manifest rows for any of them (D44).
+# 76,000 steps in and left zero manifest rows for any of them.
 _ACTIVE_LOOP_STATE: dict | None = None
 
 
@@ -352,7 +349,7 @@ def parse_budget(s: str) -> float:
 
 
 def build_run_id(model_id: str, seed: int, supervision: str | None) -> str:
-    """`supervision` is part of the run identity (advisor.md D32), because
+    """`supervision` is part of the run identity, because
     the checkpoint directory, the metrics CSV and the manifest key are all
     derived from the run_id. Without it the second supervision pass of the
     same grid either gets skipped wholesale by `load_completed` or -- worse,
@@ -372,21 +369,21 @@ def enumerate_runs(
 ) -> list[dict]:
     """Seed-major ordering => all 15 Core cells at seed0, then seed1, ...
     (breadth-first). `include_local_learning` appends the 4 Extended
-    local-learning cells (§6.3) after the Core cells within each seed --
+    local-learning cells after the Core cells within each seed --
     off by default, since that study is reported on its own terms and
-    doesn't gate the Core grid (§17 decision 6).
+    doesn't gate the Core grid.
 
-    `supervision` (comments.txt §16 item 16.4 / advisor.md D24): every
-    enumerated cell's own run dict, not the config default. `CELLS` carry
-    no `supervision` key, so without this every battery run used to fall
-    through to `config.yaml`'s `train.supervision: legacy` -- a pre-Phase-7
-    signal that is not one of the study's preregistered levels ({SUP, RL}).
+    `supervision` goes into every enumerated cell's own run dict, not the
+    config default. `CELLS` carry no `supervision` key, so without this every
+    battery run used to fall through to `config.yaml`'s
+    `train.supervision: legacy` -- an earlier hybrid signal that is not one of
+    the study's two preregistered levels ({SUP, RL}).
     `None` (the default) preserves that historical fall-through exactly, so
     any other caller of `enumerate_runs` is unaffected; `main` below never
     passes `None`, because its own `--supervision` flag is required. It is
     also part of the run_id -- see `build_run_id`.
 
-    `cells` (comments.txt §18.5): restrict to these `model_id`s. The campaign
+    `cells`: restrict to these `model_id`s. The campaign
     runs the full 15 under `SUP` but only the 7 S=0 cells under `RL`, plus an
     8-cell S=1 failure arm at a lower seed count, so the grid needs a subset
     filter; a second orchestrator would need its own copy of the resume,
@@ -484,15 +481,15 @@ def load_completed(manifest: Path, tier: str | None = None) -> set[str]:
     """Run ids already completed *at this tier*.
 
     The tier filter is load-bearing, not cosmetic.  `M11011_SUP_s0` was left
-    in the manifest as `status: completed` by D38's `--tier smoke` OOM probe:
+    in the manifest as `status: completed` by a `--tier smoke` memory probe:
     100 steps, 14.6 s wall clock, chance accuracy, a different `config_hash`.
     Keyed on `run_id` alone, that row silently removed one of the fifteen core
     cells from every subsequent full-tier pass and published its chance
     accuracies as that cell's campaign result.  A diagnostic run and a
     campaign run share a run_id by design (same cell, same seed, same
-    supervision); the tier is what tells them apart.  Same defect class as
-    F1/D20/D24/D32/D35 -- the recorded value and the value in effect diverge,
-    and every artifact looks right.
+    supervision); the tier is what tells them apart.  Same defect class as the
+    silent config fall-throughs elsewhere in this file -- the recorded value
+    and the value in effect diverge, and every artifact looks right.
 
     `tier=None` preserves the old unfiltered behaviour for callers that have
     no tier concept.
@@ -538,26 +535,24 @@ def build_resolved_config(
     could affect a run, not just the tier subset `run_grid.py` threads
     through to `train_one`.
 
-    `model_overrides` (Phase 12 audit finding F1): per-run `model.*` keys
-    that `train_one` applies from the run dict (currently `substrate`) are
-    invisible here otherwise, so the written audit trail records
-    config.yaml's DEFAULT while something else actually trained. That is
-    exactly how the Phase 11.1 pilot ran a GRU while
-    `resolved_config_phase11_pilot_s0.yaml` said -- correctly about the
-    file, wrongly about the run -- `substrate: gru`, and nobody noticed for
-    a 24-hour campaign. Pass the override whenever it is constant across
+    `model_overrides`: per-run `model.*` keys that `train_one` applies from
+    the run dict (currently `substrate`) are invisible here otherwise, so the
+    written audit trail records config.yaml's DEFAULT while something else
+    actually trained. That is exactly how an early pilot ran a GRU while its
+    resolved config said -- correctly about the file, wrongly about the run --
+    something else, and nobody noticed for a 24-hour campaign. Pass the override whenever it is constant across
     the runs this resolved config covers; a campaign whose cells DISAGREE
     on a model key must write one resolved config per distinct value, not
     a single misleading one.
 
-    `run` (D20): the same run dict passed to `train_one`. Substrate,
+    `run`: the same run dict passed to `train_one`. Substrate,
     supervision, and the recurrent-init spectral radius are recorded
     explicitly here using `train_one`'s own fallback order (`run` value if
     present, else the config default), regardless of whether the caller
-    remembered to name them in `model_overrides` -- a defect class (F1, and
-    the supervision key that silently inherited `legacy` for a full round)
-    has now hit two of these three keys because an omission was invisible
-    here. The S/M/P/T/D cell selector is recorded too (`model.cell`): it
+    remembered to name them in `model_overrides`. That defect class -- an
+    omission here being invisible -- has already hit two of these three keys,
+    including the supervision key that silently inherited `legacy` for a full
+    round. The S/M/P/T/D cell selector is recorded too (`model.cell`): it
     picks the model class itself, and two runs differing only in it used to
     resolve to the same config and config_hash. `run=None` (every existing
     caller) reproduces the prior output exactly, reading straight from
@@ -623,7 +618,7 @@ def _fmt(r: dict, key: str) -> str:
 
 
 def _fmt_milestone(r: dict, prefix: str) -> str:
-    """Phase 12 (§3.3): milestone keys are named `<prefix>_<key>_<threshold>`
+    """milestone keys are named `<prefix>_<key>_<threshold>`
     (e.g. `steps_to_load1_0.83`), and the threshold comes from config.yaml,
     not this file -- so look up by prefix instead of hardcoding the
     threshold here, the same root-cause reason train.py iterates
@@ -637,7 +632,7 @@ def _fmt_milestone(r: dict, prefix: str) -> str:
 def _fmt_acc_ci(acc: dict, load: int) -> str:
     """`0.941 [0.912,0.963]`, or just the point estimate / "-" if the CI
     (or the accuracy itself) isn't present -- e.g. `--scaffold` mode's
-    synthetic accuracy dict has no `*_ci_lo`/`*_ci_hi` keys (Phase 3)."""
+    synthetic accuracy dict has no `*_ci_lo`/`*_ci_hi` keys."""
     v = acc.get(f"load{load}")
     if v is None:
         return "-"
@@ -660,13 +655,13 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         "",
         "## Per-run",
         "",
-        # Phase 12 (§3): the old single graded criterion_met/steps_to_criterion
-        # split into Gate A's `matched` (inclusion, §3.1) and per-milestone
-        # steps/trials_to_<key>_<threshold> (§3.3, milestones, not a stop
-        # rule -- `_fmt_milestone` looks these up by prefix since the
+        # the old single graded criterion_met/steps_to_criterion split into
+        # the inclusion criterion's `matched` and per-milestone
+        # steps/trials_to_<key>_<threshold> -- milestones, not a stop
+        # rule (`_fmt_milestone` looks these up by prefix since the
         # threshold suffix comes from config.yaml, not this file). `wall(s)`
         # is `wall_total_s`, the run's total wall clock -- with concurrency
-        # (§12.3) it is NOT comparable across rows with different `workers`
+        # it is NOT comparable across rows with different `workers`
         # (its own column here), which is why steps_to_*/trials_to_* (not
         # wall_s_to_*/joules_to_*) are the primary efficiency DVs.
         "| run_id | S | M | P/L | T | D | status | gates | acc(load1/2/3) | rung | "
@@ -680,8 +675,8 @@ def write_report(manifest: Path, report: Path, budget_s: float, elapsed_s: float
         acc = r.get("accuracy", {})
         accs = "/".join(_fmt_acc_ci(acc, i) for i in (1, 2, 3))
         # Core cells carry "P" (BPTT throughout); the 4 local-learning
-        # cells carry "L" instead -- show whichever is present. T/D (§1.2/
-        # §1.3) are absent (shown "-") for local-learning and any
+        # cells carry "L" instead -- show whichever is present. T and D are
+        # absent (shown "-") for local-learning and any
         # supplementary-arm run that predates the 5-arm ablation battery.
         p_or_l = r.get("P", r.get("L", "-"))
         lines.append(
@@ -748,7 +743,7 @@ def resolve_train_fn(force_scaffold: bool):
         return _scaffold_train_one
 
 
-# ----------------------------- concurrent execution (Phase 12.3) -----------------------------
+# ----------------------------- concurrent execution -----------------------------
 
 def _pool_initializer() -> None:
     """Runs once per worker process, before that process imports torch/numpy
@@ -756,20 +751,19 @@ def _pool_initializer() -> None:
     called from `_worker_entry` -- not at module load) -- so this actually
     governs the BLAS/OpenMP thread count each worker's torch ends up using.
     32 CPUs / N worker processes x (OpenMP + Python) oversubscribes at the
-    default of one OpenMP thread per core; comments.txt §12.3 fixes it at 2
-    per worker."""
+    default of one OpenMP thread per core, so it is fixed at 2 per worker."""
     os.environ["OMP_NUM_THREADS"] = "2"
     os.environ["MKL_NUM_THREADS"] = "2"
     # Same reason it has to be set here: the allocator reads this once, at the
     # worker's first CUDA allocation, and the worker has not imported torch yet.
     # Expandable segments let a freed block be reused at a different size instead
     # of stranding it in a fixed-size pool, which is where this card's headroom
-    # went during the 2026-08-08 pass (comments.txt §23.1).
+    # went during the 2026-08-08 pass.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def _worker_entry(run: dict, cfg: dict, force_scaffold: bool) -> dict:
-    """Module-level (picklable) `ProcessPoolExecutor` entry point (§12.3):
+    """Module-level (picklable) `ProcessPoolExecutor` entry point:
     resolves `train_one` itself, inside the worker process. A closure over
     an already-resolved `train_one` is not picklable across a process
     boundary, so each worker re-resolves it from scratch -- cheap (an
@@ -796,8 +790,7 @@ def run_grid_loop(
     log_prefix: str, extra_rec_fields: dict | None = None, gpu_budget_mib: int | None = None,
     mem_cfg: dict | None = None,
 ) -> None:
-    """Shared execution loop for `run_grid.py` and `scripts/run_stage1_grid.py`
-    (§12.3): one `train_one` call per OS process (`ProcessPoolExecutor`,
+    """Shared execution loop for `run_grid.py` and `scripts/run_stage1_grid.py`: one `train_one` call per OS process (`ProcessPoolExecutor`,
     NOT threads -- the whole point is escaping the GIL that the Python
     overhead the audit measured actually lives in; every run is otherwise
     bit-identical to running it alone, which is why this is a pure
@@ -812,7 +805,7 @@ def run_grid_loop(
     poison the pool. SIGINT/SIGTERM/budget: stop SUBMITTING new futures,
     let in-flight ones finish, then return. SIGINT/SIGTERM additionally
     writes a `status: interrupted` row for every run still in flight AT THE
-    MOMENT the signal is caught (D44, comments.txt §20.4): a killed pass
+    MOMENT the signal is caught: a killed pass
     previously left completed-but-uncommitted training invisible to the
     manifest, because the graceful "let it finish" path never got the chance
     to run. A run that does go on to finish normally after that still gets
@@ -821,7 +814,7 @@ def run_grid_loop(
     happens."""
     global _ACTIVE_LOOP_STATE
     # Read once here rather than per row: it is a property of the machine, and
-    # both the normal and the interrupted (D44) row paths spread this dict.
+    # both the normal and the interrupted row paths spread this dict.
     extra_rec_fields = {**gpu_device_rec(), **(extra_rec_fields or {})}
     pending = [r for r in runs if r["run_id"] not in completed]
     try:
@@ -860,7 +853,7 @@ def run_grid_loop(
                         in_flight_mib = sum(_run_mib(r, mem_cfg) for r, _, _ in in_flight.values())
                         headroom = gpu_budget_mib - in_flight_mib
                         # Two independent accounts of the same card, and the candidate
-                        # must fit BOTH (D38/D39/D40 and comments.txt §23.1). The model
+                        # must fit BOTH. The model
                         # covers what an in-flight run has not allocated yet; the reading
                         # covers what anything on the card is holding that the model does
                         # not know about -- a worker's retained CUDA context, another
@@ -927,29 +920,29 @@ def main(argv=None) -> int:
                      help="compute tier (default: full, the 150k-step results tier the study uses)")
     ap.add_argument("--scaffold", action="store_true", help="force the synthetic stub (no deps)")
     ap.add_argument("--local-learning", action="store_true",
-                     help="also enumerate the 4 Extended local-learning cells (M**L, §6.3)")
+                     help="also enumerate the 4 Extended local-learning cells (M**L)")
     ap.add_argument("--cells", type=str, default=None,
-                     help="comments.txt §18.5: comma-separated model_ids to restrict the grid to, e.g. "
+                     help="comma-separated model_ids to restrict the grid to, e.g. "
                           "M00000,M01111. Default: every Core cell. The campaign runs all 15 under SUP "
                           "but only the 7 S=0 cells under RL, plus an 8-cell S=1 failure arm at 2 seeds. "
                           "An unknown model_id is an error, not an empty grid.")
     ap.add_argument("--workers", type=int, default=1,
-                     help="§12.3: concurrent training processes (ProcessPoolExecutor, one run per "
+                     help="concurrent training processes (ProcessPoolExecutor, one run per "
                           "process). The historical N=8 measured 5.9x aggregate throughput for a 1.36x "
-                          "per-process slowdown (Appendix A, 12.3 RESULT) benchmarked one small cell "
+                          "per-process slowdown, but benchmarked one small cell "
                           "replicated eight ways and does NOT generalise to this battery's real mix -- "
-                          "`--workers 8` OOM'd 25 minutes into the real launch (D38). N=8 is still the "
-                          "current recommendation (comments.txt §21.3/§21.4), but on the strength of "
-                          "D49's direct memory probe, not this throughput number. `--gpu-budget-mib` is "
+                          "`--workers 8` ran out of GPU memory 25 minutes into the real launch. N=8 is "
+                          "still the current recommendation, but on the strength of the direct per-cell "
+                          "memory probe, not this throughput number. `--gpu-budget-mib` is "
                           "what actually gates concurrent memory; keep `--workers` FIXED for a whole "
                           "stage since wall_s_to_*/joules_to_* are not comparable across rows with "
-                          "different `workers` (every manifest row records it, D51).")
+                          "different `workers` (every manifest row records it).")
     ap.add_argument("--gpu-budget-mib", type=int, default=DEFAULT_GPU_BUDGET_MIB,
-                     help="D38/D41: cap on estimated concurrent GPU memory (MiB) across in-flight runs, "
+                     help="cap on estimated concurrent GPU memory (MiB) across in-flight runs, "
                           "estimated per cell by `_run_mib` from the resolved config (S=1 plastic cells "
                           "~3538 MiB, S=1 non-plastic/S=0 ~500-1796 MiB -- see `_run_mib`'s comments, not "
                           "the flat 6200/900 MiB pair this help text used to cite; those are now the "
-                          "`_LEGACY_MIB` scaffold-only fallback). D49 (comments.txt §21.1) measured every "
+                          "`_LEGACY_MIB` scaffold-only fallback). The memory probe measured every "
                           "real cell at 19-61%% of its `_run_mib` prediction, so this default is "
                           "conservative on this GPU as of 2026-08-07. A run that would exceed the budget "
                           "waits for one in-flight run to finish before submitting, so `--workers` is a "
@@ -970,11 +963,11 @@ def main(argv=None) -> int:
     ap.add_argument("--flat-control", choices=sorted(FLAT_CONTROLS),
                     help="enumerate one width/connectivity control for M00000 and M00010 under SUP")
     ap.add_argument("--supervision", type=str, required=True, choices=["SUP", "RL"],
-                     help="comments.txt §16 item 16.4 / advisor.md D24: the study's two preregistered "
+                     help="the study's two preregistered "
                           "training signals. Required, with no default, so the battery cannot launch "
                           "under an implicit choice -- `CELLS` carry no `supervision` key, so an "
                           "omitted flag used to fall through to config.yaml's `train.supervision: "
-                          "legacy`, a pre-Phase-7 hybrid that is not one of this study's levels. "
+                          "legacy`, an earlier hybrid that is not one of this study's levels. "
                           "'legacy' is deliberately not an allowed choice here.")
     args = ap.parse_args(argv)
 
@@ -1015,8 +1008,8 @@ def main(argv=None) -> int:
             raise
 
     # The full campaign has two independent limits: a fixed analysis budget
-    # shared by every cell, and a larger ceiling used only while Gate A is
-    # still unconfirmed. Pilots and short development tiers pass their own
+    # shared by every cell, and a larger ceiling used only while a run has not
+    # yet met the inclusion criterion. Pilots and short development tiers pass their own
     # explicit step counts and do not inherit the campaign extension.
     gates_cfg = full_cfg.get("gates") or {}
     gate_b = gates_cfg.get("max_steps") if args.tier == "full" else None
@@ -1058,7 +1051,7 @@ def main(argv=None) -> int:
         # Audit fix L1: reuse the `yaml` module imported above rather than
         # re-importing; the JSON fallback below is for a write/serialize
         # failure only, not a missing dependency (already handled above).
-        # Namespaced by supervision for the same reason the run_id is (D32):
+        # Namespaced by supervision for the same reason the run_id is:
         # the two passes resolve to DIFFERENT configs and different
         # `config_hash`es, and one file cannot be the audit trail for both --
         # whichever pass ran last would leave the other pass's manifest rows

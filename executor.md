@@ -7841,3 +7841,36 @@ Acceptance:
 - `wm_dynamics/bin/python -m pytest -q tests/test_robustness.py` exited 0
   (7 tests).
 - No training was launched; both conditions are replay of saved checkpoints.
+
+### 2026-09-17 — the analysis pass covers every trained arm, not just the battery
+
+The post-training run list matched a five-bit cell selector exactly, so every
+run carrying an arm tag was silently outside it. That is the whole reason the
+control and extension arms have checkpoints but no alignment estimate: the
+replay pass that writes their activity logs never enumerated them.
+
+A cell selector is now five arm bits or the local-learning short form,
+optionally carrying an arm tag, and a run qualifies when its id is exactly
+that selector, its training signal and its seed. The structural rule is what
+does the excluding: a run trained to a different duration, or under the
+earlier hybrid signal, does not match and stays out.
+
+Coverage goes from 192 to 392 completed runs:
+
+    battery 192, local-learning 32, memory-demand 24, and 16 each of the
+    rate substrates (ei, dynsyn, lowrank) and the width and connectivity
+    controls (local289, local128, random128, dense289, local289native,
+    random289)
+
+26 runs remain outside it, all deliberately: named pilots, the hidden-width
+capacity probes that carry no training signal, and the runs under the earlier
+hybrid signal. The 64 continuations now training match the new rule and will
+be picked up without a further change.
+
+Acceptance:
+
+    PYTHONPATH=$PWD python scripts/list_active_analysis_runs.py | wc -l
+    392
+
+    python -m pytest -q tests/test_run_coverage.py
+    3 passed, exit 0

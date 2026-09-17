@@ -31,11 +31,8 @@ printf '2. replay and analysis     %s/%s done' "$shards" "$listed"
 [ "$shards" -ge "$listed" ] && printf '   [done]'
 printf '\n\n'
 
-streams=$(pgrep -fc "run_continuations\.py --models" || true)
-if [ "${streams:-0}" -gt 0 ]; then
-    echo "running: continuation training ($streams streams)"
-elif pgrep -f analysis.sh > /dev/null; then
-    echo "running: replay and analysis"
+if [ -f logs/current.pid ] && kill -0 "$(cat logs/current.pid)" 2>/dev/null; then
+    echo "running: $(cat logs/current.name 2>/dev/null || echo job) (pid $(cat logs/current.pid))"
 else
     echo "running: nothing"
 fi

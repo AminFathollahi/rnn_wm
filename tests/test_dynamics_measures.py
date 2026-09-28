@@ -105,6 +105,47 @@ def test_standardized_persistence_separates_elevated_from_flat_units():
     assert index[:6].min() > index[6:].max()
 
 
+def test_standardized_persistence_bounds_saturated_units():
+    """Saturated units sit at a fixed point during maintenance with an
+    across-trial SD orders of magnitude below the rest of the population.
+    Dividing by that SD is what put the population mean in the hundreds,
+    so the exactly-constant case, the near-constant case (SD just above any
+    validity threshold) and the population mean are all pinned here."""
+    from brainalign_wm.analysis.persistence import standardized_persistence_index
+
+    maintain, baseline, labels = _persistence_data(seed=1)
+    rng = np.random.RandomState(2)
+
+    exactly_constant = maintain.copy()
+    exactly_constant[-1, :] = 0.5
+    index_exact = standardized_persistence_index(exactly_constant, baseline, labels, seed=0)
+    assert np.isfinite(index_exact[-1])
+    assert abs(index_exact[-1]) < 50
+
+    # A whole saturated sub-population, the regime a trained recurrent core
+    # is actually in: every unit clamped at the activation bound well away
+    # from its own fixation baseline.
+    saturated = maintain.copy()
+    saturated_baseline = baseline.copy()
+    saturated[6:, :] = 1.0 + rng.randn(6, maintain.shape[1]) * 1e-6
+    saturated_baseline[6:] = -1.0
+    index = standardized_persistence_index(saturated, saturated_baseline, labels, seed=0)
+    unfloored = (
+        saturated.mean(axis=1) - saturated_baseline
+    ) / saturated.std(axis=1, ddof=1)
+    assert abs(unfloored).max() > 1e5
+    assert np.isfinite(index).all()
+    assert abs(index).max() < 50
+    assert abs(np.mean(index)) < 50
+
+    # Scale invariance must survive the floor: the denominator rescales
+    # with the data, so a 10x rescaling leaves every index unchanged.
+    rescaled = standardized_persistence_index(
+        saturated * 10.0, saturated_baseline * 10.0, labels, seed=0
+    )
+    assert np.allclose(index, rescaled)
+
+
 def test_standardized_persistence_selection_is_cross_validated():
     from brainalign_wm.analysis.persistence import standardized_persistence_index
 

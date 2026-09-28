@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 
 from brainalign_wm.config import get_path
@@ -234,7 +235,8 @@ def replay_session(
     gate_width = _gate_width(S, m)
     t = t0
 
-    for trial_idx, row in enumerate(session_trials.itertuples()):
+    for position, row in enumerate(session_trials.itertuples()):
+        trial_idx = int(getattr(row, "source_trial_index", position))
         held_items = [int(x) for x in row.held_items if int(x) != 0]
         probe_item = int(row.probe_item)
         load = len(held_items) or int(row.load)
@@ -518,10 +520,11 @@ def generate_activity_log_reflection_shuffled(
             session_trials = trials[trials.session == session_id]
             if len(session_trials) == 0:
                 continue
+            indices = session_trials.get("source_trial_index", pd.Series(range(len(session_trials)), index=session_trials.index))
             this_session_shuffled = {
-                trial_idx: shuffled_R[(session_id, trial_idx)]
-                for trial_idx in range(len(session_trials))
-                if (session_id, trial_idx) in shuffled_R
+                int(trial_idx): shuffled_R[(session_id, int(trial_idx))]
+                for trial_idx in indices
+                if (session_id, int(trial_idx)) in shuffled_R
             }
             t = replay_session(
                 front_end, core, heads, reflective_gate, S, M, P, session_trials,

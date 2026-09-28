@@ -108,6 +108,12 @@ class ParquetLogWriter:
     def __init__(self, path: str | Path, batch_size: int = 2048):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A final Parquet footer is written only when the writer closes. Write
+        # to a sibling temporary file and atomically publish it on success so
+        # an interrupted replay never makes a truncated log look complete to
+        # the post-training analysis runner.
+        self._temporary_path = self.path.with_name(f".{self.path.name}.partial")
+        self._temporary_path.unlink(missing_ok=True)
         self.batch_size = batch_size
         self._buffer: list[dict] = []
         self._writer: Optional[pq.ParquetWriter] = None
@@ -122,21 +128,23 @@ class ParquetLogWriter:
             return
         table = pa.Table.from_pylist(self._buffer, schema=ARROW_SCHEMA)
         if self._writer is None:
-            self._writer = pq.ParquetWriter(self.path, ARROW_SCHEMA)
+            self._writer = pq.ParquetWriter(self._temporary_path, ARROW_SCHEMA)
         self._writer.write_table(table)
         self._buffer.clear()
 
-    def close(self) -> None:
+    def close(self, commit: bool = True) -> None:
         self._flush()
         if self._writer is not None:
             self._writer.close()
             self._writer = None
+            if commit:
+                self._temporary_path.replace(self.path)
 
     def __enter__(self) -> "ParquetLogWriter":
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.close()
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close(commit=exc_type is None)
 
 
 def read_log(path: str | Path):

@@ -68,6 +68,18 @@ def _decode(x) -> str:
     return x.decode() if isinstance(x, bytes) else str(x)
 
 
+def _recording_key(identifier: str) -> tuple[str, str]:
+    parts = identifier.split("_")
+    patient = next((part for part in parts if part.startswith("P")), parts[-1])
+    session = next((part for part in parts if part.startswith("ses-")), identifier)
+    return patient, session
+
+
+def _session_file_key(path: Path) -> tuple[str, str]:
+    with h5py.File(path, "r") as h:
+        return _recording_key(_decode(h["identifier"][()]))
+
+
 def find_wm_sessions(dataset_root: Path) -> list[Path]:
     """Working-memory sessions are identified by the presence of a `loads`
     column on a candidate trials group (`TRIALS_GROUP_CANDIDATES`)."""
@@ -82,6 +94,36 @@ def find_wm_sessions(dataset_root: Path) -> list[Path]:
     return wm
 
 
+def _select_session_files(
+    data_root: Path,
+    datasets: tuple[str, ...],
+    max_sessions_per_dataset: Optional[int],
+) -> list[tuple[str, Path]]:
+    selected = []
+    for dataset in dict.fromkeys(datasets):
+        root = data_root / dataset
+        if not root.exists():
+            continue
+        paths = find_wm_sessions(root)
+        if max_sessions_per_dataset:
+            paths = paths[:max_sessions_per_dataset]
+        selected.extend((dataset, path) for path in paths)
+
+    if not {"000673", "001187"}.issubset(datasets):
+        return selected
+
+    keys_1187 = {
+        _session_file_key(path)
+        for dataset, path in selected
+        if dataset == "001187"
+    }
+    return [
+        (dataset, path)
+        for dataset, path in selected
+        if dataset != "000673" or _session_file_key(path) not in keys_1187
+    ]
+
+
 @dataclass
 class _SessionData:
     session_id: str
@@ -90,6 +132,7 @@ class _SessionData:
     unit_ids: list[str]
     unit_region: dict
     spikes: dict
+    excluded_trials: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # Of the three source papers (Kyzar et al. 2024 for 000469, Daume et al.
@@ -130,7 +173,7 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
     with h5py.File(path, "r") as h:
         identifier = _decode(h["identifier"][()])
         session_id = f"{dataset}-{identifier}"
-        patient_id = identifier.split("_")[-1] if "_" in identifier else identifier
+        patient_id, _ = _recording_key(identifier)
 
         tr = h[_trials_group(h)]
         n_trials = tr["id"].shape[0]
@@ -141,6 +184,7 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
             rows.append(
                 {
                     "trial_id": f"{session_id}#t{i}",
+                    "source_trial_index": i,
                     "session": session_id,
                     "load": int(tr["loads"][i]),
                     "held_items": held,
@@ -156,6 +200,10 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
                 }
             )
         trials_df = pd.DataFrame(rows)
+        duration = trials_df["t_probe"] - trials_df["t_maintain"]
+        valid = np.isfinite(duration) & duration.gt(0)
+        excluded = trials_df.loc[~valid].assign(exclusion_reason="nonpositive_maintenance_duration")
+        trials_df = trials_df.loc[valid].reset_index(drop=True)
 
         electrode_regions = [normalize_region(_decode(x)) for x in
                               h["general/extracellular_ephys/electrodes/location"][:]]
@@ -177,6 +225,7 @@ def _load_session(path: Path, dataset: str) -> _SessionData:
     return _SessionData(
         session_id=session_id, patient_id=patient_id, trials=trials_df,
         unit_ids=unit_ids, unit_region=unit_region, spikes=spikes,
+        excluded_trials=excluded.reset_index(drop=True),
     )
 
 
@@ -201,20 +250,14 @@ class DandiSternbergTierA:
         self._sessions: dict[str, _SessionData] = {}
         self._trials_cache: Optional[pd.DataFrame] = None
         self._rate_cache: dict[tuple, np.ndarray] = {}  # (uid, epoch) -> [n_all_trials, n_bins], at self.bin_ms only
-        for ds in datasets:
-            ds_root = self.data_root / ds
-            if not ds_root.exists():
+        files = _select_session_files(self.data_root, datasets, max_sessions_per_dataset)
+        for ds, path in files:
+            sess = _load_session(path, ds)
+            if not self._session_passes_accuracy_qc(sess):
                 continue
-            wm_files = find_wm_sessions(ds_root)
-            if max_sessions_per_dataset:
-                wm_files = wm_files[:max_sessions_per_dataset]
-            for f in wm_files:
-                sess = _load_session(f, ds)
-                if not self._session_passes_accuracy_qc(sess):
-                    continue
-                self._apply_firing_qc(sess)
-                if sess.unit_ids:
-                    self._sessions[sess.session_id] = sess
+            self._apply_firing_qc(sess)
+            if sess.unit_ids:
+                self._sessions[sess.session_id] = sess
         if not self._sessions:
             raise FileNotFoundError(
                 f"no WM sessions found under {self.data_root} for datasets {datasets} "
@@ -406,6 +449,12 @@ class DandiSternbergTierA:
     def patient_of(self, session: str) -> str:
         return self._sessions[session].patient_id
 
+    def excluded_trials(self) -> pd.DataFrame:
+        frames = [session.excluded_trials for session in self._sessions.values() if len(session.excluded_trials)]
+        if not frames:
+            return pd.DataFrame(columns=[*self.trials().columns, "exclusion_reason"])
+        return pd.concat(frames, ignore_index=True)
+
 
 def cache_stimulus_features(cfg: dict) -> None:
     """Precompute and cache ResNet features for each dataset's embedded
@@ -437,8 +486,6 @@ def cache_stimulus_features(cfg: dict) -> None:
     PicIDs (self-validating against `intervals/trials`, not a hardcoded
     per-dataset branch, in case this varies by session rather than by
     dataset)."""
-    import numpy as np
-
     from brainalign_wm.encoders.resnet18_encoder import encode_images
 
     paths = cfg["paths"]
@@ -447,40 +494,24 @@ def cache_stimulus_features(cfg: dict) -> None:
     out_dir = Path(paths["feature_cache"]) / "dataset_stimuli"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for ds in neural_cfg["datasets_tierA"]:
+    datasets = tuple(dict.fromkeys([
+        *neural_cfg.get("datasets_tierA", ()),
+        *neural_cfg.get("datasets_tierB", ()),
+    ]))
+    for ds in datasets:
+        if ds not in COLUMN_MAPS:
+            continue
         ds_root = data_root / ds
         if not ds_root.exists():
             continue
-        colmap = COLUMN_MAPS[ds]
         for f in find_wm_sessions(ds_root):
             with h5py.File(f, "r") as h:
-                if "stimulus/templates/StimulusTemplates" not in h:
-                    continue
-                grp = h["stimulus/templates/StimulusTemplates"]
                 identifier = _decode(h["identifier"][()])
                 session_id = f"{ds}-{identifier}"
-
-                direct: dict[str, np.ndarray] = {}
-                for key in grp:
-                    if not key.startswith("image_"):
-                        continue
-                    direct[key.split("_", 1)[1]] = np.asarray(grp[key][:], dtype=np.uint8)
-
-                positional: dict[str, np.ndarray] = {}
-                if "order_of_images" in grp:
-                    for i, ref in enumerate(grp["order_of_images"][:]):
-                        real_pic_id = h[ref].name.rsplit("_", 1)[-1]
-                        if real_pic_id in direct:
-                            positional[str(i + 1)] = direct[real_pic_id]
-
-                tr = h["intervals/trials"]
-                real_pids = set()
-                if "loads" in tr:
-                    for c in colmap["enc_cols"] + [colmap["probe_col"]]:
-                        real_pids.update(str(int(x)) for x in tr[c][:] if int(x) != 0)
-                n_direct_hits = sum(1 for pid in real_pids if pid in direct)
-                n_positional_hits = sum(1 for pid in real_pids if pid in positional)
-                pic_to_image = positional if n_positional_hits > n_direct_hits else direct
+                out_path = out_dir / f"{session_id}.npz"
+                if _feature_cache_covers(out_path, _trial_picture_ids(h, ds)):
+                    continue
+                pic_to_image = _resolve_stimulus_images(h, ds)
 
                 images, pic_ids = [], []
                 for pic_id, img in pic_to_image.items():
@@ -489,5 +520,58 @@ def cache_stimulus_features(cfg: dict) -> None:
                 if not images:
                     continue
                 feats = encode_images(images)
-                out_path = out_dir / f"{session_id}.npz"
-                np.savez(out_path, pic_ids=np.array(pic_ids), features=feats)
+                partial = out_path.with_suffix(".npz.partial")
+                with partial.open("wb") as stream:
+                    np.savez(stream, pic_ids=np.array(pic_ids), features=feats)
+                partial.replace(out_path)
+
+
+def _trial_picture_ids(h: h5py.File, dataset: str) -> set[str]:
+    trial_path = _trials_group(h)
+    if trial_path is None:
+        return set()
+    trials = h[trial_path]
+    columns = COLUMN_MAPS[dataset]
+    return {
+        str(int(value))
+        for column in [*columns["enc_cols"], columns["probe_col"]]
+        for value in trials[column][:]
+        if int(value) != 0
+    }
+
+
+def _feature_cache_covers(path: Path, pic_ids: set[str]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with np.load(path) as data:
+            cached = {str(value) for value in data["pic_ids"]}
+            return pic_ids.issubset(cached) and len(data["features"]) == len(data["pic_ids"])
+    except (KeyError, OSError, ValueError):
+        return False
+
+
+def _resolve_stimulus_images(h: h5py.File, dataset: str) -> dict[str, np.ndarray]:
+    template_path = "stimulus/templates/StimulusTemplates"
+    trial_path = _trials_group(h)
+    if template_path not in h or trial_path is None:
+        return {}
+
+    grp = h[template_path]
+    direct = {
+        key.split("_", 1)[1]: np.asarray(grp[key][:], dtype=np.uint8)
+        for key in grp
+        if key.startswith("image_")
+    }
+    positional = {}
+    if "order_of_images" in grp:
+        for index, ref in enumerate(grp["order_of_images"][:], start=1):
+            image_id = h[ref].name.rsplit("_", 1)[-1]
+            if image_id in direct:
+                positional[str(index)] = direct[image_id]
+
+    pic_ids = _trial_picture_ids(h, dataset)
+    direct_hits = len(pic_ids.intersection(direct))
+    positional_hits = len(pic_ids.intersection(positional))
+    selected = positional if positional_hits > direct_hits else direct
+    return {pic_id: selected[pic_id] for pic_id in sorted(pic_ids) if pic_id in selected}

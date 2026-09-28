@@ -37,6 +37,11 @@ def test_contract_validates(adapter):
     validate_dataset(adapter, region=None)
 
 
+def test_nonpositive_maintenance_windows_are_excluded(adapter):
+    trials = adapter.trials()
+    assert ((trials["t_probe"] - trials["t_maintain"]) > 0).all()
+
+
 def test_regions_include_mtl_and_mfc(adapter):
     regs = set(adapter.regions())
     mtl_hit = regs & {"hippocampus", "amygdala", "entorhinal"}

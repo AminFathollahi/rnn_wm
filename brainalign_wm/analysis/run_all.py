@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,33 @@ MIN_SHARED_CONDITIONS = 8
 # (`align_one_run`) -- a region with too few units/sessions reports
 # "insufficient_shared_conditions", never a fabricated score.
 REGIONS = [None, "MTL", "MFC", "hippocampus", "amygdala", "dACC", "preSMA", "vmPFC"]
+
+# RDM estimation noise falls as a population gets wider, so the worker
+# (196 units), the flat core (128) and the manager (24) cannot be compared
+# at their own widths. Every population is therefore also scored at each
+# of these target widths that is narrower than it, by averaging repeated
+# random unit subsamples; a contrast then reads both of its populations at
+# their common width. These two targets are the flat core's width and the
+# manager's width, which are the only common widths the population
+# contrasts need.
+POPULATION_MATCH_WIDTHS = (24, 128)
+POPULATION_MATCH_DRAWS = 4
+
+
+def _native_width_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rows scored at a population's own width, dropping the unit-count-
+    matched duplicates that `POPULATION_MATCH_WIDTHS` adds."""
+    if "match_target_units" not in frame.columns:
+        return frame
+    return frame[frame["match_target_units"].isna()]
+
+
+def _match_units_column(frame: pd.DataFrame) -> pd.Series:
+    """Label for the width a row was scored at: the matched target, or
+    `"native"` for a population scored at its own width."""
+    if "match_target_units" not in frame.columns:
+        return pd.Series("native", index=frame.index)
+    return frame["match_target_units"].apply(lambda v: "native" if pd.isna(v) else str(int(v)))
 
 
 def _filter_min_trials(patterns: np.ndarray, labels: list[tuple], min_count: int) -> tuple[np.ndarray, list[tuple]]:
@@ -201,7 +229,7 @@ def _coarse_condition(row) -> tuple:
 
 
 def _model_epoch_patterns(
-    df: pd.DataFrame, epoch: str, condition_fn, subpop: str = "all",
+    df: pd.DataFrame, epoch: str, condition_fn, subpop: str = "all", unit_idx: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[tuple]]:
     """df: one run's activity log (optionally pre-filtered to one session).
     Returns per-trial epoch-mean activity ([n_trials, n_units]) and matching
@@ -219,17 +247,19 @@ def _model_epoch_patterns(
     function; the probe-epoch pooled path passes the full multi-session
     log directly.
 
-    `subpop` (comments.txt §20.2, H1's worker<->MTL / manager<->MFC
-    dissociation): `"all"` is today's behaviour (h_flat alone, or
-    h_worker concatenated with h_manager). `"worker"`/`"manager"` restrict
-    a hierarchical log's model side to that population alone -- required to
-    distinguish "the manager aligns to MFC" from "the manager aligns to
-    everything", which a pooled vector can never distinguish. A FLAT log
-    (`h_flat` populated) has no subpopulations, so any subpop other than
-    `"all"` returns the same empty sentinel as no data at this epoch;
-    callers must record that as `status: not_applicable`, never as a
-    fabricated 0.0 -- a flat network not having a manager is not the same
-    fact as its manager not aligning to anything."""
+    `subpop`: `"all"` is h_flat alone, or h_worker concatenated with
+    h_manager. `"worker"`/`"manager"` restrict a hierarchical log's model
+    side to that population alone -- required to distinguish "the manager
+    aligns to MFC" from "the manager aligns to everything", which a pooled
+    vector can never distinguish. A FLAT log (`h_flat` populated) has no
+    subpopulations, so any subpop other than `"all"` returns the same empty
+    sentinel as no data at this epoch; callers must record that as
+    `status: not_applicable`, never as a fabricated 0.0.
+
+    `unit_idx`, when given, selects a column subset of the assembled
+    population vector -- unit-count-matching a wide population against a
+    narrower one before they are contrasted (RDM estimation noise scales
+    with population size)."""
     sub = df[df.epoch == epoch]
     if len(sub) == 0:
         return np.zeros((0, 0)), []
@@ -249,6 +279,8 @@ def _model_epoch_patterns(
             vec = np.concatenate(
                 [np.stack(g["h_worker"].to_numpy()).mean(axis=0), np.stack(g["h_manager"].to_numpy()).mean(axis=0)]
             )
+        if unit_idx is not None:
+            vec = vec[unit_idx]
         row0 = g.iloc[0]
         patterns.append(vec)
         labels.append(condition_fn(row0))
@@ -258,6 +290,15 @@ def _model_epoch_patterns(
 def _shared_conditions_or_none(a_conds: list, b_conds: list, floor: int = MIN_SHARED_CONDITIONS) -> list:
     shared = sorted(set(a_conds) & set(b_conds), key=str)
     return shared if len(shared) >= floor else None
+
+
+def _shared_conditions_for_load(
+    model_conditions: list, neural_conditions: list, load_value: int | None, floor: int,
+) -> list | None:
+    if load_value is not None:
+        model_conditions = [condition for condition in model_conditions if int(condition[0]) == load_value]
+        neural_conditions = [condition for condition in neural_conditions if int(condition[0]) == load_value]
+    return _shared_conditions_or_none(model_conditions, neural_conditions, floor=floor)
 
 
 # Maintenance-epoch achievable condition space varies by which schema a
@@ -289,9 +330,20 @@ def _n_valid_pairs(rdm_a: np.ndarray, rdm_b: np.ndarray) -> int:
     return int(np.sum(~np.isnan(va) & ~np.isnan(vb)))
 
 
+def _valid_model_trials(model_df: pd.DataFrame, dandi_data) -> pd.DataFrame:
+    trials = dandi_data.trials()
+    if "source_trial_index" not in trials or "session" not in model_df or "trial_id" not in model_df:
+        return model_df
+    valid = set(zip(trials["session"], trials["source_trial_index"].astype(int)))
+    keep = [(session, int(trial_id)) in valid for session, trial_id in zip(model_df["session"], model_df["trial_id"])]
+    return model_df.loc[keep]
+
+
 def _maintenance_alignment_for_run(
     run_id: str, model_df: pd.DataFrame, dandi_data, region, n_permutations: int = 0, permutation_seed: int = 0,
     subpops: tuple[str, ...] = ("all",),
+    match_widths: tuple[int, ...] = (), match_n_draws: int = 1, match_seed: int = 0,
+    load_value: int | None = None, model_rdm_cache: dict | None = None,
 ) -> list[dict]:
     """Per-session maintenance-epoch alignment, using real identity or real
     category per session, stratified by load (see
@@ -301,7 +353,7 @@ def _maintenance_alignment_for_run(
     (session, subpop) with usable data (both model replay coverage and
     neural trials for that session).
 
-    `subpops` (comments.txt §20.2): the NEURAL side (the `ds.rates()`
+    `subpops`: the NEURAL side (the `ds.rates()`
     fetch and `within_session_noise_ceiling`) depends only on session and
     region, not on which model subpopulation it's being compared against,
     so it is computed ONCE per session here regardless of `len(subpops)`;
@@ -328,22 +380,51 @@ def _maintenance_alignment_for_run(
     rather than inflating one but not the other. The (expensive) neural
     `ds.rates()` fetch happens once per session regardless of
     `n_permutations` (`rsa._session_trial_patterns`), not once per draw.
-    Permutations are computed for the `"all"` subpop only (§20.2.c)."""
+    Permutations are computed for the `"all"` subpop at its native width only.
+
+    `match_widths` adds, alongside each population's native-width row, one
+    row per listed target width narrower than that population -- so two
+    populations of different size can be contrasted at a common width
+    instead of at widths whose RDM estimation noise differs. The model side
+    is rebuilt `match_n_draws` times from independent random column subsets
+    (the already-fetched neural side is reused across draws, since it does
+    not depend on the model's unit subset) and the raw alignments averaged.
+    Matched rows carry `match_native_units`/`match_target_units`; the
+    native-width row leaves both unset, so an empty `match_widths` produces
+    exactly the original output. `load_value` selects one load block from
+    the same stratified RDM; the default retains every block.
+
+    The model side depends on the session and the unit subset but not on
+    the region, so passing the same `model_rdm_cache` dict across a run's
+    regions computes each model RDM once instead of once per region."""
     from brainalign_wm.analysis.rsa import compare_rdms, within_session_noise_ceiling
     from brainalign_wm.analysis import rsa as rsa_mod
     from brainalign_wm.analysis.rdm import stratified_crossnobis_rdm
 
-    def _model_side(sess_df, condition_fn, subpop):
-        patterns, labels = _model_epoch_patterns(sess_df, "maintain", condition_fn, subpop=subpop)
+    cache = model_rdm_cache if model_rdm_cache is not None else {}
+
+    def _model_side(session_id, sess_df, condition_fn, subpop, unit_idx=None):
+        key = (session_id, subpop, None if unit_idx is None else unit_idx.tobytes())
+        if key in cache:
+            return cache[key]
+        patterns, labels = _model_epoch_patterns(sess_df, "maintain", condition_fn, subpop=subpop, unit_idx=unit_idx)
         patterns, labels = _filter_min_trials(patterns, labels, min_count=2)
-        if len(set(labels)) < 2:
-            return None
-        strata = [l[0] for l in labels]
-        conds_only = [l[1] for l in labels]
-        rdm, conds = stratified_crossnobis_rdm(patterns, conds_only, strata, n_folds=4, seed=0)
-        if rdm is None:
-            return None
-        return rdm, conds
+        result = None
+        if len(set(labels)) >= 2:
+            strata = [l[0] for l in labels]
+            conds_only = [l[1] for l in labels]
+            rdm, conds = stratified_crossnobis_rdm(patterns, conds_only, strata, n_folds=4, seed=0)
+            if rdm is not None:
+                result = (rdm, conds)
+        cache[key] = result
+        return result
+
+    def _population_width(session_id, sess_df, condition_fn, subpop):
+        key = (session_id, subpop, "width")
+        if key not in cache:
+            patterns, _ = _model_epoch_patterns(sess_df, "maintain", condition_fn, subpop=subpop)
+            cache[key] = patterns.shape[1] if patterns.size else 0
+        return cache[key]
 
     rows = []
     model_sessions = set(model_df["session"].unique()) if "session" in model_df.columns else set()
@@ -357,7 +438,7 @@ def _maintenance_alignment_for_run(
         maintain_sub = sess_df[sess_df.epoch == "maintain"]
         is_flat = len(maintain_sub) > 0 and maintain_sub["h_flat"].iloc[0] is not None
 
-        gate = _model_side(sess_df, condition_fn, "all")
+        gate = _model_side(session_id, sess_df, condition_fn, "all")
         if gate is None:
             continue  # pooled model side unusable; skip before the (expensive) neural fetch
 
@@ -374,47 +455,75 @@ def _maintenance_alignment_for_run(
             continue
         ceiling_lower, ceiling_upper = within_session_noise_ceiling(
             dandi_data, session_id, region, "maintain", dandi_data.bin_ms, condition_fn=condition_fn, stratified=True,
+            condition_filter=(
+                None if load_value is None else lambda condition: int(condition[0]) == load_value
+            ),
         )
 
         for subpop in subpops:
-            model_result = gate if subpop == "all" else _model_side(sess_df, condition_fn, subpop)
-            if model_result is None:
-                status = "not_applicable" if (subpop != "all" and is_flat) else "insufficient_shared_conditions"
-                rows.append({"run_id": run_id, "session": session_id, "region": region or "pooled",
-                              "subpop": subpop, "status": status})
-                continue
-            model_rdm, model_conds = model_result
-            shared = _shared_conditions_or_none(model_conds, neural_conds, floor=MIN_SHARED_CONDITIONS_MAINTENANCE)
-            if shared is None:
-                rows.append({"run_id": run_id, "session": session_id, "region": region or "pooled", "subpop": subpop,
-                              "status": "insufficient_shared_conditions", "n_shared_conditions": len(set(model_conds) & set(neural_conds))})
-                continue
-            m_idx = [model_conds.index(c) for c in shared]
-            n_idx = [neural_conds.index(c) for c in shared]
-            model_sub = model_rdm[np.ix_(m_idx, m_idx)]
-            neural_sub = neural_rdm[np.ix_(n_idx, n_idx)]
-            if _n_valid_pairs(model_sub, neural_sub) < MIN_VALID_PAIRS_MAINTENANCE:
-                rows.append({"run_id": run_id, "session": session_id, "region": region or "pooled", "subpop": subpop,
-                              "status": "insufficient_shared_conditions", "n_shared_conditions": len(shared)})
-                continue
-            raw = compare_rdms(model_sub, neural_sub)
-            row = {
-                "run_id": run_id, "session": session_id, "region": region or "pooled", "subpop": subpop,
-                "patient": dandi_data.patient_of(session_id), "status": "ok",
-                "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
-                "normalized_alignment": _norm(raw, ceiling_upper), "n_shared_conditions": len(shared),
-            }
-            if subpop == "all" and n_permutations > 0:
-                perm_raws = []
-                for p in range(n_permutations):
-                    neural_rdm_p, neural_conds_p = stratified_crossnobis_rdm(
-                        neural_data, neural_conds_only, neural_strata, n_folds=2, seed=0, permute_seed=permutation_seed + p,
-                    )
-                    if neural_rdm_p is None or neural_conds_p != neural_conds:
+            width = _population_width(session_id, sess_df, condition_fn, subpop) if match_widths else 0
+            variants: list[tuple[int | None, list[np.ndarray | None]]] = [(None, [None])]
+            for target in match_widths:
+                if width <= target:
+                    continue
+                draw_rng = np.random.default_rng((match_seed, target, zlib.crc32(session_id.encode())))
+                variants.append((
+                    target,
+                    [np.sort(draw_rng.choice(width, size=target, replace=False)) for _ in range(match_n_draws)],
+                ))
+
+            for target, unit_idx_draws in variants:
+                draw_raws, shared_len = [], None
+                for unit_idx in unit_idx_draws:
+                    model_result = gate if (subpop == "all" and unit_idx is None) else _model_side(session_id, sess_df, condition_fn, subpop, unit_idx=unit_idx)
+                    if model_result is None:
                         continue
-                    perm_raws.append(compare_rdms(model_sub, neural_rdm_p[np.ix_(n_idx, n_idx)]))
-                row["_perm_raw_alignments"] = perm_raws
-            rows.append(row)
+                    model_rdm, model_conds = model_result
+                    shared = _shared_conditions_for_load(
+                        model_conds, neural_conds, load_value, MIN_SHARED_CONDITIONS_MAINTENANCE,
+                    )
+                    if shared is None:
+                        continue
+                    m_idx = [model_conds.index(c) for c in shared]
+                    n_idx = [neural_conds.index(c) for c in shared]
+                    model_sub = model_rdm[np.ix_(m_idx, m_idx)]
+                    neural_sub = neural_rdm[np.ix_(n_idx, n_idx)]
+                    if _n_valid_pairs(model_sub, neural_sub) < MIN_VALID_PAIRS_MAINTENANCE:
+                        continue
+                    draw_raws.append(compare_rdms(model_sub, neural_sub))
+                    shared_len = len(shared)
+
+                if not draw_raws:
+                    is_not_applicable = subpop != "all" and is_flat
+                    status = "not_applicable" if is_not_applicable else "insufficient_shared_conditions"
+                    failed = {"run_id": run_id, "session": session_id, "region": region or "pooled",
+                              "subpop": subpop, "status": status}
+                    if target is not None:
+                        failed.update(match_native_units=width, match_target_units=target, match_n_draws_ok=0)
+                    rows.append(failed)
+                    continue
+                raw = float(np.mean(draw_raws))
+                row = {
+                    "run_id": run_id, "session": session_id, "region": region or "pooled", "subpop": subpop,
+                    "patient": dandi_data.patient_of(session_id), "status": "ok",
+                    "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
+                    "normalized_alignment": _norm(raw, ceiling_upper), "n_shared_conditions": shared_len,
+                }
+                if target is not None:
+                    row["match_native_units"] = width
+                    row["match_target_units"] = target
+                    row["match_n_draws_ok"] = len(draw_raws)
+                if subpop == "all" and target is None and n_permutations > 0:
+                    perm_raws = []
+                    for p in range(n_permutations):
+                        neural_rdm_p, neural_conds_p = stratified_crossnobis_rdm(
+                            neural_data, neural_conds_only, neural_strata, n_folds=2, seed=0, permute_seed=permutation_seed + p,
+                        )
+                        if neural_rdm_p is None or neural_conds_p != neural_conds:
+                            continue
+                        perm_raws.append(compare_rdms(model_sub, neural_rdm_p[np.ix_(n_idx, n_idx)]))
+                    row["_perm_raw_alignments"] = perm_raws
+                rows.append(row)
     return rows
 
 
@@ -460,6 +569,7 @@ def _probe_alignment_for_run(
     run_id: str, model_df: pd.DataFrame, dandi_data, region,
     epoch: str = "probe", conditions_to_use: list | None = None,
     return_rdms: bool = False, compute_ceiling: bool = True,
+    subpop: str = "all", unit_idx: np.ndarray | None = None,
 ) -> dict:
     """Pooled coarse-condition probe-epoch alignment.
 
@@ -471,15 +581,19 @@ def _probe_alignment_for_run(
     same conditions), `return_rdms` additionally returns the two
     shared-condition RDMs for variance partitioning, and `compute_ceiling`
     can skip the (expensive) resampled noise ceiling when only the raw
-    correlation is wanted."""
+    correlation is wanted. `subpop`/`unit_idx` restrict and unit-subsample
+    the model side exactly as `_model_epoch_patterns` does for maintenance;
+    a subpop unavailable on a flat run reports `status: not_applicable`."""
     from brainalign_wm.analysis.rdm import crossnobis_rdm
     from brainalign_wm.analysis.rsa import compare_rdms
     from brainalign_wm.analysis.pseudopopulation import pooled_condition_rdm, pooled_noise_ceiling
 
-    model_patterns, model_labels = _model_epoch_patterns(model_df, epoch, _coarse_condition)
+    model_patterns, model_labels = _model_epoch_patterns(model_df, epoch, _coarse_condition, subpop=subpop, unit_idx=unit_idx)
     model_patterns, model_labels = _filter_min_trials(model_patterns, model_labels, MIN_TRIALS_PER_CONDITION)
     if len(set(model_labels)) < 2:
-        return {"run_id": run_id, "region": region or "pooled", "status": "too_few_conditions"}
+        is_flat = len(model_df) > 0 and model_df["h_flat"].iloc[0] is not None
+        status = "not_applicable" if (subpop != "all" and is_flat) else "too_few_conditions"
+        return {"run_id": run_id, "region": region or "pooled", "subpop": subpop, "status": status}
     n_folds = max(2, min(4, min(model_labels.count(l) for l in set(model_labels))))
     model_rdm, model_conds = crossnobis_rdm(model_patterns, model_labels, n_folds=n_folds)
 
@@ -492,7 +606,7 @@ def _probe_alignment_for_run(
     else:
         shared = _shared_conditions_or_none(model_conds, neural_conds)
     if shared is None:
-        return {"run_id": run_id, "region": region or "pooled", "status": "insufficient_shared_conditions",
+        return {"run_id": run_id, "region": region or "pooled", "subpop": subpop, "status": "insufficient_shared_conditions",
                 "n_shared_conditions": len(set(model_conds) & set(neural_conds))}
     m_idx = [model_conds.index(c) for c in shared]
     n_idx = [neural_conds.index(c) for c in shared]
@@ -503,13 +617,54 @@ def _probe_alignment_for_run(
     else:
         ceiling_lower = ceiling_upper = float("nan")
     result = {
-        "run_id": run_id, "region": region or "pooled", "status": "ok",
+        "run_id": run_id, "region": region or "pooled", "subpop": subpop, "status": "ok",
         "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
         "normalized_alignment": _norm(raw, ceiling_upper), "n_shared_conditions": len(shared),
     }
     if return_rdms:
         result.update(model_rdm=model_sub, neural_rdm=neural_sub, conditions=shared)
     return result
+
+
+def _probe_alignment_matched(
+    run_id: str, model_df: pd.DataFrame, dandi_data, region, subpop: str,
+    target_units: int, n_draws: int = 1, seed: int = 0,
+) -> dict:
+    """Probe-epoch alignment for one population, unit-count-matched to
+    `target_units` by averaging repeated random column subsamples of the
+    model side -- the neural side and noise ceiling are computed once (first
+    draw) and reused, since they do not depend on the model's unit subset.
+    A no-op (single draw) when the population is already at or under the
+    target width."""
+    width_probe, _ = _model_epoch_patterns(model_df, "probe", _coarse_condition, subpop=subpop)
+    width = width_probe.shape[1] if width_probe.size else 0
+    if width == 0:
+        return {"run_id": run_id, "region": region or "pooled", "subpop": subpop, "status": "not_applicable"}
+    if width <= target_units:
+        return _probe_alignment_for_run(run_id, model_df, dandi_data, region, subpop=subpop)
+
+    rng = np.random.default_rng(seed)
+    first = _probe_alignment_for_run(
+        run_id, model_df, dandi_data, region, subpop=subpop,
+        unit_idx=np.sort(rng.choice(width, size=target_units, replace=False)),
+    )
+    if first.get("status") != "ok":
+        return first
+    raws, ceiling_upper, ceiling_lower = [first["raw_alignment"]], first["noise_ceiling_upper"], first["noise_ceiling_lower"]
+    for _ in range(n_draws - 1):
+        draw = _probe_alignment_for_run(
+            run_id, model_df, dandi_data, region, subpop=subpop, compute_ceiling=False,
+            unit_idx=np.sort(rng.choice(width, size=target_units, replace=False)),
+        )
+        if draw.get("status") == "ok":
+            raws.append(draw["raw_alignment"])
+    raw = float(np.mean(raws))
+    return {
+        "run_id": run_id, "region": region or "pooled", "subpop": subpop, "status": "ok",
+        "raw_alignment": raw, "noise_ceiling_upper": ceiling_upper, "noise_ceiling_lower": ceiling_lower,
+        "normalized_alignment": _norm(raw, ceiling_upper),
+        "match_native_units": width, "match_target_units": target_units, "match_n_draws_ok": len(raws),
+    }
 
 
 def _task_model_rdm_per_trial(labels: list) -> np.ndarray:
@@ -683,10 +838,12 @@ def _paired_trial_patterns(model_df: pd.DataFrame, dandi_data, session_id: str, 
     rates = dandi_data.rates(region, dandi_data.bin_ms, [epoch])  # [n_units, n_all_trials, n_bins]
     neural_by_pos = rates[:, global_idx, :].mean(axis=2).T  # [n_session_trials, n_units]
 
+    session_trials = all_trials.loc[global_idx]
+    trial_ids = session_trials.get("source_trial_index", pd.Series(range(len(global_idx)), index=session_trials.index))
     model_rows, neural_rows = [], []
-    for pos in range(len(global_idx)):
-        if pos in model_by_trial:
-            model_rows.append(model_by_trial[pos])
+    for pos, trial_id in enumerate(trial_ids):
+        if int(trial_id) in model_by_trial:
+            model_rows.append(model_by_trial[int(trial_id)])
             neural_rows.append(neural_by_pos[pos])
     if not model_rows:
         return np.zeros((0, 0)), np.zeros((0, 0))
@@ -710,6 +867,7 @@ def _encoding_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -
     from brainalign_wm.analysis.encoding import encoding_r2, noise_ceiling_normalized_r2
     from brainalign_wm.analysis.rsa import within_session_noise_ceiling
 
+    model_df = _valid_model_trials(model_df, dandi_data)
     rows = []
     model_sessions = set(model_df["session"].unique()) if "session" in model_df.columns else set()
     all_trials = dandi_data.trials()
@@ -811,6 +969,7 @@ def _dpca_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> li
     sides."""
     from brainalign_wm.analysis.dpca import dpca_components
 
+    model_df = _valid_model_trials(model_df, dandi_data)
     rows = []
     model_sessions = set(model_df["session"].unique()) if "session" in model_df.columns else set()
     all_trials = dandi_data.trials()
@@ -849,7 +1008,8 @@ def _dpca_for_run(run_id: str, model_df: pd.DataFrame, dandi_data, region) -> li
 
 def align_one_run(
     run_id: str, dandi_data, force_regenerate: bool = False, n_permutations: int = 0, permutation_seed: int = 0,
-    checkpoint: str = "ckpt.pt",
+    checkpoint: str = "ckpt.pt", match_widths: tuple[int, ...] = POPULATION_MATCH_WIDTHS,
+    match_n_draws: int = POPULATION_MATCH_DRAWS,
 ) -> dict:
     """Generates/loads the run's activity log and computes both the
     per-session maintenance alignment and the pooled probe alignment, at
@@ -861,32 +1021,61 @@ def align_one_run(
     MTL/MFC too would triple an already-expensive per-session permutation
     loop for numbers nothing downstream currently consumes.
 
-    §20.2 (D43/H1): for a HIERARCHICAL log's MTL/MFC rows, also requests the
-    `worker`/`manager` subpopulations -- the crossed cells (MTL x manager,
-    MFC x worker) are not optional, since without them "the manager aligns
-    to MFC" is indistinguishable from "the manager aligns to everything".
-    Pooled region and every FLAT run stay `subpop="all"` only, so the
-    pre-existing pooled DV is untouched."""
+    For a HIERARCHICAL log, every region (pooled included) also requests the
+    `worker`/`manager` subpopulations, for both maintenance and probe: the
+    per-population estimate is the primary alignment DV for a hierarchical
+    cell, not a restriction to MTL/MFC -- a flat run's own `subpop="all"`
+    result is what a population-level contrast pairs each of them against.
+    The pooled `subpop="all"` row -- the older, now-superseded whole-vector
+    DV -- is unaffected and still produced alongside them.
+
+    Every population is additionally scored at each `match_widths` target
+    narrower than itself, so that a contrast between two populations of
+    different width can be read at their common width; those rows carry
+    `match_target_units`, and `_native_width_rows` is what separates them
+    from the native-width rows. `match_n_draws=0` (or empty
+    `match_widths`) produces native-width rows only."""
     from brainalign_wm.training.generate_activity_logs import activity_log_path, generate_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
     log_path = activity_log_path(run_id, checkpoint)
     if force_regenerate or not log_path.exists():
         log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
-    df = read_log(log_path)
+    try:
+        df = read_log(log_path)
+    except Exception as exc:  # a power loss can leave a parquet file without its footer
+        print(f"[run_all] regenerating unreadable activity log {log_path} ({type(exc).__name__}: {exc})")
+        log_path = generate_activity_log(run_id, dandi_data, checkpoint_name=checkpoint)
+        df = read_log(log_path)
+    df = _valid_model_trials(df, dandi_data)
     is_hierarchical = len(df) > 0 and df["h_flat"].iloc[0] is None
 
     maintenance_rows, probe_rows = [], []
+    subpops = ("all", "worker", "manager") if is_hierarchical else ("all",)
+    if match_n_draws < 1:
+        match_widths = ()
+    model_rdm_cache: dict = {}
     for region in REGIONS:
         region_n_permutations = n_permutations if region is None else 0
-        subpops = ("all", "worker", "manager") if (region is not None and is_hierarchical) else ("all",)
         maintenance_rows.extend(
             _maintenance_alignment_for_run(
                 run_id, df, dandi_data, region, n_permutations=region_n_permutations,
                 permutation_seed=permutation_seed, subpops=subpops,
+                match_widths=match_widths, match_n_draws=match_n_draws,
+                model_rdm_cache=model_rdm_cache,
             )
         )
-        probe_rows.append(_probe_alignment_for_run(run_id, df, dandi_data, region))
+        for subpop in subpops:
+            probe_rows.append(_probe_alignment_for_run(run_id, df, dandi_data, region, subpop=subpop))
+            for target in match_widths:
+                matched = _probe_alignment_matched(
+                    run_id, df, dandi_data, region, subpop, target, n_draws=match_n_draws,
+                )
+                # `_probe_alignment_matched` falls through to the native-width
+                # estimate when the population is already at or under the
+                # target; that row is already in `probe_rows`.
+                if matched.get("match_target_units") == target:
+                    probe_rows.append(matched)
     return {"maintenance": maintenance_rows, "probe": probe_rows}
 
 
@@ -907,11 +1096,24 @@ def reflection_shuffle_lesion_for_run(run_id: str, dandi_data, checkpoint: str =
     if not normal_log.exists():
         return {"run_id": run_id, "status": "normal_log_missing"}
     normal_df = read_log(normal_log)
+    normal_df = _valid_model_trials(normal_df, dandi_data)
     normal_rows = _maintenance_alignment_for_run(run_id, normal_df, dandi_data, None)
     normal_ok = [r for r in normal_rows if r.get("status") == "ok"]
 
-    shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
-    shuffled_df = read_log(shuffled_path)
+    # The shuffled replay is a durable, deterministic artifact. Reuse it on
+    # restart just as `align_one_run` reuses the ordinary activity log; this
+    # prevents an interrupted secondary-analysis campaign from needlessly
+    # replaying every M=1 run before it can resume the statistical work.
+    shuffled_path = activity_log_path(f"{run_id}__reflection_shuffled", checkpoint)
+    if not shuffled_path.exists():
+        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
+    try:
+        shuffled_df = read_log(shuffled_path)
+    except Exception as exc:  # same atomic-replay recovery as the normal log
+        print(f"[run_all] regenerating unreadable reflection-shuffled log {shuffled_path} ({type(exc).__name__}: {exc})")
+        shuffled_path = generate_activity_log_reflection_shuffled(run_id, dandi_data, checkpoint_name=checkpoint)
+        shuffled_df = read_log(shuffled_path)
+    shuffled_df = _valid_model_trials(shuffled_df, dandi_data)
     shuffled_rows = _maintenance_alignment_for_run(run_id, shuffled_df, dandi_data, None)
     shuffled_ok = [r for r in shuffled_rows if r.get("status") == "ok"]
 
@@ -971,6 +1173,7 @@ def dynamics_and_persistence_for_run(run_id: str, model_df: pd.DataFrame, dandi_
     from brainalign_wm.analysis.dynamics_and_persistence import stability_index_for_session, persistence_index_for_session
     from brainalign_wm.analysis.stats import compare_distributions
 
+    model_df = _valid_model_trials(model_df, dandi_data)
     model_sessions = sorted(model_df["session"].unique())[:max_sessions] if "session" in model_df.columns else []
     stability_rows = []
     model_pers, neural_pers = [], []
@@ -1049,10 +1252,16 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
     from brainalign_wm.training.generate_activity_logs import generate_chance_activity_log
     from brainalign_wm.training.logging_schema import read_log
 
-    log_path = generate_chance_activity_log(model_id, seed, dandi_data)
-    df = read_log(log_path)
     run_id = f"{model_id}_s{seed}_chance"
-
+    log_path = get_path("activity_logs") / f"{run_id}.parquet"
+    if not log_path.exists():
+        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
+    try:
+        df = read_log(log_path)
+    except Exception as exc:
+        print(f"[run_all] regenerating unreadable chance log {log_path} ({type(exc).__name__}: {exc})")
+        log_path = generate_chance_activity_log(model_id, seed, dandi_data)
+        df = read_log(log_path)
     maintenance_rows = _maintenance_alignment_for_run(run_id, df, dandi_data, None)
     probe_row = _probe_alignment_for_run(run_id, df, dandi_data, None)
     maintenance_ok = [r for r in maintenance_rows if r.get("status") == "ok"]
@@ -1070,6 +1279,11 @@ def chance_control_check(model_id: str, seed: int, dandi_data) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    ap.add_argument(
+        "--out-dir", default=None,
+        help="directory for this invocation's CSV outputs. Inputs (manifest, checkpoints, and activity logs) "
+        "remain at their configured locations. Used by analysis.sh to keep one resumable result shard per run.",
+    )
     ap.add_argument("--regenerate", action="store_true", help="force regeneration of activity logs")
     ap.add_argument(
         "--runs", default=None,
@@ -1130,6 +1344,14 @@ def main(argv=None) -> int:
         help="alias for --n-permutations 0.",
     )
     ap.add_argument(
+        "--population-match-draws", type=int, default=POPULATION_MATCH_DRAWS,
+        help="random unit subsamples averaged per population per target width in "
+             f"{POPULATION_MATCH_WIDTHS}, so that populations of different width "
+             "(worker 196, flat core 128, manager 24) are contrasted at a common width. "
+             "These rows roughly double the per-run alignment cost; 0 writes native-width "
+             "rows only, and every downstream table reads the native-width rows regardless.",
+    )
+    ap.add_argument(
         "--skip-dv-relationship", action="store_true",
         help="skip the comments.txt §2.1 DV-relationship analysis (accuracy<->alignment<->organization "
              "correlations across ablation cells/seeds) -- needs results/network_properties.jsonl and "
@@ -1146,8 +1368,11 @@ def main(argv=None) -> int:
 
     _tag = "" if args.checkpoint == "ckpt.pt" else "_" + Path(args.checkpoint).stem.removeprefix("ckpt_")
 
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     def out_csv(name: str) -> Path:
-        return RESULTS / f"{name}{_tag}.csv"
+        return out_dir / f"{name}{_tag}.csv"
 
     cfg = load_config(args.config)
     completed = _load_completed_runs(RESULTS / "manifest.jsonl")
@@ -1198,7 +1423,8 @@ def main(argv=None) -> int:
         print(f"[run_all] aligning {run_id} ...")
         try:
             result = align_one_run(run_id, dandi_data, force_regenerate=args.regenerate,
-                                   n_permutations=args.n_permutations, checkpoint=args.checkpoint)
+                                   n_permutations=args.n_permutations, checkpoint=args.checkpoint,
+                                   match_n_draws=args.population_match_draws)
         except FileNotFoundError as e:
             print(f"[run_all]   skipped ({e})")
             continue
@@ -1330,7 +1556,15 @@ def main(argv=None) -> int:
     if len(session_df) == 0:
         print("[run_all] no session rows; skipping headline aggregation.")
     else:
-        for run_id, g in session_df[session_df.get("region") == "pooled"].groupby("run_id"):
+        # subpop == "all": a hierarchical run's pooled rows now also carry
+        # "worker"/"manager" (the primary per-population DV, see
+        # `align_one_run`) -- averaging those in with "all" here would
+        # silently mix three different-width populations into one number.
+        # This headline column stays the older, superseded whole-vector DV;
+        # the per-population breakdown is `alignment_by_population.csv`.
+        pooled = _native_width_rows(session_df)
+        pooled = pooled[(pooled.get("region") == "pooled") & (pooled.get("subpop", "all") == "all")]
+        for run_id, g in pooled.groupby("run_id"):
             ok = g[g.status == "ok"]
             if len(ok) == 0:
                 continue
@@ -1347,7 +1581,8 @@ def main(argv=None) -> int:
     if len(probe_df):
         probe_cols = ["run_id", "status", "raw_alignment", "noise_ceiling_upper", "normalized_alignment",
                       "n_shared_conditions", "accuracy_load1", "accuracy_load3"]
-        probe_pooled = probe_df[probe_df.region == "pooled"].reindex(columns=probe_cols)
+        probe_native = _native_width_rows(probe_df)
+        probe_pooled = probe_native[(probe_native.region == "pooled") & (probe_native.get("subpop", "all") == "all")].reindex(columns=probe_cols)
         probe_pooled = probe_pooled.rename(
             columns={c: f"probe_{c}" for c in ("raw_alignment", "noise_ceiling_upper", "normalized_alignment", "n_shared_conditions", "status")}
         )
@@ -1363,6 +1598,39 @@ def main(argv=None) -> int:
     probe_df.to_csv(probe_out, index=False)
     print(f"\n[run_all] wrote {probe_out}")
 
+    # Per-population table: the worker/manager estimate against every
+    # region, for both DVs -- the primary alignment DV for a hierarchical
+    # run (align_one_run), never restricted to a worker<->MTL / manager<->
+    # MFC pairing. A flat run contributes only its own "all" rows here,
+    # same as it always has.
+    population_rows = []
+    if len(session_df):
+        keyed = session_df.assign(match_units=_match_units_column(session_df))
+        for (run_id, region, subpop, match_units), g in keyed.groupby(["run_id", "region", "subpop", "match_units"]):
+            ok = g[g.status == "ok"]
+            if len(ok) == 0:
+                continue
+            population_rows.append({
+                "run_id": run_id, "region": region, "subpop": subpop, "match_units": match_units,
+                "model_id": ok.model_id.iloc[0], "S": ok.S.iloc[0], "M": ok.M.iloc[0], "P": ok.P.iloc[0],
+                "T": ok["T"].iloc[0], "D": ok.D.iloc[0], "seed": ok.seed.iloc[0],
+                **_aggregate_maintenance(ok.to_dict("records")),
+            })
+    population_df = pd.DataFrame(population_rows)
+    if len(probe_df):
+        probe_pop = probe_df.assign(match_units=_match_units_column(probe_df)).reindex(columns=[
+            "run_id", "region", "subpop", "match_units", "status", "raw_alignment", "noise_ceiling_upper",
+            "normalized_alignment", "n_shared_conditions",
+        ]).rename(columns={c: f"probe_{c}" for c in
+                            ("raw_alignment", "noise_ceiling_upper", "normalized_alignment", "n_shared_conditions", "status")})
+        population_df = (
+            population_df.merge(probe_pop, on=["run_id", "region", "subpop", "match_units"], how="outer")
+            if len(population_df) else probe_pop
+        )
+    population_out = out_csv("alignment_by_population")
+    population_df.to_csv(population_out, index=False)
+    print(f"[run_all] wrote {population_out} ({len(population_df)} rows)")
+
     from brainalign_wm.analysis.stats import mixed_effects_alignment
 
     # Main S*M*L model: POOLED-region rows only. MTL/MFC rows for the SAME
@@ -1373,14 +1641,15 @@ def main(argv=None) -> int:
     # inflating the effective N and anti-conservatively shrinking standard
     # errors on every fixed effect, found on adversarial review. Region
     # dissociation (H1/C2) gets its OWN separate model below instead.
-    # subpop == "all": pooled rows are only ever emitted at subpop="all"
-    # (align_one_run never requests worker/manager for region=None), so
-    # this is a no-op filter today -- kept explicit per §20.2.e so a future
-    # change to that scoping cannot silently reintroduce pseudo-replication
-    # here the way it would in the region-dissociation model below.
-    ok_sessions = session_df[
-        (session_df.get("region") == "pooled") & (session_df.get("status") == "ok")
-        & (session_df.get("subpop", "all") == "all")
+    # subpop == "all": pooled rows now also carry "worker"/"manager" for
+    # hierarchical runs (three rows per session), so this filter is a real
+    # guard, not a no-op -- without it the same session would enter this
+    # model three times, the pseudo-replication the region-dissociation
+    # model below already guards against explicitly.
+    native_sessions = _native_width_rows(session_df)
+    ok_sessions = native_sessions[
+        (native_sessions.get("region") == "pooled") & (native_sessions.get("status") == "ok")
+        & (native_sessions.get("subpop", "all") == "all")
     ] if len(session_df) else session_df
     accuracy_lookup = pd.DataFrame([{"run_id": r["run_id"], "accuracy": r.get("accuracy", {}).get("load3")} for r in completed])
     if len(ok_sessions) and ok_sessions["S"].nunique() >= 2 and ok_sessions["M"].nunique() >= 2 and ok_sessions["P"].nunique() >= 2 and len(ok_sessions) >= 6:
@@ -1395,7 +1664,7 @@ def main(argv=None) -> int:
 
     # H1/C2 region-dissociation model: restricted to MTL/MFC rows (excludes
     # pooled, which would double-count each session against its own
-    # subset) AND to subpop == "all" (§20.2.e) -- a hierarchical run's
+    # subset) AND to subpop == "all" -- a hierarchical run's
     # MTL/MFC rows now also carry "worker" and "manager" subpop rows for
     # the SAME session, and without this filter those are pseudo-
     # replication against `mixed_effects_alignment`'s `session` grouping
@@ -1403,9 +1672,9 @@ def main(argv=None) -> int:
     # contributing session appears at most twice here (once per region
     # family), so `session` is a valid, non-pseudo-replicated MixedLM
     # group for testing the region factor and its interaction with S.
-    region_rows = session_df[
-        (session_df.get("region").isin(["MTL", "MFC"])) & (session_df.get("status") == "ok")
-        & (session_df.get("subpop", "all") == "all")
+    region_rows = native_sessions[
+        (native_sessions.get("region").isin(["MTL", "MFC"])) & (native_sessions.get("status") == "ok")
+        & (native_sessions.get("subpop", "all") == "all")
     ] if len(session_df) else session_df
     if len(region_rows) and region_rows["region"].nunique() >= 2 and region_rows["S"].nunique() >= 2 and len(region_rows) >= 6:
         sub_region = region_rows.rename(columns={"normalized_alignment": "align_score"}).merge(accuracy_lookup, on="run_id", how="left")
@@ -1419,7 +1688,7 @@ def main(argv=None) -> int:
         print("\n[run_all] insufficient MTL/MFC coverage for the H1/C2 region-dissociation model "
               "(need both region levels, >=2 levels of S, and >=6 rows).")
 
-    # H1's actual anatomical dissociation (§20.2/D43): worker<->MTL,
+    # The anatomical dissociation itself: worker<->MTL,
     # manager<->MFC. The model above tests whether hierarchy (S) shifts
     # alignment differently for MTL than MFC on the POOLED (worker+manager)
     # vector -- a real but weaker question, since that vector is identical
@@ -1428,9 +1697,9 @@ def main(argv=None) -> int:
     # which only ever produce "all" or "not_applicable"), crossed with
     # region, so a positive `C(subpop)[manager]:C(region)[MFC]` interaction
     # is the dissociation itself, not a proxy for it.
-    subpop_rows = session_df[
-        (session_df.get("region").isin(["MTL", "MFC"])) & (session_df.get("status") == "ok")
-        & (session_df.get("subpop", "all").isin(["worker", "manager"]))
+    subpop_rows = native_sessions[
+        (native_sessions.get("region").isin(["MTL", "MFC"])) & (native_sessions.get("status") == "ok")
+        & (native_sessions.get("subpop", "all").isin(["worker", "manager"]))
     ] if len(session_df) else session_df
     if len(subpop_rows) and subpop_rows["subpop"].nunique() >= 2 and subpop_rows["region"].nunique() >= 2 and len(subpop_rows) >= 6:
         sub_subpop = subpop_rows.rename(columns={"normalized_alignment": "align_score"}).merge(accuracy_lookup, on="run_id", how="left")

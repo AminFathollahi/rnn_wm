@@ -55,6 +55,7 @@ def standardized_persistence_index(
     baseline_rates: np.ndarray,
     condition_labels: np.ndarray,
     seed: int = 0,
+    min_sd_fraction: float = 0.5,
 ) -> np.ndarray:
     """Scale-free companion to `persistent_activity_index`.
 
@@ -75,8 +76,18 @@ def standardized_persistence_index(
     condition's trials and the index is evaluated on the disjoint other
     half (both directions, averaged), so the maximum over conditions is not
     evaluated on the data that chose it -- an uncross-validated maximum is
-    biased upward by exactly the noise it selected on. Units with zero
-    across-trial variance yield NaN."""
+    biased upward by exactly the noise it selected on.
+
+    A saturated recurrent unit sits at a fixed point during maintenance
+    with an across-trial SD orders of magnitude below the rest of the
+    population, which sends the raw ratio into the thousands. A validity
+    threshold on the SD cannot bound it -- a unit just above any fixed
+    threshold still divides a normal-sized elevation by a near-zero
+    number. The denominator is therefore floored at `min_sd_fraction` of
+    the population's median positive SD, which caps every unit at
+    `elevation / floor` and rescales the floor with the data, so the index
+    stays invariant to a multiplicative rescaling. If no unit has positive
+    SD there is no floor to set and every unit is NaN."""
     maintain_by_trial = np.asarray(maintain_by_trial, dtype=float)
     labels = np.asarray(condition_labels)
     baseline = np.asarray(baseline_rates, dtype=float)
@@ -108,9 +119,12 @@ def standardized_persistence_index(
 
     preferred_activity = np.nanmean(evaluated, axis=0)
     sd = maintain_by_trial.std(axis=1, ddof=1) if n_trials > 1 else np.zeros(n_units)
+    positive = sd[sd > 0]
+    sd_floor = min_sd_fraction * np.median(positive) if positive.size else 0.0
+    sd_used = np.maximum(sd, sd_floor)
     index = np.full(n_units, np.nan)
-    valid = sd > 0
-    index[valid] = (preferred_activity[valid] - base[valid]) / sd[valid]
+    valid = sd_used > 0
+    index[valid] = (preferred_activity[valid] - base[valid]) / sd_used[valid]
     return index
 
 

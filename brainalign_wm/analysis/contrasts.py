@@ -1,15 +1,40 @@
 """Architectural contrasts estimated at the levels at which the design replicates.
 
+What is being estimated
+-----------------------
+The similarity between a network and a recording is computed separately for
+every (seed, session, region, population) cell and only then averaged.  A
+network's alignment is therefore the mean alignment of independently trained
+networks, not the alignment of an ensemble: averaging seed-wise RDMs before
+comparing them would estimate the latter, which is a different quantity.
+
 Two units of replication are respected at once.  The training seed is the unit
 for the architectural comparison: every contrast pairs a cell against its
-reference seed by seed.  The patient is the unit for the neural measurement:
-the maintenance alignment of a run is a mean over recording sessions, 57
-patients supply the 65 sessions, and sessions from one patient are not
-independent, so every interval resamples patients (carrying all of a patient's
-sessions together) rather than sessions.
+reference seed by seed.  The patient is the unit for the neural measurement --
+57 patients supply the 65 sessions and sessions from one patient are not
+independent -- so every interval resamples patients, carrying all of a
+patient's sessions together.
 
-Runs trained under different supervision signals are never pooled: every
-estimate is produced within one training signal.
+Two neural weightings of the same per-session values are reported, as two
+named estimands rather than one right and one wrong answer:
+
+* equal-session -- the plain mean over a run's sessions, which weights a
+  patient by how many sessions that patient contributed;
+* equal-patient -- sessions averaged within a patient first, then patients
+  averaged with equal weight.
+
+They coincide only when every patient contributed the same number of
+sessions.  Each one's bootstrap resamples at the level its point estimate
+weights, so interval and point estimate answer the same question.
+
+Probe alignment is a third estimand and is never relabelled as either of the
+above: it is one similarity per (seed, region, population) against a
+pseudopopulation pooled across sessions, so it has no per-patient
+decomposition and its interval resamples seeds alone.
+
+Named regions stay separate throughout; no subject or run is ever assigned
+its best-scoring region.  Runs trained under different supervision signals
+are never pooled: every estimate is produced within one training signal.
 """
 from __future__ import annotations
 
@@ -88,6 +113,23 @@ def load_patient_folds(path: Path) -> dict:
     return json.loads(Path(path).read_text())["folds"]
 
 
+# What each dependent variable estimates, carried through to the output so a
+# reader never has to infer it from the column name.
+ESTIMANDS = {
+    "maintenance_signed_alignment": (
+        "mean over a run's recording sessions of the per-(seed, session, region, population) "
+        "similarity; a patient is weighted by how many sessions it contributed"
+    ),
+    "maintenance_signed_alignment_equal_patient": (
+        "sessions averaged within a patient, then patients averaged with equal weight"
+    ),
+    "probe_alignment": (
+        "one similarity per (seed, region, population) against a pseudopopulation pooled "
+        "across sessions; not a mean of per-patient similarities"
+    ),
+}
+
+
 @dataclass
 class AlignmentPanel:
     """Per-run values of one dependent variable plus the resampling structure
@@ -98,6 +140,10 @@ class AlignmentPanel:
     runs: pd.DataFrame  # indexed by run_id: model_id, seed, signal, accuracy_load3, value
     session_values: np.ndarray | None = None  # [session, run] aligned to runs.index
     session_patient: np.ndarray | None = None
+    estimand: str = ""
+    region: str = "pooled"
+    population: str = "all"
+    match_units: str = "native"
 
     def point_values(self) -> np.ndarray:
         return self.runs["value"].to_numpy(dtype=float)
@@ -114,18 +160,47 @@ class AlignmentPanel:
         for b in range(n_boot):
             drawn = rng.integers(0, len(patients), len(patients))
             rows = np.concatenate([rows_by_patient[i] for i in drawn])
-            out[b] = self.session_values[rows].mean(axis=0)
+            out[b] = np.nanmean(self.session_values[rows], axis=0)
         return out
 
 
-def _population_rows(table: pd.DataFrame, region: str, population: str) -> pd.DataFrame:
-    """Rows of a (run, region, subpop) table for one population: a
+def _population_rows(
+    table: pd.DataFrame, region: str, population: str, match_units: str = "native"
+) -> pd.DataFrame:
+    """Rows of a (run, region, subpop, width) table for one population: a
     hierarchical run (S=1) contributes its named `worker`/`manager`
     subpopulation, a flat run (S=0, one population only) always
     contributes its `subpop="all"` row -- the flat side of a
     flat-vs-population contrast, never a restriction to hierarchical runs.
-    `population="all"` reproduces the original pooled, whole-vector rows."""
+    `population="all"` reproduces the original pooled, whole-vector rows.
+
+    `match_units` picks the width the rows were scored at: `"native"` is
+    each population at its own width, and a numeric string is the common
+    width both sides of a contrast were subsampled to.  A population
+    already at or under that width has no subsampled row, so its native
+    row stands in for it -- that is what makes a common width readable
+    from one selection."""
     in_region = table[table["region"] == region]
+    if "subpop" not in in_region.columns:
+        # A table written before populations were scored separately carries
+        # the whole-vector estimate alone; it can stand in for `"all"` and
+        # for nothing else.
+        if population != "all":
+            return in_region.iloc[:0]
+        in_region = in_region.assign(subpop="all")
+    if "match_target_units" not in in_region.columns:
+        if match_units != "native":
+            return in_region.iloc[:0]
+    elif match_units == "native":
+        in_region = in_region[in_region["match_target_units"].isna()]
+    else:
+        width = float(match_units)
+        native = in_region["match_target_units"].isna()
+        in_region = in_region[native | in_region["match_target_units"].eq(width)]
+        key = [c for c in ("run_id", "session", "subpop") if c in in_region.columns]
+        in_region = in_region.sort_values(
+            "match_target_units", na_position="last", kind="stable"
+        ).drop_duplicates(key, keep="first")
     if population == "all":
         return in_region[in_region["subpop"] == "all"]
     is_hier = in_region["S"].astype(int) == 1
@@ -139,8 +214,10 @@ def build_panels(
     region: str = "pooled",
     population: str = "all",
     probe_df: pd.DataFrame | None = None,
+    match_units: str = "native",
 ) -> dict:
-    """One panel per dependent variable, for one (region, population) slice.
+    """One panel per dependent variable, for one (region, population, width)
+    slice.
 
     Maintenance alignment is rebuilt from the per-session table so that a fold
     of patients can be selected and so that patients can be resampled; the run
@@ -149,11 +226,13 @@ def build_panels(
     slice). Probe alignment is computed against a condition-averaged neural
     matrix and has no per-session decomposition, so its interval resamples
     seeds alone; it is read from the run table for the original pooled/"all"
-    slice and from `probe_df` (one row per run x region x subpop) otherwise.
+    slice and from `probe_df` (one row per run x region x subpop x width)
+    otherwise.
 
-    `region`/`population` default to the original whole-vector pooled DV, so
-    every pre-existing caller is unaffected. A non-default slice names its dv
-    `"{dv}__{region}__{population}"` so the two are never confused in output.
+    `region`/`population`/`match_units` default to the original whole-vector
+    pooled DV at native width, so every pre-existing caller is unaffected. A
+    non-default slice names its dv `"{dv}__{region}__{population}"` so the two
+    are never confused in output.
     """
     runs = run_df.set_index("run_id")
     base = pd.DataFrame(
@@ -164,7 +243,7 @@ def build_panels(
             "accuracy_load3": runs["accuracy_load3"].astype(float),
         }
     )
-    is_default_slice = region == "pooled" and population == "all"
+    is_default_slice = region == "pooled" and population == "all" and match_units == "native"
     suffix = "" if is_default_slice else f"__{region}__{population}"
 
     panels = {}
@@ -172,7 +251,7 @@ def build_panels(
     maintenance = base.copy()
     session_values = session_patient = None
     if session_df is not None and len(session_df):
-        sel = _population_rows(session_df, region, population)
+        sel = _population_rows(session_df, region, population, match_units)
         if fold_patients is not None:
             sel = sel[sel["patient"].astype(str).isin(fold_patients)]
         wide = sel.pivot_table(
@@ -186,8 +265,12 @@ def build_panels(
             sel.drop_duplicates("session").set_index("session")["patient"].astype(str)
         )
         session_patient = patient_of_session.reindex(wide.index).to_numpy()
+        maintenance["n_sessions"] = wide.notna().sum(axis=0).to_numpy(dtype=int)
+        patient_frame = wide.assign(_patient=session_patient).groupby("_patient", sort=True).mean()
+        maintenance["n_patients"] = patient_frame.notna().sum(axis=0).to_numpy(dtype=int)
     elif is_default_slice:
         maintenance["value"] = runs["maintenance_signed_raw_alignment"].astype(float)
+    slice_kwargs = dict(region=region, population=population, match_units=match_units)
     dv = f"maintenance_signed_alignment{suffix}"
     panels[dv] = AlignmentPanel(
         dv=dv,
@@ -195,20 +278,38 @@ def build_panels(
         runs=maintenance,
         session_values=session_values,
         session_patient=session_patient,
+        estimand=ESTIMANDS["maintenance_signed_alignment"],
+        **slice_kwargs,
     )
+    if session_values is not None:
+        equal_patient = base.loc[patient_frame.columns].copy()
+        equal_patient["value"] = patient_frame.mean(axis=0).to_numpy(dtype=float)
+        equal_patient["n_sessions"] = maintenance.loc[equal_patient.index, "n_sessions"]
+        equal_patient["n_patients"] = patient_frame.notna().sum(axis=0).to_numpy(dtype=int)
+        patient_dv = f"maintenance_signed_alignment_equal_patient{suffix}"
+        panels[patient_dv] = AlignmentPanel(
+            dv=patient_dv,
+            cluster_unit="patient",
+            runs=equal_patient,
+            session_values=patient_frame.to_numpy(dtype=float),
+            session_patient=patient_frame.index.to_numpy(),
+            estimand=ESTIMANDS["maintenance_signed_alignment_equal_patient"],
+            **slice_kwargs,
+        )
 
     probe = base.copy()
     if is_default_slice or probe_df is None:
         probe["value"] = runs["probe_raw_alignment"].astype(float)
     else:
-        sel = _population_rows(probe_df[probe_df["status"] == "ok"], region, population)
+        sel = _population_rows(probe_df[probe_df["status"] == "ok"], region, population, match_units)
         vals = sel.drop_duplicates("run_id").set_index("run_id")["raw_alignment"].astype(float)
         probe = base.loc[[r for r in base.index if r in vals.index]].copy()
         probe["value"] = vals.reindex(probe.index)
     probe = probe[np.isfinite(probe["value"])]
     dv = f"probe_alignment{suffix}"
     panels[dv] = AlignmentPanel(
-        dv=dv, cluster_unit="seed", runs=probe
+        dv=dv, cluster_unit="seed", runs=probe,
+        estimand=ESTIMANDS["probe_alignment"], **slice_kwargs,
     )
     return panels
 
@@ -219,6 +320,12 @@ def _cell_columns(panel: AlignmentPanel, cell: str, signal: str) -> pd.Series:
     return pd.Series(np.arange(len(rows))[rows.index.get_indexer(sel.index)], index=sel["seed"].to_numpy())
 
 
+STAT_FIELDS = (
+    "effect", "ci_lo", "ci_hi", "bootstrap_se", "p_value", "mde",
+    "residual_accuracy_load3", "max_accuracy_load3_spread", "min_accuracy_load3",
+)
+
+
 def paired_seed_contrast(
     panel: AlignmentPanel,
     boot_values: np.ndarray,
@@ -226,19 +333,38 @@ def paired_seed_contrast(
     signal: str,
     rng: np.random.Generator,
     accuracy_tolerance: float | None = None,
-) -> dict | None:
+) -> dict:
     """Seed-paired weighted combination of cells, e.g. {a: +1, b: -1} for a
     difference or {ab: +1, a: -1, b: -1, baseline: +1} for the amount by which
     two arms together exceed the sum of their separate effects.
 
-    The interval is a two-level bootstrap: patients are resampled inside
-    `boot_values` (the neural unit) and seeds are resampled here, paired, so
+    The interval is a two-level bootstrap: the neural clustering unit is
+    resampled inside `boot_values` and seeds are resampled here, paired, so
     the same seed is drawn for every cell in the combination.
+
+    Always returns a row.  A combination this training signal does not
+    license -- a cell it never trained, or too few seeds shared across the
+    cells -- comes back with `status` naming the reason and the estimates
+    left missing, so a gap in coverage is visible in the table instead of
+    being silently absent from it.
     """
     columns = {cell: _cell_columns(panel, cell, signal) for cell in cell_weights}
+    coverage = {
+        "n_runs_by_cell": "|".join(f"{cell}:{len(columns[cell])}" for cell in sorted(columns)),
+        "hierarchical_cells": ",".join(sorted(c for c in cell_weights if is_hierarchical(c))),
+        "n_seeds": 0,
+        "n_sessions_in_support": 0,
+        "complete_session_support": False,
+    }
+    blank = {field: float("nan") for field in STAT_FIELDS}
+    absent = sorted(cell for cell, col in columns.items() if len(col) == 0)
+    if absent:
+        return {**blank, **coverage, "status": "cells_not_trained_under_signal:" + ",".join(absent)}
+
     seeds = sorted(set.intersection(*(set(c.index) for c in columns.values())))
     accuracy = panel.runs["accuracy_load3"].to_numpy(dtype=float)
     index = {cell: np.array([columns[cell][s] for s in seeds], dtype=int) for cell in cell_weights}
+    gap = np.zeros(0)
     accuracy_by_cell = np.zeros((len(cell_weights), 0))
     if seeds:
         accuracy_by_cell = np.stack([accuracy[index[cell]] for cell in cell_weights])
@@ -249,8 +375,24 @@ def paired_seed_contrast(
             index = {cell: index[cell][keep] for cell in cell_weights}
             gap = gap[keep]
             accuracy_by_cell = accuracy_by_cell[:, keep]
+    coverage["n_seeds"] = len(seeds)
     if len(seeds) < 2:
-        return None
+        reason = "too_few_seeds_within_accuracy_tolerance" if accuracy_tolerance is not None else "too_few_paired_seeds"
+        return {**blank, **coverage, "status": reason}
+
+    used = np.concatenate([index[cell] for cell in cell_weights])
+    if panel.session_values is not None:
+        # Seed and neural-observation means commute only over a table with no
+        # holes, so the support the difference is actually taken over is
+        # reported rather than assumed.
+        available = np.isfinite(panel.session_values[:, used])
+        shared_rows = available.all(axis=1)
+        coverage["n_sessions_in_support"] = int(shared_rows.sum())
+        coverage["complete_session_support"] = bool(available.all())
+    for column in ("n_sessions", "n_patients"):
+        if column in panel.runs:
+            coverage[f"min_observed_{column}"] = int(panel.runs.iloc[used][column].min())
+
     point = panel.point_values()
     combine = lambda values: sum(w * values[..., index[cell]] for cell, w in cell_weights.items())
     effect = float(np.mean(combine(point)))
@@ -261,16 +403,17 @@ def paired_seed_contrast(
     above, below = float(np.mean(replicates >= 0.0)), float(np.mean(replicates <= 0.0))
     signed_accuracy = combine(accuracy)
     return {
+        "status": "ok",
         "effect": effect,
         "ci_lo": float(np.percentile(replicates, 2.5)),
         "ci_hi": float(np.percentile(replicates, 97.5)),
         "bootstrap_se": se,
         "p_value": float(min(1.0, 2.0 * min(above, below))),
-        "n_seeds": len(seeds),
         "mde": MDE_MULTIPLIER * se,
         "residual_accuracy_load3": float(np.mean(signed_accuracy)),
         "max_accuracy_load3_spread": float(np.max(gap)),
         "min_accuracy_load3": float(np.mean(accuracy_by_cell.min(axis=0))),
+        **coverage,
     }
 
 
@@ -327,3 +470,12 @@ def enabled_arm_count(model_id: str) -> int:
     if bits is None:
         raise ValueError(f"{model_id!r} does not start with the five arm bits")
     return sum(int(bit) for bit in bits.group(1))
+
+
+def is_hierarchical(model_id: str) -> bool:
+    """Whether a cell has the worker/manager split, read from its first arm
+    bit.  A contrast between two cells that both lack it has no separate
+    worker or manager side: each population slice reads the same flat
+    vectors, so its rows repeat the pooled ones."""
+    bits = _ARM_BITS.match(model_id)
+    return bits is not None and bits.group(1)[0] == "1"

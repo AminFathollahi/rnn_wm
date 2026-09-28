@@ -122,6 +122,28 @@ def test_fold_restriction_uses_only_the_requested_patients():
     assert "P3" not in set(panel.session_patient)
 
 
+def test_equal_patient_and_equal_session_estimands_remain_distinct():
+    runs, sessions = _synthetic_tables({("M00000", "SUP"): 0.0}, n_seeds=1, n_patients=2, noise=0.0)
+    sessions.loc[sessions["patient"].eq("P0"), "raw_alignment"] = 0.0
+    sessions.loc[sessions["patient"].eq("P1"), "raw_alignment"] = 1.0
+    panels = build_panels(runs, sessions)
+    equal_session = panels["maintenance_signed_alignment"]
+    equal_patient = panels["maintenance_signed_alignment_equal_patient"]
+    assert equal_session.point_values()[0] == pytest.approx(1 / 3)
+    assert equal_patient.point_values()[0] == pytest.approx(1 / 2)
+    assert equal_patient.runs.iloc[0]["n_sessions"] == 3
+    assert equal_patient.runs.iloc[0]["n_patients"] == 2
+
+
+def test_equal_patient_bootstrap_matches_its_point_weights():
+    runs, sessions = _synthetic_tables({("M00000", "SUP"): 0.0}, n_seeds=1, n_patients=2, noise=0.0)
+    sessions.loc[sessions["patient"].eq("P0"), "raw_alignment"] = 0.0
+    sessions.loc[sessions["patient"].eq("P1"), "raw_alignment"] = 1.0
+    panel = build_panels(runs, sessions)["maintenance_signed_alignment_equal_patient"]
+    boot = panel.bootstrap_values(20000, np.random.default_rng(0))
+    assert boot.mean() == pytest.approx(panel.point_values()[0], abs=0.01)
+
+
 def test_knock_out_cell_complements_add_one_cell():
     for arm in "SMPTD":
         assert add_one_cell(arm).count("1") == 1
@@ -141,3 +163,94 @@ def test_only_untagged_battery_cells_match_the_core_pattern():
     assert CORE_CELL.match("M11111")
     assert not CORE_CELL.match("M11111_energy")
     assert not CORE_CELL.match("M10L")
+
+
+def _population_tables(worker=0.30, manager=-0.10, flat=0.10, n_seeds=4):
+    """A flat cell and a hierarchical cell, the latter scored once per
+    population, with an extra row for each population wide enough to be
+    subsampled down to 24 units."""
+    sessions = [("s0", "P0"), ("s1", "P1"), ("s2", "P2")]
+    runs, per_session = [], []
+    for cell, values in (
+        ("M00000", {"all": flat}),
+        ("M00010", {"all": flat + 0.02}),
+        ("M10000", {"worker": worker, "manager": manager, "all": 0.5}),
+    ):
+        for seed in range(n_seeds):
+            run_id = f"{cell}_SUP_s{seed}"
+            runs.append(dict(
+                run_id=run_id, model_id=cell, S=int(cell[1]), M=0, P=0, T=0, D=0, seed=seed,
+                maintenance_signed_raw_alignment=0.0, probe_raw_alignment=0.0,
+                accuracy_load1=0.95, accuracy_load3=0.90,
+            ))
+            for subpop, value in values.items():
+                for session, patient in sessions:
+                    per_session.append(dict(
+                        run_id=run_id, session=session, region="MTL", subpop=subpop,
+                        patient=patient, raw_alignment=value, S=int(cell[1]),
+                        match_target_units=float("nan"),
+                    ))
+                    if subpop != "manager":
+                        per_session.append(dict(
+                            run_id=run_id, session=session, region="MTL", subpop=subpop,
+                            patient=patient, raw_alignment=value - 0.05, S=int(cell[1]),
+                            match_target_units=24.0,
+                        ))
+    return pd.DataFrame(runs), pd.DataFrame(per_session)
+
+
+def test_each_population_is_paired_against_the_flat_run_separately():
+    runs, sessions = _population_tables()
+    rng = np.random.default_rng(0)
+    effects = {}
+    for population in ("worker", "manager"):
+        panel = build_panels(runs, sessions, region="MTL", population=population)[
+            f"maintenance_signed_alignment__MTL__{population}"
+        ]
+        boot = panel.bootstrap_values(200, rng)
+        effects[population] = paired_seed_contrast(
+            panel, boot, {"M10000": 1.0, "M00000": -1.0}, "SUP", rng
+        )
+    assert effects["worker"]["effect"] == pytest.approx(0.20)
+    assert effects["manager"]["effect"] == pytest.approx(-0.20)
+    assert effects["worker"]["hierarchical_cells"] == "M10000"
+
+
+def test_a_contrast_between_two_flat_cells_names_no_hierarchical_cell():
+    runs, sessions = _population_tables()
+    panel = build_panels(runs, sessions, region="MTL", population="worker")[
+        "maintenance_signed_alignment__MTL__worker"
+    ]
+    rng = np.random.default_rng(0)
+    result = paired_seed_contrast(
+        panel, panel.bootstrap_values(50, rng), {"M00010": 1.0, "M00000": -1.0}, "SUP", rng
+    )
+    assert result["hierarchical_cells"] == ""
+    assert result["effect"] == pytest.approx(0.02)
+
+
+def test_common_width_slice_prefers_the_subsampled_row_where_one_exists():
+    runs, sessions = _population_tables()
+    native = build_panels(runs, sessions, region="MTL", population="worker")[
+        "maintenance_signed_alignment__MTL__worker"
+    ]
+    matched = build_panels(runs, sessions, region="MTL", population="worker", match_units="24")[
+        "maintenance_signed_alignment__MTL__worker"
+    ]
+    assert native.runs.loc["M10000_SUP_s0", "value"] == pytest.approx(0.30)
+    assert matched.runs.loc["M10000_SUP_s0", "value"] == pytest.approx(0.25)
+    # The manager is already at the target width, so its own row stands in.
+    manager = build_panels(runs, sessions, region="MTL", population="manager", match_units="24")[
+        "maintenance_signed_alignment__MTL__manager"
+    ]
+    assert manager.runs.loc["M10000_SUP_s0", "value"] == pytest.approx(-0.10)
+
+
+def test_a_population_absent_from_a_table_yields_no_rows_rather_than_flat_ones():
+    runs, sessions = _population_tables()
+    sessions = sessions[sessions["subpop"] != "worker"]
+    panel = build_panels(runs, sessions, region="MTL", population="worker")[
+        "maintenance_signed_alignment__MTL__worker"
+    ]
+    assert "M10000_SUP_s0" not in panel.runs.index
+    assert "M00000_SUP_s0" in panel.runs.index

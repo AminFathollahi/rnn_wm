@@ -216,6 +216,7 @@ def within_session_noise_ceiling(
     ds, session: str, region, epoch: str, bin_ms: int,
     condition_fn: Callable = _default_coarse_condition, n_folds: int = 3, n_resamples: int = 8, seed: int = 0,
     stratified: bool = False, min_trials_per_condition: int = 2,
+    condition_filter: Callable | None = None,
 ) -> tuple[float, float]:
     """(lower, upper) reliability of ONE session's own RDM, via repeated
     DISJOINT split-half resamples of that session's own trials -- used for
@@ -248,7 +249,8 @@ def within_session_noise_ceiling(
     `_session_condition_rdm`'s N1 fix, so the ceiling is estimated on
     exactly the same (load-stratified, block-diagonal) representation the
     raw alignment uses -- a mismatched ceiling would silently misnormalize
-    the raw score.
+    the raw score. `condition_filter` restricts both halves to the same
+    selected condition block before resampling.
 
     `n_resamples`/`n_folds` default low (8/3): each half is itself a full
     crossnobis computation, so a resample costs roughly 2x a single
@@ -259,6 +261,10 @@ def within_session_noise_ceiling(
     if data is None:
         return 0.0, 0.0
     labels = [condition_fn(row) for row in session_trials.itertuples()]
+    if condition_filter is not None:
+        keep = [index for index, label in enumerate(labels) if condition_filter(label)]
+        data = data[keep]
+        labels = [labels[index] for index in keep]
 
     half_rdms = []
     conds0 = None

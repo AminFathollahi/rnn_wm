@@ -43,3 +43,10 @@ venv/
 
 # Work queue
 tasks.md
+
+# Documents and results stay local; only code, configuration and the README are versioned
+*.md
+!README.md
+*.tex
+*.pdf
+docs/

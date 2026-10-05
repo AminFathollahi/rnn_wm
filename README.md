@@ -1,6 +1,6 @@
 # Brain-aligned recurrent networks for working memory
 
-Status as of October 2026. Work in progress: the last training arms are unfinished, and
+Status as of 3 October 2026, the date of the last training run and result update. Work in progress: the last training arms are unfinished, and
 several analyses have not yet been run on all trained networks.
 
 ## What the project asks
@@ -80,7 +80,7 @@ network, and a planted-signal sensitivity curve. Supporting analyses: cross-temp
 condition-marginalised PCA (not a full demixed-PCA fit), fixed points, graph measures, and
 interventions that disrupt hidden activity and fast-weight traces separately.
 
-## Progress (October 2026)
+## Progress (as of 3 October 2026)
 
 **Trained.** 392 networks are available for replay: 192 core runs (120 SUP = 15 cells x 8
 seeds; 72 RL = 7 cells x 8 seeds plus 8 hierarchical cells x 2 seeds), 32 local-learning runs

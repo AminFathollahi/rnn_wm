@@ -239,7 +239,9 @@ def main(argv=None) -> int:
 
     cfg = _load_cfg()
     dandi_data = _dandi_data(cfg)
-    df = _model_df(args.run_id, args.checkpoint)
+    from brainalign_wm.analysis.run_all import _valid_model_trials
+
+    df = _valid_model_trials(_model_df(args.run_id, args.checkpoint), dandi_data)
     region = args.region
 
     t0 = time.time()

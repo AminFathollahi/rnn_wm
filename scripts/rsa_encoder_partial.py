@@ -31,7 +31,7 @@ from brainalign_wm.analysis.rsa import compare_rdms, normalized_alignment
 from brainalign_wm.analysis.run_all import (
     MIN_SHARED_CONDITIONS, MIN_TRIALS_PER_CONDITION, REGIONS,
     _coarse_condition, _encoder_only_patterns_for_session, _filter_min_trials,
-    _probe_alignment_for_run, _shared_conditions_or_none,
+    _probe_alignment_for_run, _shared_conditions_or_none, _valid_model_trials,
 )
 from brainalign_wm.analysis.task_structure import semipartial_correlation
 from brainalign_wm.config import get_path, load_config
@@ -121,7 +121,7 @@ def analyse_run(run_id: str, dandi_data) -> list[dict]:
     log_path = activity_log_path(run_id)
     if not log_path.exists():
         log_path = generate_activity_log(run_id, dandi_data)
-    model_df = read_log(log_path)
+    model_df = _valid_model_trials(read_log(log_path), dandi_data)
 
     encoder_rdm, encoder_conds = _encoder_probe_rdm(model_df, dandi_data)
     rows = []

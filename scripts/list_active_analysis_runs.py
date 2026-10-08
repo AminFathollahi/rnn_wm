@@ -31,6 +31,9 @@ def main() -> int:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Smoke and dev probes reuse campaign run ids; continuation rows carry no tier.
+        if record.get("tier", "full") != "full":
+            continue
         latest[record.get("run_id", "")] = record
 
     run_ids = []

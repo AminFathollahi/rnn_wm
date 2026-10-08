@@ -35,3 +35,19 @@ def test_run_id_must_be_exactly_cell_signal_seed():
     assert not _qualifies("M00000", "legacy", "M00000_legacy_s0")
     # a tag on the run id that the cell selector does not carry
     assert not _qualifies("M00000", "SUP", "M00000_dynsyn_SUP_s0")
+
+
+def test_later_smoke_row_neither_listed_nor_hides_full_row(tmp_path, monkeypatch, capsys):
+    import json
+    import scripts.list_active_analysis_runs as listing
+
+    rows = [
+        {"run_id": "M00000_SUP_s0", "model_id": "M00000", "supervision": "SUP", "status": "completed", "tier": "full"},
+        {"run_id": "M00000_SUP_s0", "model_id": "M00000", "supervision": "SUP", "status": "error", "tier": "smoke"},
+        {"run_id": "M00000_SUP_s1", "model_id": "M00000", "supervision": "SUP", "status": "completed", "tier": "smoke"},
+        {"run_id": "M00000_contwm_SUP_s0", "model_id": "M00000_contwm", "supervision": "SUP", "status": "completed"},
+    ]
+    (tmp_path / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    monkeypatch.setattr(listing, "get_path", lambda name: tmp_path)
+    listing.main()
+    assert capsys.readouterr().out.split() == ["M00000_SUP_s0", "M00000_contwm_SUP_s0"]

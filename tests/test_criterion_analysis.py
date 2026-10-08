@@ -7,9 +7,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from brainalign_wm.analysis.contrasts import training_signal
 from brainalign_wm.analysis.run_all import _is_ablation_or_catch_variant, _load_completed_runs
 from brainalign_wm.training.generate_activity_logs import _parse_run_id, _run_id_extras, activity_log_path
-from scripts import merge_analysis_shards, run_perf_matched_baselines
+from scripts import list_active_analysis_runs, merge_analysis_shards, run_perf_matched_baselines
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ REQUIRED = (
 )
 
 
-def test_performance_controls_are_signal_qualified_and_resumable(tmp_path, monkeypatch):
+def test_performance_controls_are_signal_qualified_and_resumable(tmp_path, monkeypatch, capsys):
     results = tmp_path / "results"
     manifest = results / "manifest.jsonl"
     results.mkdir()
@@ -74,7 +75,13 @@ def test_performance_controls_are_signal_qualified_and_resumable(tmp_path, monke
     assert {record["run_id"] for record in _load_completed_runs(manifest)} == run_ids
     assert len(list(results.glob("resolved_config_perf_*.yaml"))) == 6
 
+    monkeypatch.setattr(list_active_analysis_runs, "get_path", lambda name: results)
+    capsys.readouterr()
+    assert list_active_analysis_runs.main() == 0
+    assert set(capsys.readouterr().out.split()) == run_ids
+
     for record in full_records:
+        assert training_signal(record["run_id"]) == record["supervision"]
         model_id, *_, seed = _parse_run_id(record["run_id"])
         assert seed == 0
         assert record["supervision"] in model_id.split("_")
